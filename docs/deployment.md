@@ -8,6 +8,15 @@
 - 持久化：Cloudflare D1
 - 图片：Cloudinary
 
+生产环境推荐使用自定义域名同源路由：
+
+```text
+https://game.example.com        -> Pages 前端
+https://game.example.com/api/*  -> Worker API 和 WebSocket
+```
+
+同源路由可以让页面、HTTP API 和 WebSocket 都走同一个 origin，减少 CORS 预检和跨域代理链路差异。跨域 `workers.dev` API 地址只建议用于首次联调或没有自定义域名的临时部署。
+
 目录：
 
 - [本地开发](#本地开发)
@@ -86,8 +95,9 @@ npm run build
 4. 部署 Worker：本地手动部署或 Git 连接部署二选一。
 5. 写入 Worker secrets。
 6. 连接 GitHub 自动部署 Pages。
-7. 回填真实 `ALLOWED_ORIGIN`，按你的 Worker 部署方式更新 Worker。
-8. 如果有自定义域名，再配置同源 `/api/*`。
+7. 绑定自定义域名，并配置 Worker 同源 `/api/*` route。
+8. 回填真实 `ALLOWED_ORIGIN`，按你的 Worker 部署方式更新 Worker。
+9. 删除 Pages 的 `NEXT_PUBLIC_API_BASE_URL`，重新部署 Pages。
 
 ### 1. 创建 D1
 
@@ -230,7 +240,7 @@ Build output directory: pages-dist
 Root directory: 项目根目录
 ```
 
-在 `Environment variables (advanced)` 添加必填变量：
+如果还没有配置同源 `/api/*`，在 `Environment variables (advanced)` 添加临时跨域 API 地址：
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=https://anime-master-game-api.<your-name>.workers.dev
@@ -238,7 +248,14 @@ NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=your-cloud-name
 NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=your-unsigned-upload-preset
 ```
 
-如果已经配置了自定义域名同源 `/api/*`，删除 `NEXT_PUBLIC_API_BASE_URL`，不要保留空值。这样 Pages 只需要填 Cloudinary 的两个变量。
+如果已经配置了自定义域名同源 `/api/*`，不要配置 `NEXT_PUBLIC_API_BASE_URL`。Pages 只需要填 Cloudinary 的两个变量：
+
+```env
+NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=your-cloud-name
+NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=your-unsigned-upload-preset
+```
+
+不要把 `NEXT_PUBLIC_API_BASE_URL` 保留为空字符串；直接删除这个环境变量。
 
 其他前端上传参数已有默认值，通常不用填：
 
@@ -281,16 +298,16 @@ npm run worker:deploy
 git push
 ```
 
-### 5. 自定义域名同源 `/api/*`
+### 5. 推荐：自定义域名同源 `/api/*`
 
-如果你有自定义域名，推荐最终做成：
+生产环境推荐做成：
 
 ```text
 https://game.example.com        -> Pages 前端
 https://game.example.com/api/*  -> Worker API 和 WebSocket
 ```
 
-这样 API 和页面同源，可以减少 CORS `OPTIONS`。
+这样 API 和页面同源，可以减少 CORS `OPTIONS`，也能避免跨域 Worker 地址、Pages 地址和浏览器 WebSocket 行为不一致导致的实时同步问题。
 
 步骤：
 
@@ -346,6 +363,17 @@ npm run worker:deploy
 # Git 连接部署：
 git push
 ```
+
+5. 检查生产页面的 API 地址：
+
+打开浏览器开发者工具，确认请求和 WebSocket 都是同源地址：
+
+```text
+https://game.example.com/api/rpc
+wss://game.example.com/api/realtime/room%3A.../ws
+```
+
+如果仍然看到 `https://anime-master-game-api.<your-name>.workers.dev` 或 `wss://anime-master-game-api.<your-name>.workers.dev`，说明 Pages 还在使用旧的 `NEXT_PUBLIC_API_BASE_URL`，需要删除该环境变量并重新部署 Pages。
 
 ## 更新部署
 
@@ -473,6 +501,26 @@ git push
 ```
 
 改完 Pages 环境变量后，在 Pages 的 `Deployments` 里重新运行最近一次 Git deployment。
+
+### 多浏览器游戏内状态不同步
+
+现象：房主点击开始游戏、返回大厅能同步，但揭露方块、下一题、判分后玩家端不动，刷新后才显示最新状态。
+
+优先检查生产环境是否使用同源 `/api/*`：
+
+```text
+推荐：https://game.example.com/api/*
+临时：https://anime-master-game-api.<your-name>.workers.dev
+```
+
+如果已经有自定义域名，按“推荐：自定义域名同源 `/api/*`”配置：
+
+- Worker route pattern：`game.example.com/api/*`
+- Pages 删除 `NEXT_PUBLIC_API_BASE_URL`
+- Worker `ALLOWED_ORIGIN = "https://game.example.com"`
+- 重新部署 Worker 和 Pages
+
+同时确认 Cloudflare 没有给 `/api/*` 配缓存规则，Network 里的 WebSockets 功能处于开启状态。
 
 ### 线上提示数据库表不存在
 

@@ -25,10 +25,11 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
 
 [observability]
 enabled = true
+head_sampling_rate = 0.01
 
 [observability.logs]
 enabled = true
 
 [observability.traces]
 enabled = true
-head_sampling_rate = 0.1
+head_sampling_rate = 0.01
