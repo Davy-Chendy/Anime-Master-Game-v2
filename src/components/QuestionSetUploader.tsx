@@ -183,7 +183,7 @@ export function QuestionSetUploader({
       return {
         items: [],
         labeledCount: 0,
-        error: error instanceof Error ? error.message : "JSONL 格式错误。",
+        error: error instanceof Error ? error.message : "题单JSONL格式错误。",
       };
     }
   }, [urlText]);
@@ -357,7 +357,7 @@ export function QuestionSetUploader({
       resetCreatedSet();
       clearError();
     } catch {
-      onError("读取 JSONL 文件失败，请重试。");
+      onError("读取题单JSONL文件失败，请重试。");
     } finally {
       if (jsonlInputRef.current) {
         jsonlInputRef.current.value = "";
@@ -428,7 +428,7 @@ export function QuestionSetUploader({
     clearError();
 
     if (!urlText.trim()) {
-      onError("请先粘贴图片 URL，或上传 JSONL 文件。");
+      onError("请先粘贴图片 URL，或上传题单JSONL文件。");
       return;
     }
 
@@ -512,7 +512,7 @@ export function QuestionSetUploader({
         <div className="grid gap-2 sm:grid-cols-3" role="tablist" aria-label="题库来源">
           {[
             ["upload", "上传图片"],
-            ["urlText", "导入链接"],
+            ["urlText", "链接/出题工具题单导入"],
             ["community", "社区题库"],
           ].map(([value, label]) => (
             <button
@@ -636,9 +636,9 @@ export function QuestionSetUploader({
               onDrop={handleImportDrop}
             >
               <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                <p className="text-sm font-semibold text-slate-900">粘贴图片链接，或上传 JSONL</p>
+                <p className="text-sm font-semibold text-slate-900">粘贴图片链接，或上传题单JSONL</p>
                 <Button type="button" variant="secondary" onClick={() => jsonlInputRef.current?.click()}>
-                  选择 JSONL
+                  选择题单JSONL
                 </Button>
               </div>
               <input
@@ -651,7 +651,7 @@ export function QuestionSetUploader({
               />
             </div>
             <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-900">图片链接或 JSONL</span>
+              <span className="mb-2 block text-sm font-medium text-slate-900">图片链接或题单JSONL</span>
               <textarea
                 className="min-h-52 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                 placeholder={
