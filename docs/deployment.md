@@ -320,13 +320,33 @@ Workers & Pages -> 你的 Pages 项目 -> Custom domains -> Set up a domain
 2. 给 Worker 添加 route：
 
 ```text
-Workers & Pages -> 你的 Worker -> Settings -> Domains & Routes -> Add -> Route
+Workers & Pages -> 你的 Worker -> Domains -> Add domain -> Route pattern
 ```
 
 Route pattern：
 
 ```text
 game.example.com/api/*
+```
+
+不要选择 `Custom Domains`，这里要选 `Route pattern`，因为前端根路径仍然由 Pages 提供，只有 `/api/*` 交给 Worker。
+
+如果输入框里默认出现类似下面的通配 pattern，不要直接使用：
+
+```text
+*.example.com/*
+```
+
+它会把整站流量都交给 Worker，可能导致 Pages 前端打不开。只填写当前前端域名下的 `/api/*`：
+
+```text
+game.example.com/api/*
+```
+
+例如你的前端域名是 `anipeek.animaster.dpdns.org`，就填写：
+
+```text
+anipeek.animaster.dpdns.org/api/*
 ```
 
 3. 删除 Pages 环境变量：
@@ -515,7 +535,7 @@ git push
 
 如果已经有自定义域名，按“推荐：自定义域名同源 `/api/*`”配置：
 
-- Worker route pattern：`game.example.com/api/*`
+- Worker route pattern：`game.example.com/api/*`，不要使用 `*.example.com/*`
 - Pages 删除 `NEXT_PUBLIC_API_BASE_URL`
 - Worker `ALLOWED_ORIGIN = "https://game.example.com"`
 - 重新部署 Worker 和 Pages
