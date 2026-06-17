@@ -18,7 +18,7 @@ database_id = "29c5a6af-b096-4be0-934d-67fbcc0a0520"
 migrations_dir = "d1/migrations"
 
 [vars]
-ALLOWED_ORIGIN = "*"
+ALLOWED_ORIGIN = "https://anipeek.animaster.dpdns.org"
 CLOUDINARY_CLOUD_NAME = "dfdfibosf"
 CLOUDINARY_FOLDER = "anime-master-game"
 CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
