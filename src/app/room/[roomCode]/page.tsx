@@ -112,6 +112,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
       "玩家在倒计时内抢答",
+      "每轮限答 1 次",
       "第一个答对的人得 1 分，本题立即结束",
     ],
   },
@@ -121,6 +122,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
       "玩家在倒计时内抢答",
+      "每轮限答 1 次",
       "多名玩家可答对得分，按答对顺序递减，最低 1 分",
     ],
   },
