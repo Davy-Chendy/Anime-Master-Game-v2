@@ -293,18 +293,18 @@ function PlayerList({
 }
 
 function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: boolean; isCurrentPresenter: boolean }) {
-  let text = "等待房主选择本局出题人。";
+  let text = "等待房主选择本局出题人";
 
   if (room.status === "LOBBY") {
-    text = isHost ? "先在大厅设置本局参数，然后选择一名出题人。" : "等待房主设置参数并选择出题人。";
+    text = isHost ? "先在大厅设置本局参数，然后选择一名出题人" : "等待房主设置参数并选择出题人";
   } else if (room.status === "QUESTION_SETUP") {
     text = isCurrentPresenter
-      ? "选择上传、URL 文本或社区题库，创建题库预览后通知房主开始游戏。"
+      ? "选择上传、URL 文本或社区题库，创建题库预览后通知房主开始游戏"
       : room.preparedQuestionSetId
-        ? "出题人已准备好题库，等待房主开始游戏。"
-        : "等待出题人准备题库。";
+        ? "出题人已准备好题库，等待房主开始游戏"
+        : "等待出题人准备题库";
   } else if (room.status === "GAME_RESULT") {
-    text = isHost ? "查看排行榜、发布或评分题库后，可以回到房间大厅开始下一局。" : "查看排行榜并评分，等待房主回到大厅。";
+    text = isHost ? "查看排行榜、发布或评分题库后，可以回到房间大厅开始下一局" : "查看排行榜并评分，等待房主回到大厅";
   }
 
   return <p className="mt-4 rounded-md border border-rose-100 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">{text}</p>;
@@ -405,7 +405,7 @@ function PresenterPickerModal({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-lg font-bold text-slate-950">选择出题人</h2>
-            <p className="mt-1 text-sm leading-6 text-[var(--muted)]">选中后由这名玩家准备题库，房主稍后开始游戏。</p>
+            <p className="mt-1 text-sm leading-6 text-[var(--muted)]">选中后由这名玩家准备题库，房主稍后开始游戏</p>
           </div>
           <button
             aria-label="关闭选择出题人弹窗"
@@ -479,7 +479,7 @@ function GameSettingsPanel({
             </select>
           </label>
           <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{copy.summary}</p>
-          {!canEdit ? <p className="mt-3 text-sm text-[var(--muted)]">当前只能查看，不能修改。</p> : null}
+          {!canEdit ? <p className="mt-3 text-sm text-[var(--muted)]">当前只能查看，不能修改</p> : null}
         </div>
 
         <div className="border-t border-[var(--line)] p-4 lg:border-l lg:border-t-0">
@@ -553,11 +553,11 @@ function GameSettingsPanel({
           </div>
         ) : isTeamBattleMode ? (
           <div className="mt-3 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-            固定规则：自动分队，猜对队伍得 1 分。
+            固定规则：自动分队，猜对队伍得 1 分
           </div>
         ) : (
           <div className="mt-3 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-            {settings.gameMode === "BUZZER_FIRST_CORRECT" ? "固定得分：首个答对 +1。" : "固定得分：按答对名次递减，最低 1 分。"}
+            {settings.gameMode === "BUZZER_FIRST_CORRECT" ? "固定得分：首个答对 +1" : "固定得分：按答对名次递减，最低 1 分"}
           </div>
         )}
       </details>
@@ -602,13 +602,13 @@ function LobbyMainPanel({
             <p className="mt-2 text-sm leading-6 text-rose-800">
               {room.status === "LOBBY"
                 ? isHost
-                  ? "先确认玩法，再选择一名出题人。"
-                  : "房主会选择玩法和出题人。"
+                  ? "先确认玩法，再选择一名出题人"
+                  : "房主会选择玩法和出题人"
                 : hasQuestionSet
                   ? isHost
-                    ? "可以继续调整玩法，确认后开始游戏。"
-                    : "等待房主开始游戏。"
-                  : `当前出题人是 ${presenterName}。`}
+                    ? "可以继续调整玩法，确认后开始游戏"
+                    : "等待房主开始游戏"
+                  : `当前出题人是 ${presenterName}`}
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap gap-3">
@@ -728,7 +728,7 @@ function GameResultPanel({
         }
       } catch (caughtError) {
         if (isMounted) {
-          onError(caughtError instanceof Error ? caughtError.message : "加载排行榜失败。");
+          onError(caughtError instanceof Error ? caughtError.message : "加载排行榜失败");
         }
       } finally {
         if (isMounted) {
@@ -812,7 +812,7 @@ function GameResultPanel({
         };
       });
     } catch (caughtError) {
-      onError(caughtError instanceof Error ? caughtError.message : "评分失败。");
+      onError(caughtError instanceof Error ? caughtError.message : "评分失败");
     } finally {
       setIsRating(false);
     }
@@ -957,7 +957,7 @@ function GameResultPanel({
             </table>
           </div>
         ) : leaderboard.length === 0 ? (
-          <p className="text-sm text-[var(--muted)]">本局没有玩家得分。</p>
+          <p className="text-sm text-[var(--muted)]">本局没有玩家得分</p>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-[var(--line)] bg-white">
             <table className="w-full table-fixed text-left text-sm" style={{ minWidth: `${playerLeaderboardWidth}px` }}>
@@ -1064,7 +1064,7 @@ function GameResultPanel({
               </div>
             </>
           ) : (
-            <p className="text-sm leading-6 text-[var(--muted)]">本局题库未发布到社区，暂不开放评分。</p>
+            <p className="text-sm leading-6 text-[var(--muted)]">本局题库未发布到社区，暂不开放评分</p>
           )}
         </Panel>
 
@@ -1072,7 +1072,7 @@ function GameResultPanel({
           <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
             <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
             <p className="mt-1 text-sm text-[var(--muted)]">
-              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局。" : "房主返回大厅后即可开始下一局。"}
+              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
             </p>
           </div>
           {isHost ? (
@@ -1080,7 +1080,7 @@ function GameResultPanel({
               {isReturningToLobby ? "返回中..." : "回到房间大厅"}
             </Button>
           ) : (
-            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作。</p>
+            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
           )}
         </Panel>
       </div>
@@ -1146,7 +1146,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
         if (joined.error || !joined.room) {
           if (isMounted) {
-            setError(joined.error ?? "没有找到房间。");
+            setError(joined.error ?? "没有找到房间");
             setRoom(null);
           }
           return;
@@ -1164,7 +1164,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
       } catch (caughtError) {
         if (isMounted) {
-          setError(caughtError instanceof Error ? caughtError.message : "加载房间失败，请稍后重试。");
+          setError(caughtError instanceof Error ? caughtError.message : "加载房间失败，请稍后重试");
         }
       } finally {
         if (isMounted) {
@@ -1194,7 +1194,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
       clearLocalRoomSession();
       setRoom(null);
-      setError("房间已被房主解散。");
+      setError("房间已被房主解散");
     }
 
     function applyRoomUpdate(pushedRoom: Room) {
@@ -1290,7 +1290,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         await leaveRoom(room.id, playerId);
       }
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "离开房间失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "离开房间失败，请稍后重试");
       return;
     }
 
@@ -1311,7 +1311,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       clearLocalRoomSession();
       router.push("/");
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "退出房间失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "退出房间失败，请稍后重试");
     } finally {
       setIsLeavingRoom(false);
     }
@@ -1336,7 +1336,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       clearLocalRoomSession();
       router.push("/");
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "解散房间失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "解散房间失败，请稍后重试");
     } finally {
       setIsDissolving(false);
     }
@@ -1355,7 +1355,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
       setIsPresenterPickerOpen(false);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "选择出题人失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "选择出题人失败，请稍后重试");
     } finally {
       setPendingPresenterId("");
     }
@@ -1373,7 +1373,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       const nextRoom = await cancelCurrentRound(room.id, playerId);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "取消本局失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "取消本局失败，请稍后重试");
     } finally {
       setIsCancelingRound(false);
     }
@@ -1391,7 +1391,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       const nextRoom = await returnRoomToLobby(room.id, playerId);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "回到房间大厅失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "回到房间大厅失败，请稍后重试");
     } finally {
       setIsReturningToLobby(false);
     }
@@ -1418,7 +1418,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       });
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...started.room, players: currentRoom.players } : started.room));
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "开始游戏失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "开始游戏失败，请稍后重试");
     } finally {
       setIsStartingGame(false);
     }
@@ -1465,7 +1465,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         </Panel>
       ) : !room ? (
         <Panel title="无法加载房间">
-          <p className="text-sm leading-6 text-red-700">房间不存在、已被解散，或当前无法连接服务。</p>
+          <p className="text-sm leading-6 text-red-700">房间不存在、已被解散，或当前无法连接服务</p>
           <Button className="mt-4" type="button" onClick={() => router.push("/")}>
             回到首页
           </Button>

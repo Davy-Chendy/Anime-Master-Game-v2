@@ -44,7 +44,7 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
                 <h2 className="text-xl font-bold text-slate-950" id={titleId}>
                   如何出题
                 </h2>
-                <p className="mt-2 text-sm leading-6 text-[var(--muted)]">建议一个题库准备约 20 张图片。</p>
+                <p className="mt-2 text-sm leading-6 text-slate-700">建议一个题库准备约 10 张图片</p>
               </div>
               <button
                 aria-label="关闭"
@@ -59,12 +59,12 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
             <div className="mt-5 space-y-4 text-sm leading-6 text-slate-700">
               <section className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
                 <h3 className="font-semibold text-slate-950">方法一：自行准备题库</h3>
-                <p className="mt-2">先把图片放进一个文件夹。游戏时上传这个文件夹中的图片即可。</p>
+                <p className="mt-2">先把图片放进一个文件夹。游戏时上传这个文件夹中的图片即可</p>
               </section>
 
               <section className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
                 <h3 className="font-semibold text-slate-950">方法二：使用动画截图工具</h3>
-                <p className="mt-2">可以用在线工具快速找到目标动画截图，构建题库。</p>
+                <p className="mt-2">可以用在线工具快速找到目标动画截图，构建题库</p>
                 <div className="mt-3">
                   <a
                     className="inline-flex min-h-11 items-center justify-center rounded-md bg-[var(--primary)] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-4 focus:ring-rose-100"
@@ -74,7 +74,7 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
                   >
                     打开动画截图工具
                   </a>
-                  <p className="mt-2 text-xs text-[var(--muted)]">会在新标签页打开，做完后回到这里上传图片或导入 URL。</p>
+                  <p className="mt-2 text-xs text-[var(--muted)]">会在新标签页打开，做完后回到这里上传图片或导入 URL</p>
                 </div>
               </section>
             </div>

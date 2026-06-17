@@ -29,7 +29,7 @@ export default function HomePage() {
     const trimmedNickname = nickname.trim();
 
     if (!trimmedNickname) {
-      setError("请先输入昵称。");
+      setError("请先输入昵称");
       return null;
     }
 
@@ -59,7 +59,7 @@ export default function HomePage() {
 
       router.push(`/room/${room.code}`);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "创建房间失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "创建房间失败，请稍后重试");
     } finally {
       setIsSubmitting(false);
     }
@@ -74,7 +74,7 @@ export default function HomePage() {
     }
 
     if (!/^\d{6}$/.test(trimmedRoomCode)) {
-      setError("请输入 6 位房间号。");
+      setError("请输入 6 位房间号");
       return;
     }
 
@@ -85,7 +85,7 @@ export default function HomePage() {
       const existingRoom = await getRoomByCode(trimmedRoomCode);
 
       if (!existingRoom) {
-        setError("房间不存在。请检查房间号是否正确。");
+        setError("房间不存在。请检查房间号是否正确");
         return;
       }
 
@@ -99,7 +99,7 @@ export default function HomePage() {
       const result = await joinRoom(trimmedRoomCode, session.playerId, trimmedNickname);
 
       if (result.error || !result.room) {
-        setError(result.error ?? "加入房间失败，请稍后重试。");
+        setError(result.error ?? "加入房间失败，请稍后重试");
         return;
       }
 
@@ -114,7 +114,7 @@ export default function HomePage() {
 
       router.push(`/room/${result.room.code}`);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "加入房间失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "加入房间失败，请稍后重试");
     } finally {
       setIsSubmitting(false);
     }
@@ -131,7 +131,7 @@ export default function HomePage() {
             动漫高手·一眼顶针
           </h1>
           <p className="mt-5 max-w-xl text-base leading-7 text-[var(--muted)]">
-            根据动画截图猜动画的多人实时小游戏。创建房间、选择出题人、上传或选择社区题库，实时揭露图片并猜出动画名称。
+            根据动画截图猜动画的多人实时小游戏。创建房间、选择出题人、上传或选择社区题库，实时揭露图片并猜出动画名称
           </p>
           <div className="mt-6">
             <QuestionGuideButton className="w-full sm:w-auto" />

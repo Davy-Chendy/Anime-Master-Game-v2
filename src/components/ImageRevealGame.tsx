@@ -542,7 +542,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         setImageLoadFailed(false);
       })
       .catch((error) => {
-        onError(error instanceof Error ? error.message : "同步游戏快照失败。");
+        onError(error instanceof Error ? error.message : "同步游戏快照失败");
       });
   }, [applyRoundSnapshot, onError, room.currentGameId]);
 
@@ -619,7 +619,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         }
       } catch (error) {
         if (isMounted) {
-          onError(error instanceof Error ? error.message : "加载游戏失败。");
+          onError(error instanceof Error ? error.message : "加载游戏失败");
         }
       } finally {
         if (isMounted) {
@@ -760,7 +760,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         const pushedGameSession = getBroadcastGameSession(message.result);
         if (pushedGameSession && pushedGameSession.id === room.currentGameId) {
           refreshRoundData(pushedGameSession).catch((error) => {
-            onError(error instanceof Error ? error.message : "同步游戏快照失败。");
+            onError(error instanceof Error ? error.message : "同步游戏快照失败");
           });
         }
       },
@@ -1196,7 +1196,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       })
       .catch((error) => {
         autoForfeitExpiredRoundKeyRef.current = null;
-        onError(error instanceof Error ? error.message : "自动放弃失败。");
+        onError(error instanceof Error ? error.message : "自动放弃失败");
       });
   }, [applyRoundSnapshotFromResult, gameSession, isTeamBattleMode, onError, remainingSeconds]);
 
@@ -1443,7 +1443,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           setTeamSelectedBlocks([]);
         })
         .catch((error) => {
-          onError(error instanceof Error ? error.message : "结算团队投票失败。");
+          onError(error instanceof Error ? error.message : "结算团队投票失败");
         })
         .finally(() => {
           setIsFinalizingTeamBattle(false);
@@ -1488,7 +1488,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setLabelInput("");
       setIsLabelModalOpen(false);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "保存图片标签失败。");
+      onError(error instanceof Error ? error.message : "保存图片标签失败");
     } finally {
       setIsSavingLabel(false);
     }
@@ -1498,7 +1498,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     const nextLabel = labelInput.trim();
 
     if (!nextLabel) {
-      onError("请先输入标签。");
+      onError("请先输入标签");
       return;
     }
 
@@ -1569,7 +1569,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       applyRoundSnapshotFromResult(updatedGameSession) || applyGameSessionDelta(updatedGameSession);
       setSelectedBlocks([]);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "确认揭露失败。");
+      onError(error instanceof Error ? error.message : "确认揭露失败");
     } finally {
       setIsConfirmingReveal(false);
     }
@@ -1589,7 +1589,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       applyGameSession(updatedGameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "提交揭露投票失败。");
+      onError(error instanceof Error ? error.message : "提交揭露投票失败");
     } finally {
       setIsSubmittingTeamBattle(false);
     }
@@ -1609,7 +1609,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       applyGameSession(updatedGameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "提交猜测投票失败。");
+      onError(error instanceof Error ? error.message : "提交猜测投票失败");
     } finally {
       setIsSubmittingTeamBattle(false);
     }
@@ -1630,7 +1630,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       applyRoundSnapshotFromResult(judged) || applyGameSession(judged.gameSession);
       setTeamSelectedBlocks([]);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "判定团队猜测失败。");
+      onError(error instanceof Error ? error.message : "判定团队猜测失败");
     } finally {
       setIsJudgingTeamBattle(false);
     }
@@ -1641,7 +1641,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       return;
     }
 
-    const confirmed = window.confirm("确认直接公布答案吗？本题红蓝两队都不会加分。");
+    const confirmed = window.confirm("确认直接公布答案吗？本题红蓝两队都不会加分");
     if (!confirmed) {
       return;
     }
@@ -1656,7 +1656,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setImageLoadFailed(false);
       setTeamSelectedBlocks([]);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "公布答案失败。");
+      onError(error instanceof Error ? error.message : "公布答案失败");
     } finally {
       setIsSkippingQuestion(false);
     }
@@ -1685,7 +1685,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setAnswerText(submitted.answerText);
       setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
     } catch (error) {
-      onError(error instanceof Error ? error.message : "提交答案失败。");
+      onError(error instanceof Error ? error.message : "提交答案失败");
     } finally {
       setIsSubmittingAnswer(false);
     }
@@ -1718,7 +1718,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         ),
       );
     } catch (error) {
-      onError(error instanceof Error ? error.message : "放弃本轮失败。");
+      onError(error instanceof Error ? error.message : "放弃本轮失败");
     } finally {
       setIsSubmittingAnswer(false);
     }
@@ -1741,7 +1741,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== canceled.canceledAnswerId));
       setLabelAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== canceled.canceledAnswerId));
     } catch (error) {
-      onError(error instanceof Error ? error.message : "取消放弃失败。");
+      onError(error instanceof Error ? error.message : "取消放弃失败");
     } finally {
       setIsSubmittingAnswer(false);
     }
@@ -1764,7 +1764,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setAnswerText(submitted.answerText);
       setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
     } catch (error) {
-      onError(error instanceof Error ? error.message : "提交抢答失败。");
+      onError(error instanceof Error ? error.message : "提交抢答失败");
     } finally {
       setIsSubmittingAnswer(false);
     }
@@ -1800,7 +1800,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       applyRoundSnapshotFromResult(judged) || applyGameSession(judged.gameSession);
       setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, judged.judgedAnswer));
     } catch (error) {
-      onError(error instanceof Error ? error.message : "判定答案失败。");
+      onError(error instanceof Error ? error.message : "判定答案失败");
     } finally {
       setIsJudgingBuzzer(false);
     }
@@ -1819,7 +1819,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       applyRoundSnapshotFromResult(settled) || applyGameSession(settled.gameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "结算本轮失败。");
+      onError(error instanceof Error ? error.message : "结算本轮失败");
     } finally {
       setIsSettlingBuzzerRound(false);
     }
@@ -1885,7 +1885,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
       await performSkipQuestion();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "跳过本题失败。");
+      onError(error instanceof Error ? error.message : "跳过本题失败");
     } finally {
       setIsSkippingQuestion(false);
     }
@@ -1927,7 +1927,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
       await finishReviewedQuestion();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "切换图片失败。");
+      onError(error instanceof Error ? error.message : "切换图片失败");
     } finally {
       setIsAdvancingQuestion(false);
     }
@@ -1968,7 +1968,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     try {
       await continueAfterResultPublishPrompt(nextAction);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "进入排行榜失败。");
+      onError(error instanceof Error ? error.message : "进入排行榜失败");
     }
   }
 
@@ -1978,7 +1978,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
 
     if (!resultPublishTitle.trim()) {
-      onError("请先填写题库标题。");
+      onError("请先填写题库标题");
       return;
     }
 
@@ -1996,7 +1996,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       closeResultPublishPrompt();
       await continueAfterResultPublishPrompt(nextAction);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "发布到社区失败。");
+      onError(error instanceof Error ? error.message : "发布到社区失败");
     } finally {
       setIsPublishingBeforeResult(false);
     }
@@ -2007,7 +2007,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }
 
   if (!gameSession || !currentQuestion) {
-    return <p className="text-sm text-red-700">没有找到当前游戏题目。</p>;
+    return <p className="text-sm text-red-700">没有找到当前游戏题目</p>;
   }
 
   const currentPlayerName = room.players.find((player) => player.id === playerId)?.nickname ?? "未设置昵称";
@@ -2184,7 +2184,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <div>
               <p className="text-lg font-semibold">图片加载失败</p>
               <p className="mt-2 text-sm text-slate-300">
-                {isPresenter ? "可能是图片 URL 失效、跨域限制或网络异常。" : "已自动重试 3 次，可能是图片 URL 失效或网络异常。"}
+                {isPresenter ? "可能是图片 URL 失效、跨域限制或网络异常" : "已自动重试 3 次，可能是图片 URL 失效或网络异常"}
               </p>
               {isPresenter ? (
                 <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
@@ -2308,9 +2308,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
       {isQuestionReviewing ? (
         <>
-              <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片。</p>
+              <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片</p>
               <p className="mt-1 text-sm text-[var(--muted)]">
-                {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
+                {isPresenter ? "确认后切换到下一阶段" : "等待出题人切换到下一阶段"}
               </p>
           <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
             <p className="font-semibold text-slate-950">图片标签</p>
@@ -2363,7 +2363,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 />
               </div>
               {teamBattleHasSubmittedCurrentVote ? (
-                <p className="mt-2 text-xs font-semibold text-emerald-700">你已提交，截止前可改。</p>
+                <p className="mt-2 text-xs font-semibold text-emerald-700">你已提交，截止前可改</p>
               ) : null}
             </section>
           ) : null}
@@ -2397,7 +2397,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   </Button>
                 ) : (
                   <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
-                    {isPresenter ? "等待队员选格。" : "等待当前队伍完成选格。"}
+                    {isPresenter ? "等待队员选格" : "等待当前队伍完成选格"}
                   </p>
                 )}
               </div>
@@ -2447,11 +2447,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                         ))}
                       </div>
                     ) : (
-                      <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">暂无队内投票。</p>
+                      <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">暂无队内投票</p>
                     )}
                   </div>
                 ) : (
-                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待当前队伍决定。</p>
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待当前队伍决定</p>
                 )}
 
                 {teamBattleCanAct ? (
@@ -2512,14 +2512,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     </Button>
                   </div>
                 ) : (
-                  <p className="mt-2 text-[var(--muted)]">等待裁判。</p>
+                  <p className="mt-2 text-[var(--muted)]">等待裁判</p>
                 )}
               </div>
             ) : null}
 
             {teamBattleState.phase === "REVIEW" ? (
               <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
-                本题已公布，等待切换。
+                本题已公布，等待切换
               </p>
             ) : null}
           </section>
@@ -2607,10 +2607,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 ) : (
                   <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
                     {isWaitingForBuzzerQueueStability
-                      ? "正在等待抢答顺序稳定。"
+                      ? "正在等待抢答顺序稳定"
                       : isBuzzerMode
-                        ? "当前没有待判定抢答。"
-                        : "当前没有待判定答案。"}
+                        ? "当前没有待判定抢答"
+                        : "当前没有待判定答案"}
                   </p>
                 )}
               </div>
@@ -2677,10 +2677,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <p className="mb-3 text-sm font-semibold text-slate-950">操控面板</p>
             {isCurrentPlayerCorrect ? (
               <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
-                你已答对本题。
+                你已答对本题
               </p>
             ) : !hasRoundStarted ? (
-              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人揭露图片。</p>
+              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人揭露图片</p>
             ) : (
               <div className="space-y-3">
                 <label className="block">
@@ -2892,7 +2892,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-start">
               <div>
                 <p className="text-lg font-semibold text-slate-950">补充图片标签</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">可以选择一个玩家回答作为标签，或手动输入。保存后不能覆盖。</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">可以选择一个玩家回答作为标签，或手动输入。保存后不能覆盖</p>
               </div>
               <button
                 className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
@@ -2922,7 +2922,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     ))
                   ) : (
                     <p className="rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">
-                      本题还没有可选择的玩家回答。
+                      本题还没有可选择的玩家回答
                     </p>
                   )}
                 </div>
@@ -2962,7 +2962,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           <div className="w-full max-w-xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
             <div className="border-b border-[var(--line)] px-5 py-4">
               <p className="text-lg font-semibold text-slate-950">发布到社区？</p>
-              <p className="mt-1 text-sm leading-6 text-[var(--muted)]">建议发布，好题库可以让更多房间直接开玩。</p>
+              <p className="mt-1 text-sm leading-6 text-[var(--muted)]">建议发布，好题库可以让更多房间直接开玩</p>
             </div>
 
             <div className="space-y-4 px-5 py-4">

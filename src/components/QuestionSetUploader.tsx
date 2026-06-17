@@ -183,7 +183,7 @@ export function QuestionSetUploader({
       return {
         items: [],
         labeledCount: 0,
-        error: error instanceof Error ? error.message : "题单JSONL格式错误。",
+        error: error instanceof Error ? error.message : "题单JSONL格式错误",
       };
     }
   }, [urlText]);
@@ -236,7 +236,7 @@ export function QuestionSetUploader({
       onRoomUpdated({ ...room, ...nextRoom, players: room.players });
       clearError();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "通知房主失败，请稍后重试。");
+      onError(error instanceof Error ? error.message : "通知房主失败，请稍后重试");
     } finally {
       setIsConfirmingQuestionSet(false);
     }
@@ -267,8 +267,8 @@ export function QuestionSetUploader({
     if (incoming.length === 0) {
       onError(
         oversizedFiles.length > 0
-          ? `图片不能超过 ${formatBytes(maxUploadImageBytes)}。`
-          : "没有检测到可上传的图片。",
+          ? `图片不能超过 ${formatBytes(maxUploadImageBytes)}`
+          : "没有检测到可上传的图片",
       );
       return;
     }
@@ -295,7 +295,7 @@ export function QuestionSetUploader({
     setItems(limitedItems);
 
     if (warningParts.length > 0) {
-      onError(`${warningParts.join("，")}。`);
+      onError(`${warningParts.join("，")}`);
     } else {
       clearError();
     }
@@ -316,7 +316,7 @@ export function QuestionSetUploader({
         return;
       }
 
-      onError(error instanceof Error ? error.message : "读取文件夹失败，请重试。");
+      onError(error instanceof Error ? error.message : "读取文件夹失败，请重试");
       return;
     }
 
@@ -347,7 +347,7 @@ export function QuestionSetUploader({
     const files = Array.from(fileList ?? []).filter((file) => /\.jsonl$/i.test(file.name) || file.type === "application/json");
 
     if (files.length === 0) {
-      onError("请上传 .jsonl 文件。");
+      onError("请上传 .jsonl 文件");
       return;
     }
 
@@ -357,7 +357,7 @@ export function QuestionSetUploader({
       resetCreatedSet();
       clearError();
     } catch {
-      onError("读取题单JSONL文件失败，请重试。");
+      onError("读取题单JSONL文件失败，请重试");
     } finally {
       if (jsonlInputRef.current) {
         jsonlInputRef.current.value = "";
@@ -373,7 +373,7 @@ export function QuestionSetUploader({
 
   async function createQuestionSetFromUrls(imageUrls: string[]) {
     if (imageUrls.length === 0) {
-      onError("至少需要一张图片。");
+      onError("至少需要一张图片");
       return null;
     }
 
@@ -395,7 +395,7 @@ export function QuestionSetUploader({
     clearError();
 
     if (items.length === 0) {
-      onError("请先选择至少一张图片。");
+      onError("请先选择至少一张图片");
       return;
     }
 
@@ -412,13 +412,13 @@ export function QuestionSetUploader({
         .map((result) => result.url);
 
       if (imageUrls.length === 0) {
-        onError("没有图片上传成功，未创建题库。");
+        onError("没有图片上传成功，未创建题库");
         return;
       }
 
       await createQuestionSetFromUrls(imageUrls);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "上传题库失败，请稍后重试。");
+      onError(error instanceof Error ? error.message : "上传题库失败，请稍后重试");
     } finally {
       setIsUploading(false);
     }
@@ -428,7 +428,7 @@ export function QuestionSetUploader({
     clearError();
 
     if (!urlText.trim()) {
-      onError("请先粘贴图片 URL，或上传题单JSONL文件。");
+      onError("请先粘贴图片 URL，或上传题单JSONL文件");
       return;
     }
 
@@ -438,7 +438,7 @@ export function QuestionSetUploader({
     }
 
     if (importPreview.items.length === 0) {
-      onError("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
+      onError("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象");
       return;
     }
 
@@ -457,7 +457,7 @@ export function QuestionSetUploader({
       clearError();
       scrollToPreview();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败。");
+      onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败");
     } finally {
       setIsCreatingFromText(false);
     }
@@ -471,7 +471,7 @@ export function QuestionSetUploader({
       const questionSets = await getCommunityQuestionSets(nextSort);
       setCommunitySets(questionSets);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "加载社区题库失败。");
+      onError(error instanceof Error ? error.message : "加载社区题库失败");
     } finally {
       setIsLoadingCommunity(false);
     }
@@ -485,7 +485,7 @@ export function QuestionSetUploader({
 
   async function handleConfirmQuestionSet() {
     if (!questionSet) {
-      onError("请先创建或选择题库。");
+      onError("请先创建或选择题库");
       return;
     }
 
@@ -497,7 +497,7 @@ export function QuestionSetUploader({
       await navigator.clipboard.writeText(urlsTextForPreview);
       clearError();
     } catch {
-      onError("复制失败，请手动选择 URL 文本。");
+      onError("复制失败，请手动选择 URL 文本");
     }
   }
 
@@ -512,7 +512,7 @@ export function QuestionSetUploader({
         <div className="grid gap-2 sm:grid-cols-3" role="tablist" aria-label="题库来源">
           {[
             ["upload", "上传图片"],
-            ["urlText", "链接/出题工具题单导入"],
+            ["urlText", "出题工具题单/图片链接"],
             ["community", "社区题库"],
           ].map(([value, label]) => (
             <button
@@ -536,7 +536,7 @@ export function QuestionSetUploader({
           <div className="space-y-4">
             {!configStatus.isReady ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                缺少图片上传环境变量，无法上传新图片。
+                缺少图片上传环境变量，无法上传新图片
               </div>
             ) : null}
             <div
@@ -563,7 +563,7 @@ export function QuestionSetUploader({
                 </Button>
               </div>
               <p className="mt-3 text-xs text-[var(--muted)]">
-                文件夹只取当前层图片，不读取子文件夹；单张不超过 {formatBytes(maxUploadImageBytes)}，最多 {maxUploadImageCount} 张。
+                文件夹只取当前层图片，不读取子文件夹；单张不超过 {formatBytes(maxUploadImageBytes)}，最多 {maxUploadImageCount} 张
               </p>
               <input ref={fileInputRef} className="hidden" type="file" accept="image/*" multiple onChange={(event) => addFiles(event.target.files)} />
               <input
@@ -613,7 +613,7 @@ export function QuestionSetUploader({
             ) : null}
             {progress.fail > 0 ? (
               <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                有图片上传失败，可以再次点击上传重试。
+                有图片上传失败，可以再次点击上传重试
               </p>
             ) : null}
             <Button className="w-full sm:w-auto" type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
@@ -669,7 +669,7 @@ export function QuestionSetUploader({
               <p className="text-sm text-red-600">{importPreview.error}</p>
             ) : (
               <p className="text-sm text-[var(--muted)]">
-                已识别 {importPreview.items.length} 张图片，{importPreview.labeledCount} 个带答案。
+                已识别 {importPreview.items.length} 张图片，{importPreview.labeledCount} 个带答案
               </p>
             )}
             <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
@@ -735,10 +735,10 @@ export function QuestionSetUploader({
                 </div>
               ))}
               {!isLoadingCommunity && communitySets.length === 0 ? (
-                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">暂无社区题库。</p>
+                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">暂无社区题库</p>
               ) : null}
               {!isLoadingCommunity && communitySets.length > 0 && filteredCommunitySets.length === 0 ? (
-                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">没有匹配的题库。</p>
+                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">没有匹配的题库</p>
               ) : null}
             </div>
           </div>
@@ -848,7 +848,7 @@ export function QuestionSetUploader({
           </div>
         ) : (
           <div className="rounded-md border border-dashed border-[var(--line)] bg-slate-50 px-4 py-6 text-sm text-[var(--muted)]">
-            创建或选择题库后，这里会显示预览。
+            创建或选择题库后，这里会显示预览
           </div>
         )}
       </section>
