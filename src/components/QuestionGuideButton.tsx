@@ -68,7 +68,7 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
                 <div className="mt-3">
                   <a
                     className="inline-flex min-h-11 items-center justify-center rounded-md bg-[var(--primary)] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-4 focus:ring-rose-100"
-                    href="https://anime-screenshot-picker.pages.dev/"
+                    href="https://screenshot-picker.animaster.dpdns.org/"
                     rel="noreferrer"
                     target="_blank"
                   >
