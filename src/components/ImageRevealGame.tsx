@@ -1192,7 +1192,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal;
 
   useEffect(() => {
-    if (!gameSession || isTeamBattleMode || !gameSession.roundStartedAt || remainingSeconds > 0) {
+    if (
+      !gameSession ||
+      isTeamBattleMode ||
+      !gameSession.roundStartedAt ||
+      remainingSeconds > 0 ||
+      allActiveGuessersUsedRoundChance ||
+      hasFirstCorrectAnswer ||
+      areAllGuessersCorrect
+    ) {
       return;
     }
 
@@ -1216,7 +1224,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         autoForfeitExpiredRoundKeyRef.current = null;
         onError(error instanceof Error ? error.message : "自动放弃失败");
       });
-  }, [applyRoundSnapshotFromResult, gameSession, isTeamBattleMode, onError, remainingSeconds]);
+  }, [
+    allActiveGuessersUsedRoundChance,
+    applyRoundSnapshotFromResult,
+    areAllGuessersCorrect,
+    gameSession,
+    hasFirstCorrectAnswer,
+    isTeamBattleMode,
+    onError,
+    remainingSeconds,
+  ]);
 
   useEffect(() => {
     if (!canTypeAnswer || !gameSession?.roundStartedAt) {
@@ -1308,7 +1325,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         } else if (hasPendingJudgement) {
           standardTaskTitle = "等待判定";
           standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认抢答顺序" : `${pendingJudgementCount} 人待判定`;
-        } else if (canSettleBuzzerRound || allActiveGuessersUsedBuzzerChance || hasFirstCorrectAnswer) {
+        } else if (canSettleBuzzerRound) {
           standardTaskTitle = buzzerSettleActionText;
           standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
         } else {
@@ -1321,8 +1338,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       } else if (hasPendingJudgement) {
         standardTaskTitle = "等待判定";
         standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认提交顺序" : `${pendingJudgementCount} 人待判定`;
-      } else if (isRoundEnded || allActiveGuessersSubmitted) {
-        standardTaskTitle = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+      } else if (canSettleBuzzerRound) {
+        standardTaskTitle = standardSettleActionText;
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       } else if (!hasRoundStarted) {
         standardTaskTitle = "选格揭图";
