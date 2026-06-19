@@ -989,6 +989,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     () => sortBySubmittedAt(buzzerAnswers.filter((answer) => answer.status === "pending")),
     [buzzerAnswers],
   );
+  const judgedBuzzerAnswerPlayerSet = useMemo(
+    () => new Set(buzzerAnswers.filter((answer) => answer.status !== "pending").map((answer) => answer.playerId)),
+    [buzzerAnswers],
+  );
+  const unresolvedSubmittedAnswerCount = isBuzzerMode
+    ? 0
+    : answers.filter(
+        (answer) =>
+          !isForfeitAnswer(answer) &&
+          !correctPlayerSet.has(answer.playerId) &&
+          !judgedBuzzerAnswerPlayerSet.has(answer.playerId),
+      ).length;
+  const pendingJudgementCount = Math.max(pendingBuzzerAnswers.length, unresolvedSubmittedAnswerCount);
+  const hasPendingJudgement = pendingJudgementCount > 0;
   const firstPendingBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
   const currentBuzzerAnswer =
     firstPendingBuzzerAnswer && isBuzzerAnswerReadyForJudging(firstPendingBuzzerAnswer, getEstimatedServerNowMs())
@@ -1098,6 +1112,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }
 
   const areAllGuessersCorrect = guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id));
+  const isRoundCompleteForDisplay =
+    hasRoundStarted &&
+    (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect);
+  const displayedRemainingSeconds = isRoundCompleteForDisplay ? 0 : remainingSeconds;
   const canConfirmReveal =
     isPresenter &&
     !isTeamBattleMode &&
@@ -1162,7 +1180,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     isPresenter &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
-    pendingBuzzerAnswers.length === 0 &&
+    !hasPendingJudgement &&
     hasRoundStarted &&
     (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect) &&
     Boolean(gameSession);
@@ -1287,6 +1305,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         } else if (!hasRoundStarted) {
           standardTaskTitle = "选格揭图";
           standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+        } else if (hasPendingJudgement) {
+          standardTaskTitle = "等待判定";
+          standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认抢答顺序" : `${pendingJudgementCount} 人待判定`;
         } else if (canSettleBuzzerRound || allActiveGuessersUsedBuzzerChance || hasFirstCorrectAnswer) {
           standardTaskTitle = buzzerSettleActionText;
           standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
@@ -1297,6 +1318,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       } else if (currentBuzzerAnswer) {
         standardTaskTitle = "判定答案";
         standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
+      } else if (hasPendingJudgement) {
+        standardTaskTitle = "等待判定";
+        standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认提交顺序" : `${pendingJudgementCount} 人待判定`;
       } else if (isRoundEnded || allActiveGuessersSubmitted) {
         standardTaskTitle = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -1681,6 +1705,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         playerId,
         answerText,
       });
+      if (applyRoundSnapshotFromResult(submitted)) {
+        setAnswerText(submitted.answerText);
+        return;
+      }
       setMyAnswer(submitted);
       setAnswerText(submitted.answerText);
       setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
@@ -1702,6 +1730,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         playerId,
       });
+      if (applyRoundSnapshotFromResult(submitted)) {
+        setAnswerText("");
+        return;
+      }
       setMyAnswer(submitted);
       setMyBuzzerAnswer(null);
       setAnswerText("");
@@ -2548,7 +2580,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
                 ].join(" ")}
               >
-                {hasRoundStarted ? `${remainingSeconds}s` : "未开始"}
+                {hasRoundStarted ? `${displayedRemainingSeconds}s` : "未开始"}
               </span>
             </div>
             <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
@@ -2584,7 +2616,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <div className="mb-3 rounded-md bg-white p-3 text-sm">
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-semibold text-slate-950">{isBuzzerMode ? "抢答队列" : "待判定答案"}</p>
-                  <span className="text-xs font-semibold text-[var(--muted)]">{pendingBuzzerAnswers.length} 人待判定</span>
+                  <span className="text-xs font-semibold text-[var(--muted)]">{pendingJudgementCount} 人待判定</span>
                 </div>
                 {currentBuzzerAnswer ? (
                   <div className="mt-2 rounded-md bg-slate-50 p-3">
@@ -2608,6 +2640,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
                     {isWaitingForBuzzerQueueStability
                       ? "正在等待抢答顺序稳定"
+                      : hasPendingJudgement
+                        ? "正在同步待判定答案"
                       : isBuzzerMode
                         ? "当前没有待判定抢答"
                         : "当前没有待判定答案"}
@@ -2649,7 +2683,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
                 ].join(" ")}
               >
-                {hasRoundStarted ? `${remainingSeconds}s` : "未开始"}
+                {hasRoundStarted ? `${displayedRemainingSeconds}s` : "未开始"}
               </span>
             </div>
             <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
