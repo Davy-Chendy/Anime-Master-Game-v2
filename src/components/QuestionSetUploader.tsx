@@ -3,16 +3,15 @@
 import { DragEvent, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import {
-  downloadRemoteImagesForUpload,
   filesToUploadableImages,
   getCloudinaryUploadConfigStatus,
   uploadImagesToCloudinary,
   type CloudinaryUploadItemResult,
-  type RemoteImageImportResult,
   type UploadProgress,
   type UploadableImage,
 } from "@/lib/cloudinaryUpload";
 import {
+  createQuestionSetFromUrlText,
   createUploadedQuestionSet,
   getCommunityQuestionSets,
   parseImageUrlsText,
@@ -33,9 +32,6 @@ type SetupMode = "upload" | "urlText" | "community";
 type CommunitySort = "latest" | "rating";
 const maxUploadImageCount = 120;
 const maxUploadImageBytes = 20 * 1024 * 1024;
-type SuccessfulCloudinaryUpload = Extract<CloudinaryUploadItemResult, { ok: true }>;
-type SuccessfulRemoteImageImport = Extract<RemoteImageImportResult, { ok: true }>;
-type FailedRemoteImageImport = Extract<RemoteImageImportResult, { ok: false }>;
 
 type BrowserFileSystemFileHandle = {
   kind: "file";
@@ -248,7 +244,6 @@ export function QuestionSetUploader({
 
   function switchMode(nextMode: SetupMode) {
     setMode(nextMode);
-    setProgress(emptyProgress);
     clearError();
 
     if (nextMode === "community" && communitySets.length === 0 && !isLoadingCommunity) {
@@ -376,15 +371,6 @@ export function QuestionSetUploader({
     readJsonlFiles(event.dataTransfer.files);
   }
 
-  function remoteImportFailureToUploadResult(result: FailedRemoteImageImport): CloudinaryUploadItemResult {
-    return {
-      ok: false,
-      path: result.path,
-      error: result.error,
-      rawBytes: result.rawBytes,
-    };
-  }
-
   async function createQuestionSetFromUrls(imageUrls: string[]) {
     if (imageUrls.length === 0) {
       onError("至少需要一张图片");
@@ -456,75 +442,22 @@ export function QuestionSetUploader({
       return;
     }
 
-    if (!configStatus.isReady) {
-      onError("缺少图片上传环境变量，无法把外链图片同步到 Cloudinary");
-      return;
-    }
-
     setIsCreatingFromText(true);
     resetCreatedSet();
-    setProgress({ ...emptyProgress, total: importPreview.items.length, latestMessage: "开始读取外链图片" });
 
     try {
-      const importedImages = await downloadRemoteImagesForUpload(importPreview.items, setProgress, {
-        maxBytes: maxUploadImageBytes,
-      });
-      const importFailures = importedImages.filter((result): result is FailedRemoteImageImport => !result.ok);
-      const importedSuccesses = importedImages.filter((result): result is SuccessfulRemoteImageImport => result.ok);
-      const uploadItems = importedSuccesses.map((result) => result.item);
-
-      if (uploadItems.length === 0) {
-        setResults(importFailures.map(remoteImportFailureToUploadResult));
-        onError("外链图片全部读取失败，未创建题库");
-        return;
-      }
-
-      setProgress({ ...emptyProgress, total: uploadItems.length, latestMessage: "开始压缩并上传到 Cloudinary" });
-      const uploadResults = await uploadImagesToCloudinary(uploadItems, setProgress);
-      const successfulUploads = uploadResults.filter((result): result is SuccessfulCloudinaryUpload => result.ok);
-      const uploadsByPath = new Map(successfulUploads.map((result) => [result.path, result]));
-      const questions = importedImages.flatMap((result) => {
-        if (!result.ok) {
-          return [];
-        }
-
-        const uploaded = uploadsByPath.get(result.item.path);
-        if (!uploaded) {
-          return [];
-        }
-
-        return [
-          {
-            imageUrl: uploaded.url,
-            labelText: result.labelText,
-          },
-        ];
-      });
-      const failedCount = importFailures.length + uploadResults.filter((result) => !result.ok).length;
-
-      setResults([...importFailures.map(remoteImportFailureToUploadResult), ...uploadResults]);
-
-      if (questions.length === 0) {
-        onError("没有图片成功同步到 Cloudinary，未创建题库");
-        return;
-      }
-
-      const createdQuestionSet = await createUploadedQuestionSet({
+      const createdQuestionSet = await createQuestionSetFromUrlText({
         roomId: room.id ?? "",
         presenterPlayerId,
         title: getDraftQuestionSetTitle(room),
         description: "",
-        questions,
+        imageUrlsText: urlText,
       });
       setQuestionSet(createdQuestionSet);
-      if (failedCount > 0) {
-        onError(`已创建题库并同步 ${questions.length} 张图片到 Cloudinary，${failedCount} 张失败`);
-      } else {
-        clearError();
-      }
+      clearError();
       scrollToPreview();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "同步外链图片并创建题库失败");
+      onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败");
     } finally {
       setIsCreatingFromText(false);
     }
@@ -691,11 +624,6 @@ export function QuestionSetUploader({
 
         {mode === "urlText" ? (
           <div className="space-y-4">
-            {!configStatus.isReady ? (
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                缺少图片上传环境变量，无法同步外链图片
-              </div>
-            ) : null}
             <div
               className={`rounded-md border-2 border-dashed p-4 transition ${
                 isDraggingImport ? "border-rose-300 bg-rose-50" : "border-[var(--line)] bg-slate-50"
@@ -744,16 +672,8 @@ export function QuestionSetUploader({
                 已识别 {importPreview.items.length} 张图片，{importPreview.labeledCount} 个带答案
               </p>
             )}
-            {progress.total > 0 ? (
-              <div>
-                <div className="h-3 overflow-hidden rounded-full bg-slate-100">
-                  <div className="h-full bg-[var(--primary)] transition-all" style={{ width: `${progressPercent}%` }} />
-                </div>
-                <p className="mt-2 text-xs text-[var(--muted)]">{progress.latestMessage}</p>
-              </div>
-            ) : null}
-            <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={!configStatus.isReady || isCreatingFromText}>
-              {isCreatingFromText ? "同步中..." : "同步到 Cloudinary 并创建"}
+            <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
+              {isCreatingFromText ? "创建中..." : "创建题库"}
             </Button>
           </div>
         ) : null}
