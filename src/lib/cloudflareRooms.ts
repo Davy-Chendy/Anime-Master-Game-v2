@@ -147,6 +147,9 @@ export const selectPresenterForRound = (roomId: string, hostPlayerId: string, pr
 export const cancelCurrentRound = (roomId: string, hostPlayerId: string) =>
   rpc<Room>("cancelCurrentRound", roomId, hostPlayerId);
 
+export const cancelPresenterSetup = (roomId: string, presenterPlayerId: string) =>
+  rpc<Room>("cancelPresenterSetup", roomId, presenterPlayerId);
+
 export const createUploadedQuestionSet = (params: {
   roomId: string;
   presenterPlayerId: string;

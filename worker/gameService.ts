@@ -1107,6 +1107,34 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
   return toRoom(room);
 }
 
+export async function cancelPresenterSetup(roomId: string, presenterPlayerId: string) {
+  assertD1Env();
+
+  const { data: room, error } = await d1
+    .from("rooms")
+    .update({
+      current_presenter_player_id: null,
+      current_game_id: null,
+      prepared_question_set_id: null,
+      game_status: "LOBBY",
+    })
+    .eq("id", roomId)
+    .eq("current_presenter_player_id", presenterPlayerId)
+    .eq("game_status", "QUESTION_SETUP")
+    .select()
+    .maybeSingle<DbRoom>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!room) {
+    throw new Error("撤回出题人失败：只有当前出题人可以在准备阶段撤回。");
+  }
+
+  return toRoom(room);
+}
+
 export async function createUploadedQuestionSet(params: {
   roomId: string;
   presenterPlayerId: string;

@@ -12,6 +12,7 @@ import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import {
   cancelCurrentRound,
+  cancelPresenterSetup,
   dissolveRoom,
   getGameSessionById,
   getLeaderboardForGameSession,
@@ -1520,6 +1521,30 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
   }
 
+  async function handleCancelPresenterSetup() {
+    if (!room?.id || !playerId || !isCurrentPresenter || room.status !== "QUESTION_SETUP") {
+      return;
+    }
+
+    const confirmed = window.confirm("确定不当本局出题人吗？房主需要重新选择出题人。");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsCancelingRound(true);
+    setError("");
+
+    try {
+      const nextRoom = await cancelPresenterSetup(room.id, playerId);
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : nextRoom));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "撤回出题人失败，请稍后重试");
+    } finally {
+      setIsCancelingRound(false);
+    }
+  }
+
   async function handleReturnToLobby() {
     if (!room?.id || !playerId || !isHost || room.status !== "GAME_RESULT") {
       return;
@@ -1695,11 +1720,13 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             <QuestionSetUploader
               room={room}
               presenterPlayerId={playerId}
+              isCancelingPresenterSetup={isCancelingRound}
               onRoomUpdated={(nextRoom) =>
                 setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
               }
               onError={setError}
               onClearError={() => setError("")}
+              onCancelPresenterSetup={handleCancelPresenterSetup}
             />
           </Panel>
         </div>

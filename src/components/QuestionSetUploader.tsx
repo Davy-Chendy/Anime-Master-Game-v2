@@ -23,9 +23,11 @@ import type { QuestionSet, Room } from "@/types/game";
 type QuestionSetUploaderProps = {
   room: Room;
   presenterPlayerId: string;
+  isCancelingPresenterSetup?: boolean;
   onRoomUpdated: (room: Room) => void;
   onError: (message: string) => void;
   onClearError?: () => void;
+  onCancelPresenterSetup?: () => void;
 };
 
 type SetupMode = "upload" | "urlText" | "community";
@@ -143,9 +145,11 @@ async function pickCurrentFolderFiles() {
 export function QuestionSetUploader({
   room,
   presenterPlayerId,
+  isCancelingPresenterSetup = false,
   onRoomUpdated,
   onError,
   onClearError,
+  onCancelPresenterSetup,
 }: QuestionSetUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -852,6 +856,20 @@ export function QuestionSetUploader({
           </div>
         )}
       </section>
+
+      {onCancelPresenterSetup ? (
+        <div className="flex justify-end border-t border-[var(--line)] pt-5">
+          <Button
+            className="w-full sm:w-auto"
+            type="button"
+            variant="secondary"
+            onClick={onCancelPresenterSetup}
+            disabled={isCancelingPresenterSetup}
+          >
+            {isCancelingPresenterSetup ? "撤回中..." : "不当出题人了"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

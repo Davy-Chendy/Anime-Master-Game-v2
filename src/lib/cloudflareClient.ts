@@ -47,6 +47,7 @@ const MUTATION_NAMES = new Set([
   "dissolveRoom",
   "selectPresenterForRound",
   "cancelCurrentRound",
+  "cancelPresenterSetup",
   "createUploadedQuestionSet",
   "createQuestionSetFromUrlText",
   "prepareQuestionSetForStart",
