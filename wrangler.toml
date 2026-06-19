@@ -23,5 +23,6 @@ CLOUDINARY_CLOUD_NAME = "dfdfibosf"
 CLOUDINARY_FOLDER = "anime-master-game"
 CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
 
-[observability]
-enabled = false
+[observability.logs]
+enabled = true
+invocation_logs = true
