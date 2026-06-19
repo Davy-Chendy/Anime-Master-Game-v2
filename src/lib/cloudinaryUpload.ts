@@ -46,6 +46,29 @@ export type UploadProgress = {
   latestMessage: string;
 };
 
+export type RemoteImageImportItem = {
+  imageUrl: string;
+  labelText?: string | null;
+};
+
+export type RemoteImageImportResult =
+  | {
+      ok: true;
+      index: number;
+      sourceUrl: string;
+      labelText: string | null;
+      item: UploadableImage;
+    }
+  | {
+      ok: false;
+      index: number;
+      sourceUrl: string;
+      labelText: string | null;
+      path: string;
+      rawBytes: number;
+      error: string;
+    };
+
 const cloudinaryConfig = {
   cloudName: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ?? "",
   uploadPreset: process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET ?? "",
@@ -145,6 +168,106 @@ export async function uploadImagesToCloudinary(
   return results.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+export async function downloadRemoteImagesForUpload(
+  importItems: RemoteImageImportItem[],
+  onProgress: (progress: UploadProgress) => void,
+  options: { maxBytes?: number } = {},
+) {
+  const results: RemoteImageImportResult[] = [];
+  const total = importItems.length;
+  const limit = Math.max(1, Math.min(6, cloudinaryConfig.concurrency || 2));
+  const maxBytes = options.maxBytes ?? 20 * 1024 * 1024;
+  let done = 0;
+  let success = 0;
+  let fail = 0;
+  let rawBytes = 0;
+
+  await runPool(
+    importItems.map((item, index) => ({ item, index })),
+    limit,
+    async ({ item, index }) => {
+      const fallbackPath = buildRemoteImagePath(item.imageUrl, index, "");
+
+      try {
+        const response = await fetch(remoteImageImportUrl(item.imageUrl));
+        if (!response.ok) {
+          throw new Error(await readImportImageError(response));
+        }
+
+        const contentType = normalizeMime(response.headers.get("content-type") ?? "");
+        const blob = await response.blob();
+
+        if (blob.size > maxBytes) {
+          throw new Error(`图片超过 ${formatBytes(maxBytes)}。`);
+        }
+
+        const fileName = buildRemoteImageFileName(item.imageUrl, index, contentType);
+        const type = contentType.startsWith("image/") ? contentType : guessMime(fileName);
+        const file = new File([blob], fileName, { type });
+        const uploadItem = {
+          file,
+          path: buildRemoteImagePath(item.imageUrl, index, type),
+          name: fileName,
+          size: file.size,
+          type: file.type || guessMime(fileName),
+        };
+
+        rawBytes += uploadItem.size;
+        success += 1;
+        results.push({
+          ok: true,
+          index,
+          sourceUrl: item.imageUrl,
+          labelText: item.labelText?.trim() || null,
+          item: uploadItem,
+        });
+        onProgress({
+          done,
+          total,
+          success,
+          fail,
+          rawBytes,
+          uploadBytes: 0,
+          latestMessage: `已读取：${shortenUrl(item.imageUrl)}`,
+        });
+      } catch (error) {
+        fail += 1;
+        results.push({
+          ok: false,
+          index,
+          sourceUrl: item.imageUrl,
+          labelText: item.labelText?.trim() || null,
+          path: fallbackPath,
+          rawBytes: 0,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        onProgress({
+          done,
+          total,
+          success,
+          fail,
+          rawBytes,
+          uploadBytes: 0,
+          latestMessage: `读取失败：${shortenUrl(item.imageUrl)}`,
+        });
+      } finally {
+        done += 1;
+        onProgress({
+          done,
+          total,
+          success,
+          fail,
+          rawBytes,
+          uploadBytes: 0,
+          latestMessage: `已读取 ${done}/${total}`,
+        });
+      }
+    },
+  );
+
+  return results.sort((a, b) => a.index - b.index);
+}
+
 function isImageFile(file: File) {
   return file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp|gif|avif)$/i.test(file.name);
 }
@@ -161,6 +284,10 @@ function guessMime(name: string) {
   if (lowerName.endsWith(".gif")) return "image/gif";
   if (lowerName.endsWith(".avif")) return "image/avif";
   return "application/octet-stream";
+}
+
+function normalizeMime(value: string) {
+  return value.split(";")[0].trim().toLowerCase();
 }
 
 async function compressImage(item: UploadableImage): Promise<PreparedImage> {
@@ -274,6 +401,72 @@ function extensionForMime(mime: string, originalName: string) {
 
 function replaceExtension(name: string, extension: string) {
   return name.replace(/\.[^.]+$/, "") + extension;
+}
+
+function apiBase() {
+  return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+}
+
+function remoteImageImportUrl(sourceUrl: string) {
+  return `${apiBase()}/api/import-image?url=${encodeURIComponent(sourceUrl)}`;
+}
+
+async function readImportImageError(response: Response) {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (contentType.includes("application/json")) {
+    const data = (await response.json().catch(() => null)) as { error?: string } | null;
+    return data?.error || `读取图片失败，状态码 ${response.status}。`;
+  }
+
+  const text = await response.text().catch(() => "");
+  return text.trim() || `读取图片失败，状态码 ${response.status}。`;
+}
+
+function buildRemoteImagePath(sourceUrl: string, index: number, mime: string) {
+  const order = String(index + 1).padStart(3, "0");
+  return `${order}-${buildRemoteImageFileName(sourceUrl, index, mime)}`;
+}
+
+function buildRemoteImageFileName(sourceUrl: string, index: number, mime: string) {
+  let baseName = "";
+
+  try {
+    const url = new URL(sourceUrl);
+    baseName = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "");
+  } catch {
+    baseName = "";
+  }
+
+  const safeBaseName =
+    baseName
+      .replace(/[\\/:*?"<>|#%&{}$!`'@+=]/g, "-")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 90) || `remote-image-${index + 1}`;
+
+  if (/\.[a-z0-9]{2,5}$/i.test(safeBaseName)) {
+    return safeBaseName;
+  }
+
+  return `${safeBaseName}${extensionForMime(normalizeMime(mime), safeBaseName)}`;
+}
+
+function shortenUrl(value: string) {
+  return value.length > 70 ? `${value.slice(0, 67)}...` : value;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${bytes} B`;
 }
 
 async function uploadPreparedFile(prepared: PreparedImage) {

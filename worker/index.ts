@@ -43,6 +43,7 @@ type CloudinaryResource = {
 
 const ACTION_RESULT_TTL_MS = 10_000;
 const ACTION_CACHE_MIN_ALARM_DELAY_MS = 100;
+const IMPORT_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 const MUTATION_NAMES = new Set([
   "createRoom",
@@ -483,6 +484,108 @@ async function handleCloudinaryImages(request: Request, env: Env) {
   return json({ images, folder, limit }, {}, request, env);
 }
 
+function isHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeContentType(value: string) {
+  return value.split(";")[0].trim().toLowerCase();
+}
+
+function hasImageExtension(pathname: string) {
+  return /\.(jpg|jpeg|png|webp|gif|avif|bmp|svg)$/i.test(pathname);
+}
+
+function isBlockedImportHostname(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    host.startsWith("127.") ||
+    host.startsWith("10.") ||
+    host.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+  );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${bytes} B`;
+}
+
+async function handleImportImage(request: Request, env: Env) {
+  const requestUrl = new URL(request.url);
+  const sourceUrl = requestUrl.searchParams.get("url")?.trim() ?? "";
+
+  if (!sourceUrl || !isHttpUrl(sourceUrl)) {
+    return json({ error: "请提供有效的 http/https 图片链接。" }, { status: 400 }, request, env);
+  }
+
+  const targetUrl = new URL(sourceUrl);
+
+  if (isBlockedImportHostname(targetUrl.hostname)) {
+    return json({ error: "不支持导入本地或内网图片链接。" }, { status: 400 }, request, env);
+  }
+
+  const response = await fetch(targetUrl.toString(), {
+    headers: {
+      accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    },
+  });
+
+  if (!response.ok) {
+    return json({ error: `读取外链图片失败，源站状态码 ${response.status}。` }, { status: 502 }, request, env);
+  }
+
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (contentLength > IMPORT_IMAGE_MAX_BYTES) {
+    return json(
+      { error: `图片超过 ${formatBytes(IMPORT_IMAGE_MAX_BYTES)}。` },
+      { status: 413 },
+      request,
+      env,
+    );
+  }
+
+  const contentType = normalizeContentType(response.headers.get("content-type") ?? "");
+  if (!contentType.startsWith("image/") && !hasImageExtension(targetUrl.pathname)) {
+    return json({ error: "链接返回的内容不是图片。" }, { status: 415 }, request, env);
+  }
+
+  const body = await response.arrayBuffer();
+  if (body.byteLength > IMPORT_IMAGE_MAX_BYTES) {
+    return json(
+      { error: `图片超过 ${formatBytes(IMPORT_IMAGE_MAX_BYTES)}。` },
+      { status: 413 },
+      request,
+      env,
+    );
+  }
+
+  return new Response(body, {
+    headers: {
+      ...corsHeaders(request, env),
+      "content-type": contentType.startsWith("image/") ? contentType : "application/octet-stream",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 export class RoomDurableObject {
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
   private actionQueue: Promise<void> = Promise.resolve();
@@ -644,6 +747,10 @@ export default {
 
       if (url.pathname === "/api/cloudinary-images" && request.method === "GET") {
         return await handleCloudinaryImages(request, env);
+      }
+
+      if (url.pathname === "/api/import-image" && request.method === "GET") {
+        return await handleImportImage(request, env);
       }
 
       const realtimeMatch = url.pathname.match(/^\/api\/realtime\/(.+)\/ws$/);
