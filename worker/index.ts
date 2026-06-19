@@ -48,6 +48,7 @@ const MUTATION_NAMES = new Set([
   "createRoom",
   "joinRoom",
   "leaveRoom",
+  "kickPlayerFromRoom",
   "dissolveRoom",
   "selectPresenterForRound",
   "cancelCurrentRound",

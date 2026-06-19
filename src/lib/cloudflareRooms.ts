@@ -123,6 +123,9 @@ export const joinRoom = (roomCode: string, playerId: string, nickname: string) =
 
 export const leaveRoom = (roomId: string, playerId: string) => rpc<Room | null>("leaveRoom", roomId, playerId);
 
+export const kickPlayerFromRoom = (roomId: string, hostPlayerId: string, targetPlayerId: string) =>
+  rpc<Room>("kickPlayerFromRoom", roomId, hostPlayerId, targetPlayerId);
+
 export const dissolveRoom = (roomId: string, playerId: string) => rpc<void>("dissolveRoom", roomId, playerId);
 
 export function dissolveRoomOnPageExit(roomId: string, playerId: string) {

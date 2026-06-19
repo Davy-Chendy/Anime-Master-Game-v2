@@ -43,6 +43,7 @@ const ROOM_TOPIC_PREFIX = "room:";
 
 const MUTATION_NAMES = new Set([
   "leaveRoom",
+  "kickPlayerFromRoom",
   "dissolveRoom",
   "selectPresenterForRound",
   "cancelCurrentRound",

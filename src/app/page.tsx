@@ -82,11 +82,21 @@ export default function HomePage() {
   const [nickname, setNickname] = useState("");
   const [roomCode, setRoomCode] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     const session = getLocalSession();
-    const roomCodeFromUrl = new URLSearchParams(window.location.search).get("roomCode") ?? "";
+    const searchParams = new URLSearchParams(window.location.search);
+    const roomCodeFromUrl = searchParams.get("roomCode") ?? "";
+    const roomNotice = searchParams.get("roomNotice") ?? "";
+
+    if (roomNotice === "kicked") {
+      setNotice("你已被房主移出房间，已回到首页。");
+      searchParams.delete("roomNotice");
+      const nextSearch = searchParams.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`);
+    }
 
     setNickname(session.nickname);
     setRoomCode(/^\d{6}$/.test(roomCodeFromUrl) ? roomCodeFromUrl : (session.roomCode ?? ""));
@@ -112,6 +122,7 @@ export default function HomePage() {
 
     setIsSubmitting(true);
     setError("");
+    setNotice("");
 
     try {
       const session = getLocalSession();
@@ -147,6 +158,7 @@ export default function HomePage() {
 
     setIsSubmitting(true);
     setError("");
+    setNotice("");
 
     try {
       const existingRoom = await getRoomByCode(trimmedRoomCode);
@@ -230,6 +242,7 @@ export default function HomePage() {
                 onChange={(event) => {
                   setNickname(event.target.value);
                   setError("");
+                  setNotice("");
                 }}
               />
 
@@ -247,6 +260,7 @@ export default function HomePage() {
                   onChange={(event) => {
                     setRoomCode(event.target.value.replace(/\D/g, "").slice(0, 6));
                     setError("");
+                    setNotice("");
                   }}
                 />
                 <Button
@@ -261,6 +275,7 @@ export default function HomePage() {
               </div>
 
               {error ? <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+              {notice ? <p className="rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">{notice}</p> : null}
             </div>
           </Panel>
         </div>

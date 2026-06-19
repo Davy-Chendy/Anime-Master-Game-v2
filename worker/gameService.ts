@@ -911,6 +911,97 @@ export async function leaveRoom(roomId: string, playerId: string) {
   return toRoom(updatedRoom, await getDbPlayersByRoomId(roomId));
 }
 
+export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, targetPlayerId: string) {
+  assertD1Env();
+
+  if (!targetPlayerId) {
+    throw new Error("请选择要踢出的玩家。");
+  }
+
+  if (hostPlayerId === targetPlayerId) {
+    throw new Error("房主不能踢出自己，如需退出请解散房间。");
+  }
+
+  const { data: room, error: roomError } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .maybeSingle<DbRoom>();
+
+  if (roomError) {
+    throw new Error(roomError.message);
+  }
+
+  if (!room) {
+    throw new Error("踢出玩家失败：房间不存在或已被解散。");
+  }
+
+  if (room.host_player_id !== hostPlayerId) {
+    throw new Error("只有房主可以踢出玩家。");
+  }
+
+  if (room.game_status === "PLAYING") {
+    throw new Error("游戏进行中不能踢出玩家，请先返回大厅。");
+  }
+
+  const { data: targetPlayer, error: targetError } = await d1
+    .from("players")
+    .select("*")
+    .eq("room_id", roomId)
+    .eq("id", targetPlayerId)
+    .maybeSingle<DbPlayer>();
+
+  if (targetError) {
+    throw new Error(targetError.message);
+  }
+
+  if (!targetPlayer) {
+    throw new Error("踢出玩家失败：该玩家已不在房间。");
+  }
+
+  if (targetPlayer.is_host || targetPlayer.id === room.host_player_id) {
+    throw new Error("不能踢出房主。");
+  }
+
+  const { error: deleteError } = await d1
+    .from("players")
+    .delete()
+    .eq("room_id", roomId)
+    .eq("id", targetPlayerId);
+
+  if (deleteError) {
+    throw new Error(deleteError.message);
+  }
+
+  let updatedRoom = room;
+  if (room.current_presenter_player_id === targetPlayerId && room.game_status === "QUESTION_SETUP") {
+    const { data: resetRoom, error: resetError } = await d1
+      .from("rooms")
+      .update({
+        current_presenter_player_id: null,
+        current_game_id: null,
+        prepared_question_set_id: null,
+        game_status: "LOBBY",
+      })
+      .eq("id", roomId)
+      .eq("host_player_id", hostPlayerId)
+      .select()
+      .maybeSingle<DbRoom>();
+
+    if (resetError) {
+      throw new Error(resetError.message);
+    }
+
+    if (!resetRoom) {
+      throw new Error("踢出玩家失败：房间状态已变化，请刷新后重试。");
+    }
+
+    updatedRoom = resetRoom;
+  }
+
+  return toRoom(updatedRoom, await getDbPlayersByRoomId(roomId));
+}
+
 export async function dissolveRoom(roomId: string, playerId: string) {
   assertD1Env();
 

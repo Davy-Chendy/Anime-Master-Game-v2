@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "@/lib/router";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
@@ -20,6 +20,7 @@ import {
   getQuestionResultsForGameSession,
   getQuestionSetRatingProgress,
   joinRoom,
+  kickPlayerFromRoom,
   leaveRoom,
   rateCommunityQuestionSet,
   returnRoomToLobby,
@@ -242,17 +243,19 @@ function PlayerList({
   playerId,
   presenterPlayerId,
   gameMode,
+  action,
 }: {
   players: Player[];
   playerId: string;
   presenterPlayerId?: string | null;
   gameMode: GameMode;
+  action?: ReactNode;
 }) {
   const sortedPlayers = sortPlayersByJoinedAt(players);
   const title = `玩家 ${sortedPlayers.length}`;
 
   return (
-    <Panel className="h-full" title={title}>
+    <Panel className="h-full" title={title} action={action}>
       <div className="space-y-3">
         {sortedPlayers.map((player, index) => {
           const isPresenter = player.id === presenterPlayerId;
@@ -419,6 +422,111 @@ function PresenterPickerModal({
         <div className="mt-5">
           <PresenterPicker room={room} pendingPresenterId={pendingPresenterId} onSelectPresenter={onSelectPresenter} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+function KickPlayerModal({
+  room,
+  isOpen,
+  pendingKickPlayerId,
+  onKickPlayer,
+  onClose,
+}: {
+  room: Room;
+  isOpen: boolean;
+  pendingKickPlayerId: string;
+  onKickPlayer: (targetPlayerId: string) => void;
+  onClose: () => void;
+}) {
+  const kickablePlayers = sortPlayersByJoinedAt(room.players.filter((player) => player.id !== room.hostPlayerId));
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !pendingKickPlayerId) {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose, pendingKickPlayerId]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 px-4 py-6"
+      role="presentation"
+      onMouseDown={() => {
+        if (!pendingKickPlayerId) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        aria-modal="true"
+        className="max-h-[calc(100dvh-48px)] w-full max-w-xl overflow-y-auto rounded-lg border border-[var(--line)] bg-white p-5 shadow-2xl"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-slate-950">踢出玩家</h2>
+            <p className="mt-1 text-sm leading-6 text-[var(--muted)]">选择要移出房间的玩家</p>
+          </div>
+          <button
+            aria-label="关闭踢出玩家弹窗"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-[var(--line)] text-xl leading-none text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={Boolean(pendingKickPlayerId)}
+            type="button"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+
+        {kickablePlayers.length > 0 ? (
+          <div className="mt-5 grid gap-2">
+            {kickablePlayers.map((player) => {
+              const isPresenter = player.id === room.currentPresenterPlayerId;
+              return (
+                <div
+                  className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
+                  key={player.id}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-950">{player.nickname}</p>
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+                      <span>玩家</span>
+                      {isPresenter ? <span>当前出题人</span> : null}
+                    </div>
+                  </div>
+                  <Button
+                    className="h-10 shrink-0 px-3"
+                    disabled={Boolean(pendingKickPlayerId)}
+                    type="button"
+                    variant="secondary"
+                    onClick={() => onKickPlayer(player.id)}
+                  >
+                    {pendingKickPlayerId === player.id ? "踢出中..." : "踢出"}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="mt-5 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm text-[var(--muted)]">
+            当前没有可踢出的玩家
+          </p>
+        )}
       </div>
     </div>
   );
@@ -1104,6 +1212,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [isLeavingRoom, setIsLeavingRoom] = useState(false);
   const [isPresenterPickerOpen, setIsPresenterPickerOpen] = useState(false);
+  const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
+  const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     gameMode: "ROUND_REVEAL",
     maxRevealRounds: 3,
@@ -1197,13 +1307,23 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError("房间已被房主解散");
     }
 
+    function markPlayerRemoved() {
+      if (!isActive) {
+        return;
+      }
+
+      clearLocalRoomSession();
+      setRoom(null);
+      router.push("/?roomNotice=kicked");
+    }
+
     function applyRoomUpdate(pushedRoom: Room) {
       if (!isActive || pushedRoom.id !== room?.id) {
         return;
       }
 
       if (pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
-        markRoomDissolved();
+        markPlayerRemoved();
         return;
       }
 
@@ -1280,6 +1400,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const isHost = Boolean(currentPlayer?.isHost);
   const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
+  const canKickPlayers = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP"));
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
@@ -1339,6 +1460,26 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError(caughtError instanceof Error ? caughtError.message : "解散房间失败，请稍后重试");
     } finally {
       setIsDissolving(false);
+    }
+  }
+
+  async function handleKickPlayer(targetPlayerId: string) {
+    if (!room?.id || !playerId || !isHost || !canKickPlayers || targetPlayerId === playerId) {
+      return;
+    }
+
+    setPendingKickPlayerId(targetPlayerId);
+    setError("");
+
+    try {
+      const nextRoom = await kickPlayerFromRoom(room.id, playerId, targetPlayerId);
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom } : nextRoom));
+      setIsKickPlayerModalOpen(false);
+      setIsPresenterPickerOpen(false);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "踢出玩家失败，请稍后重试");
+    } finally {
+      setPendingKickPlayerId("");
     }
   }
 
@@ -1459,6 +1600,16 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         </div>
       ) : null}
 
+      {room && canKickPlayers ? (
+        <KickPlayerModal
+          room={room}
+          isOpen={isKickPlayerModalOpen}
+          pendingKickPlayerId={pendingKickPlayerId}
+          onKickPlayer={handleKickPlayer}
+          onClose={() => setIsKickPlayerModalOpen(false)}
+        />
+      ) : null}
+
       {isLoading ? (
         <Panel title="加载房间">
           <p className="text-sm leading-6 text-[var(--muted)]">正在从游戏服务读取房间和玩家列表...</p>
@@ -1503,6 +1654,19 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               playerId={playerId}
               presenterPlayerId={room.currentPresenterPlayerId}
               gameMode={gameSettings.gameMode}
+              action={
+                canKickPlayers ? (
+                  <Button
+                    className="h-9 px-3"
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setIsKickPlayerModalOpen(true)}
+                    disabled={room.players.length <= 1}
+                  >
+                    踢出玩家
+                  </Button>
+                ) : null
+              }
             />
           </aside>
           <LobbyMainPanel
