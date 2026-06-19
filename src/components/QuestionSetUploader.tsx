@@ -432,7 +432,7 @@ export function QuestionSetUploader({
     clearError();
 
     if (!urlText.trim()) {
-      onError("请先粘贴图片 URL，或上传题单JSONL文件");
+      onError("请先粘贴图片链接，或上传题单JSONL文件");
       return;
     }
 
@@ -442,7 +442,7 @@ export function QuestionSetUploader({
     }
 
     if (importPreview.items.length === 0) {
-      onError("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象");
+      onError("没有检测到有效图片链接。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象");
       return;
     }
 
@@ -461,7 +461,7 @@ export function QuestionSetUploader({
       clearError();
       scrollToPreview();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败");
+      onError(error instanceof Error ? error.message : "从图片链接创建题库失败");
     } finally {
       setIsCreatingFromText(false);
     }
@@ -501,7 +501,7 @@ export function QuestionSetUploader({
       await navigator.clipboard.writeText(urlsTextForPreview);
       clearError();
     } catch {
-      onError("复制失败，请手动选择 URL 文本");
+      onError("复制失败，请手动选择图片链接文本");
     }
   }
 
@@ -516,7 +516,7 @@ export function QuestionSetUploader({
         <div className="grid gap-2 sm:grid-cols-3" role="tablist" aria-label="题库来源">
           {[
             ["upload", "上传图片"],
-            ["urlText", "出题工具题单/图片链接"],
+            ["urlText", "题单JSONL/图片链接"],
             ["community", "社区题库"],
           ].map(([value, label]) => (
             <button
@@ -540,7 +540,7 @@ export function QuestionSetUploader({
           <div className="space-y-4">
             {!configStatus.isReady ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                缺少图片上传环境变量，无法上传新图片
+                当前不能上传图片，请联系房主或管理员
               </div>
             ) : null}
             <div
@@ -621,7 +621,7 @@ export function QuestionSetUploader({
               </p>
             ) : null}
             <Button className="w-full sm:w-auto" type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
-              {isUploading ? "上传中..." : "上传并创建"}
+              {isUploading ? "上传中…" : "上传并创建"}
             </Button>
           </div>
         ) : null}
@@ -677,7 +677,7 @@ export function QuestionSetUploader({
               </p>
             )}
             <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
-              {isCreatingFromText ? "创建中..." : "创建题库"}
+              {isCreatingFromText ? "创建中…" : "创建题库"}
             </Button>
           </div>
         ) : null}
@@ -709,7 +709,7 @@ export function QuestionSetUploader({
                   <option value="rating">评分最高</option>
                 </select>
                 <Button className="h-11" type="button" variant="secondary" onClick={() => handleLoadCommunitySets()} disabled={isLoadingCommunity}>
-                  {isLoadingCommunity ? "加载中..." : "刷新"}
+                  {isLoadingCommunity ? "加载中…" : "刷新"}
                 </Button>
               </div>
             </div>
@@ -787,7 +787,7 @@ export function QuestionSetUploader({
                     <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={item.url} />
                     <figcaption className="mt-2 text-xs text-[var(--muted)]">
                       第 {item.index + 1} 张
-                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "未填写标签"}</span>
+                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "未填写答案"}</span>
                     </figcaption>
                   </figure>
                 ))}
@@ -813,15 +813,15 @@ export function QuestionSetUploader({
                 </p>
               </div>
               <Button type="button" onClick={handleConfirmQuestionSet} disabled={isConfirmingQuestionSet}>
-                {isConfirmingQuestionSet ? "确认中..." : "确认使用这个题库"}
+                {isConfirmingQuestionSet ? "确认中…" : "确认使用这个题库"}
               </Button>
             </div>
             <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
               {previewItems.slice(0, 12).map((item) => (
                 <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={item.key}>
                   <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={item.url} />
-                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写标签"}>
-                    {item.labelText?.trim() || "未填写标签"}
+                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写答案"}>
+                    {item.labelText?.trim() || "未填写答案"}
                   </figcaption>
                 </figure>
               ))}
@@ -830,7 +830,7 @@ export function QuestionSetUploader({
                     result.ok ? (
                       <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={result.url}>
                         <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={result.url} />
-                        <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写标签</figcaption>
+                        <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写答案</figcaption>
                       </figure>
                     ) : null,
                   )
@@ -838,14 +838,14 @@ export function QuestionSetUploader({
             </div>
             {urlsTextForPreview ? (
               <details className="mt-4">
-                <summary className="cursor-pointer text-sm font-semibold text-slate-900">URL 文本</summary>
+                <summary className="cursor-pointer text-sm font-semibold text-slate-900">图片链接文本</summary>
                 <textarea
                   className="mt-3 min-h-32 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs outline-none"
                   readOnly
                   value={urlsTextForPreview}
                 />
                 <Button className="mt-3" type="button" variant="secondary" onClick={handleCopyUrlsText}>
-                  复制 URL
+                  复制图片链接
                 </Button>
               </details>
             ) : null}
@@ -866,7 +866,7 @@ export function QuestionSetUploader({
             onClick={onCancelPresenterSetup}
             disabled={isCancelingPresenterSetup}
           >
-            {isCancelingPresenterSetup ? "撤回中..." : "不当出题人了"}
+            {isCancelingPresenterSetup ? "撤回中…" : "不当出题人了"}
           </Button>
         </div>
       ) : null}

@@ -44,7 +44,9 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
                 <h2 className="text-xl font-bold text-slate-950" id={titleId}>
                   如何出题
                 </h2>
-                <p className="mt-2 text-sm leading-6 text-slate-700">建议一个题库准备约 10 张图片</p>
+                <p className="mt-2 text-sm leading-6 text-slate-700">
+                  建议每个题库准备 <span className="font-bold text-[var(--primary)]">10 张</span> 左右
+                </p>
               </div>
               <button
                 aria-label="关闭"
@@ -74,7 +76,9 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
                   >
                     打开动画截图工具
                   </a>
-                  <p className="mt-2 text-xs text-[var(--muted)]">会在新标签页打开，做完后回到这里上传图片或导入 URL</p>
+                  <p className="mt-2 text-xs text-[var(--muted)]">
+                    会在新标签页打开。整理好截图或链接后，被选为出题人时可在房间里上传或导入
+                  </p>
                 </div>
               </section>
             </div>

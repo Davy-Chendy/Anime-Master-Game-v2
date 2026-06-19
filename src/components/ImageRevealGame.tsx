@@ -1276,7 +1276,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       ? "抢答"
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? "顺位"
-        : "轮揭";
+        : "标准";
   const rankedNextScore = Math.max(1, guessers.length - questionResults.length);
   const scoreCardLabel =
     gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
@@ -1309,7 +1309,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       : "进入下一轮";
   let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
   let standardTaskTitle = "等待开始";
-  let standardTaskDetail = "等待出题人揭露图片";
+  let standardTaskDetail = "等待出题人打开图片";
   let standardTaskTone = "border-slate-200 bg-white";
 
   if (!isTeamBattleMode && !isQuestionReviewing) {
@@ -1320,7 +1320,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           standardTaskTitle = "判定抢答";
           standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
         } else if (!hasRoundStarted) {
-          standardTaskTitle = "选格揭图";
+          standardTaskTitle = "选择要打开的格子";
           standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
         } else if (hasPendingJudgement) {
           standardTaskTitle = "等待判定";
@@ -1342,7 +1342,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         standardTaskTitle = standardSettleActionText;
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       } else if (!hasRoundStarted) {
-        standardTaskTitle = "选格揭图";
+        standardTaskTitle = "选择要打开的格子";
         standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
       } else {
         standardTaskTitle = "等待作答";
@@ -1529,7 +1529,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setLabelInput("");
       setIsLabelModalOpen(false);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "保存图片标签失败");
+      onError(error instanceof Error ? error.message : "保存正确答案失败");
     } finally {
       setIsSavingLabel(false);
     }
@@ -1539,7 +1539,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     const nextLabel = labelInput.trim();
 
     if (!nextLabel) {
-      onError("请先输入标签");
+      onError("请先输入正确答案");
       return;
     }
 
@@ -1610,7 +1610,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       applyRoundSnapshotFromResult(updatedGameSession) || applyGameSessionDelta(updatedGameSession);
       setSelectedBlocks([]);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "确认揭露失败");
+      onError(error instanceof Error ? error.message : "打开格子失败");
     } finally {
       setIsConfirmingReveal(false);
     }
@@ -1630,7 +1630,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       applyGameSession(updatedGameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "提交揭露投票失败");
+      onError(error instanceof Error ? error.message : "提交选格失败");
     } finally {
       setIsSubmittingTeamBattle(false);
     }
@@ -2052,7 +2052,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }
 
   if (isLoading) {
-    return <p className="text-sm text-[var(--muted)]">正在加载当前题目...</p>;
+    return <p className="text-sm text-[var(--muted)]">正在加载当前题目…</p>;
   }
 
   if (!gameSession || !currentQuestion) {
@@ -2221,7 +2221,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           />
         ) : (
           <canvas
-            aria-label="已揭露的图片区域"
+            aria-label="已打开的图片区域"
             className="block h-full w-full bg-black"
             key={currentQuestion.id}
             ref={setPlayerImageCanvasRef}
@@ -2233,11 +2233,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <div>
               <p className="text-lg font-semibold">图片加载失败</p>
               <p className="mt-2 text-sm text-slate-300">
-                {isPresenter ? "可能是图片 URL 失效、跨域限制或网络异常" : "已自动重试 3 次，可能是图片 URL 失效或网络异常"}
+                {isPresenter ? "图片加载失败，可能是链接失效或网络问题" : "已自动重试 3 次，可能是链接失效或网络问题"}
               </p>
               {isPresenter ? (
                 <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
-                  {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+                  {isSkippingQuestion ? "跳过中…" : "跳过本题"}
                 </Button>
               ) : (
                 <Button className="mt-4" type="button" variant="secondary" onClick={handleReloadPlayerImage}>
@@ -2344,9 +2344,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       </div>
       {shouldShowQuestionLabel ? (
         <div className="mx-auto mt-3 max-w-[1280px] rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm">
-          <span className="font-semibold text-slate-950">图片标签：</span>
+          <span className="font-semibold text-slate-950">正确答案：</span>
           <span className={currentQuestionLabel ? "text-slate-900" : "text-[var(--muted)]"}>
-            {currentQuestionLabel || "暂无标签"}
+            {currentQuestionLabel || "未填写"}
           </span>
         </div>
       ) : null}
@@ -2359,20 +2359,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         <>
               <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片</p>
               <p className="mt-1 text-sm text-[var(--muted)]">
-                {isPresenter ? "确认后切换到下一阶段" : "等待出题人切换到下一阶段"}
+                {isPresenter ? "确认后进入下一步" : "等待出题人进入下一步"}
               </p>
           <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-            <p className="font-semibold text-slate-950">图片标签</p>
-            <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "暂无标签"}</p>
+            <p className="font-semibold text-slate-950">正确答案</p>
+            <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "未填写"}</p>
           </div>
           {canAddQuestionLabel ? (
             <Button className="mt-3 w-full" type="button" variant="secondary" onClick={() => setIsLabelModalOpen(true)}>
-              补充图片标签
+              填写正确答案
             </Button>
           ) : null}
           {isPresenter ? (
             <Button className="mt-3 w-full" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
-              {isAdvancingQuestion ? "切换中..." : hasNextQuestion ? "下一张图片" : "查看排行榜"}
+              {isAdvancingQuestion ? "切换中…" : hasNextQuestion ? "下一张图片" : "查看排行榜"}
             </Button>
           ) : null}
         </>
@@ -2419,7 +2419,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
           <section className="border-t border-[var(--line)] pt-4">
             <div className="mb-3 flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-slate-950">操控面板</p>
+              <p className="text-sm font-semibold text-slate-950">操作</p>
               {teamBattleIsVoteClosed ? <span className="text-xs font-semibold text-amber-700">结算中</span> : null}
             </div>
 
@@ -2442,7 +2442,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                       teamBattleIsVoteClosed
                     }
                   >
-                    {isSubmittingTeamBattle ? "提交中..." : teamBattleHasSubmittedRevealVote ? "更新选格" : "提交选格"}
+                    {isSubmittingTeamBattle ? "提交中…" : teamBattleHasSubmittedRevealVote ? "更新选格" : "提交选格"}
                   </Button>
                 ) : (
                   <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
@@ -2521,7 +2521,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                         onClick={() => handleSubmitTeamBattleGuessVote({ type: "guess", answerText: teamGuessText })}
                         disabled={isSubmittingTeamBattle || teamGuessText.trim().length === 0 || teamBattleIsVoteClosed}
                       >
-                        {isSubmittingTeamBattle ? "提交中..." : teamBattleHasSubmittedGuessVote ? "更新猜测" : "提交猜测"}
+                        {isSubmittingTeamBattle ? "提交中…" : teamBattleHasSubmittedGuessVote ? "更新猜测" : "提交猜测"}
                       </Button>
                     </div>
                     <div className="flex items-center gap-2 text-xs font-semibold text-[var(--muted)]">
@@ -2581,7 +2581,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 </p>
               ) : null}
               <Button type="button" variant="secondary" onClick={handleRevealTeamBattleAnswer} disabled={isSkippingQuestion}>
-                {isSkippingQuestion ? "公布中..." : "公布答案"}
+                {isSkippingQuestion ? "公布中…" : "公布答案"}
               </Button>
             </div>
           ) : null}
@@ -2623,9 +2623,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
           <section className="border-t border-[var(--line)] pt-4">
             <div className="mb-3 flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-slate-950">操控面板</p>
+              <p className="text-sm font-semibold text-slate-950">操作</p>
               <span className="text-xs font-semibold text-[var(--muted)]">
-                已揭露 {revealedBlockSet.size}/{TOTAL_BLOCKS}
+                已打开 {revealedBlockSet.size}/{TOTAL_BLOCKS}
               </span>
             </div>
 
@@ -2669,7 +2669,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
             <div className="grid gap-2">
               <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
-                {isConfirmingReveal ? "确认中..." : selectedBlocks.length > 0 ? `确认揭露 ${selectedBlocks.length} 格` : "确认揭露"}
+                {isConfirmingReveal ? "打开中…" : selectedBlocks.length > 0 ? `打开 ${selectedBlocks.length} 格` : "打开所选格子"}
               </Button>
               {canPreviewSelectedBlocks ? (
                 <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
@@ -2681,10 +2681,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 </p>
               ) : null}
               <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
-                {isSettlingBuzzerRound ? "处理中..." : standardSettleActionText}
+                {isSettlingBuzzerRound ? "处理中…" : standardSettleActionText}
               </Button>
               <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
-                {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+                {isSkippingQuestion ? "跳过中…" : "跳过本题"}
               </Button>
             </div>
           </section>
@@ -2725,13 +2725,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           ) : null}
 
           <section className="border-t border-[var(--line)] pt-4">
-            <p className="mb-3 text-sm font-semibold text-slate-950">操控面板</p>
+            <p className="mb-3 text-sm font-semibold text-slate-950">操作</p>
             {isCurrentPlayerCorrect ? (
               <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
                 你已答对本题
               </p>
             ) : !hasRoundStarted ? (
-              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人揭露图片</p>
+              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人打开图片</p>
             ) : (
               <div className="space-y-3">
                 <label className="block">
@@ -2760,7 +2760,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
                 >
                   {isSubmittingAnswer
-                    ? "提交中..."
+                    ? "提交中…"
                     : isBuzzerMode
                       ? "提交抢答（回车）"
                       : myHasForfeited
@@ -2777,7 +2777,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
                     disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
                   >
-                    {isSubmittingAnswer ? "处理中..." : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                    {isSubmittingAnswer ? "处理中…" : myHasForfeited ? "取消放弃" : "放弃本轮"}
                   </Button>
                 ) : null}
                 <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
@@ -2838,7 +2838,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <p className="mt-1 truncate text-lg font-semibold text-slate-950">{teamBattleActionCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">已揭露</p>
+              <p className="text-[var(--muted)]">已打开</p>
               <p className="mt-1 text-lg font-semibold text-slate-950">{revealedBlocksCardValue}</p>
             </div>
           </>
@@ -2873,7 +2873,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <p className="mt-1 text-lg font-semibold text-slate-950">{scoreCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">已揭露</p>
+              <p className="text-[var(--muted)]">已打开</p>
               <p className="mt-1 text-lg font-semibold text-slate-950">{revealedBlocksCardValue}</p>
             </div>
           </>
@@ -2942,8 +2942,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
             <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-start">
               <div>
-                <p className="text-lg font-semibold text-slate-950">补充图片标签</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">可以选择一个玩家回答作为标签，或手动输入。保存后不能覆盖</p>
+                <p className="text-lg font-semibold text-slate-950">填写正确答案</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">可选玩家答案，也可手动输入。保存后不能修改。</p>
               </div>
               <button
                 className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
@@ -2980,7 +2980,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               </div>
 
               <label className="block">
-                <span className="mb-2 block text-sm font-semibold text-slate-950">手动输入标签</span>
+                <span className="mb-2 block text-sm font-semibold text-slate-950">手动输入答案</span>
                 <input
                   className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                   maxLength={80}
@@ -2993,14 +2993,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
             <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
               <Button type="button" variant="secondary" onClick={handleDisableLabelPromptForGame}>
-                本局游戏不再弹出该窗口
+                本局不再提示
               </Button>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Button type="button" variant="secondary" onClick={() => setIsLabelModalOpen(false)}>
                   稍后再说
                 </Button>
                 <Button type="button" onClick={handleSaveManualLabel} disabled={isSavingLabel || !labelInput.trim()}>
-                  {isSavingLabel ? "保存中..." : "保存标签"}
+                  {isSavingLabel ? "保存中…" : "保存答案"}
                 </Button>
               </div>
             </div>
@@ -3013,7 +3013,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           <div className="w-full max-w-xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
             <div className="border-b border-[var(--line)] px-5 py-4">
               <p className="text-lg font-semibold text-slate-950">发布到社区？</p>
-              <p className="mt-1 text-sm leading-6 text-[var(--muted)]">建议发布，好题库可以让更多房间直接开玩</p>
+              <p className="mt-1 text-sm leading-6 text-[var(--muted)]">觉得这套题好玩？出题不易，发布到社区让更多人直接开玩</p>
             </div>
 
             <div className="space-y-4 px-5 py-4">
@@ -3053,7 +3053,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 onClick={handleConfirmResultPublish}
                 disabled={isPublishingBeforeResult || isAdvancingQuestion || isSkippingQuestion || !resultPublishTitle.trim()}
               >
-                {isPublishingBeforeResult ? "发布中..." : "发布并查看排行榜"}
+                {isPublishingBeforeResult ? "发布中…" : "发布并查看排行榜"}
               </Button>
             </div>
           </div>

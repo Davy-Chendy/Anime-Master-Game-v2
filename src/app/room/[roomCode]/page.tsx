@@ -303,7 +303,7 @@ function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: b
     text = isHost ? "先在大厅设置本局参数，然后选择一名出题人" : "等待房主设置参数并选择出题人";
   } else if (room.status === "QUESTION_SETUP") {
     text = isCurrentPresenter
-      ? "选择上传、URL 文本或社区题库，创建题库预览后通知房主开始游戏"
+      ? "上传图片、导入题单JSONL或选择社区题库。确认后等待房主开始。"
       : room.preparedQuestionSetId
         ? "出题人已准备好题库，等待房主开始游戏"
         : "等待出题人准备题库";
@@ -358,7 +358,7 @@ function PresenterPicker({
             <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主也可以出题" : "玩家"}</span>
           </span>
           <span className="shrink-0 text-sm font-semibold text-[var(--primary)]">
-            {pendingPresenterId === player.id ? "选择中..." : "选择"}
+            {pendingPresenterId === player.id ? "选择中…" : "选择"}
           </span>
         </button>
       ))}
@@ -517,7 +517,7 @@ function KickPlayerModal({
                     variant="secondary"
                     onClick={() => onKickPlayer(player.id)}
                   >
-                    {pendingKickPlayerId === player.id ? "踢出中..." : "踢出"}
+                    {pendingKickPlayerId === player.id ? "踢出中…" : "踢出"}
                   </Button>
                 </div>
               );
@@ -528,6 +528,83 @@ function KickPlayerModal({
             当前没有可踢出的玩家
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+function CancelRoundConfirmModal({
+  isOpen,
+  isCancelingRound,
+  onConfirm,
+  onClose,
+}: {
+  isOpen: boolean;
+  isCancelingRound: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isCancelingRound) {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isCancelingRound, isOpen, onClose]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 px-4 py-6"
+      role="presentation"
+      onMouseDown={() => {
+        if (!isCancelingRound) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        aria-modal="true"
+        className="w-full max-w-md rounded-lg border border-[var(--line)] bg-white p-5 shadow-2xl"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-slate-950">取消本局？</h2>
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
+              确认后会结束当前游戏流程，所有玩家回到房间大厅。
+            </p>
+          </div>
+          <button
+            aria-label="关闭取消本局确认弹窗"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-[var(--line)] text-xl leading-none text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isCancelingRound}
+            type="button"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <Button type="button" variant="secondary" onClick={onClose} disabled={isCancelingRound}>
+            继续本局
+          </Button>
+          <Button type="button" onClick={onConfirm} disabled={isCancelingRound}>
+            {isCancelingRound ? "取消中…" : "确认取消"}
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -729,10 +806,10 @@ function LobbyMainPanel({
             {isHost && room.status === "QUESTION_SETUP" ? (
               <>
                 <Button type="button" onClick={onStartGame} disabled={isStartingGame || !hasQuestionSet}>
-                  {isStartingGame ? "启动中..." : "开始游戏"}
+                  {isStartingGame ? "启动中…" : "开始游戏"}
                 </Button>
                 <Button type="button" variant="secondary" onClick={onCancelRound} disabled={isCancelingRound}>
-                  {isCancelingRound ? "取消中..." : "取消本局"}
+                  {isCancelingRound ? "取消中…" : "取消本局"}
                 </Button>
               </>
             ) : null}
@@ -989,7 +1066,7 @@ function GameResultPanel({
         action={<span className="text-sm font-medium text-[var(--muted)]">出题人：{presenterName}</span>}
       >
         {isLoadingLeaderboard ? (
-          <p className="text-sm text-[var(--muted)]">正在读取本局分数...</p>
+          <p className="text-sm text-[var(--muted)]">正在读取本局分数…</p>
         ) : isTeamBattleResult ? (
           <div className="overflow-x-auto rounded-lg border border-[var(--line)] bg-white">
             <table className="w-full table-fixed text-left text-sm" style={{ minWidth: `${teamLeaderboardWidth}px` }}>
@@ -1168,7 +1245,7 @@ function GameResultPanel({
                   ))}
                 </select>
                 <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
-                  {isRating ? "提交中..." : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
+                  {isRating ? "提交中…" : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
                 </Button>
               </div>
             </>
@@ -1186,7 +1263,7 @@ function GameResultPanel({
           </div>
           {isHost ? (
             <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-              {isReturningToLobby ? "返回中..." : "回到房间大厅"}
+              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
             </Button>
           ) : (
             <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
@@ -1214,6 +1291,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isLeavingRoom, setIsLeavingRoom] = useState(false);
   const [isPresenterPickerOpen, setIsPresenterPickerOpen] = useState(false);
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
+  const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
   const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     gameMode: "ROUND_REVEAL",
@@ -1514,11 +1592,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     try {
       const nextRoom = await cancelCurrentRound(room.id, playerId);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
+      setIsCancelRoundModalOpen(false);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "取消本局失败，请稍后重试");
     } finally {
       setIsCancelingRound(false);
     }
+  }
+
+  function handleRequestCancelRound() {
+    if (!room?.id || !playerId || !isHost || room.status === "LOBBY") {
+      return;
+    }
+
+    setError("");
+    setIsCancelRoundModalOpen(true);
   }
 
   async function handleCancelPresenterSetup() {
@@ -1612,7 +1700,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             <QuestionGuideButton />
             {isHost ? (
               <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
-                {isDissolving ? "解散中..." : "解散房间"}
+                {isDissolving ? "解散中…" : "解散房间"}
               </Button>
             ) : null}
           </div>
@@ -1635,9 +1723,18 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         />
       ) : null}
 
+      {room ? (
+        <CancelRoundConfirmModal
+          isOpen={isCancelRoundModalOpen}
+          isCancelingRound={isCancelingRound}
+          onConfirm={handleCancelRound}
+          onClose={() => setIsCancelRoundModalOpen(false)}
+        />
+      ) : null}
+
       {isLoading ? (
         <Panel title="加载房间">
-          <p className="text-sm leading-6 text-[var(--muted)]">正在从游戏服务读取房间和玩家列表...</p>
+          <p className="text-sm leading-6 text-[var(--muted)]">正在读取房间和玩家列表…</p>
         </Panel>
       ) : !room ? (
         <Panel title="无法加载房间">
@@ -1660,12 +1757,12 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           {isHost || !isCurrentPresenter ? (
             <div className="flex flex-wrap justify-end gap-3">
               {isHost ? (
-                <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
-                  {isCancelingRound ? "返回中..." : "返回大厅"}
+                <Button type="button" variant="secondary" onClick={handleRequestCancelRound} disabled={isCancelingRound}>
+                  {isCancelingRound ? "取消中…" : "取消本局"}
                 </Button>
               ) : (
                 <Button type="button" variant="secondary" onClick={handleExitRoom} disabled={isLeavingRoom}>
-                  {isLeavingRoom ? "退出中..." : "退出房间"}
+                  {isLeavingRoom ? "退出中…" : "退出房间"}
                 </Button>
               )}
             </div>
@@ -1704,7 +1801,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             onSettingsChange={setGameSettings}
             onOpenPresenterPicker={() => setIsPresenterPickerOpen(true)}
             onStartGame={handleStartGame}
-            onCancelRound={handleCancelRound}
+            onCancelRound={handleRequestCancelRound}
           />
           <PresenterPickerModal
             room={room}

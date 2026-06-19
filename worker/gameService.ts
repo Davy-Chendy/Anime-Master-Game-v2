@@ -278,7 +278,7 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
     guessVotes: {},
     pendingGuess: null,
     teamScores: previousScores ?? { red: 0, blue: 0 },
-    message: "红队先手，请投票选择要揭露的方块。",
+    message: "红队先手，请投票选择要打开的方块。",
   };
 }
 
@@ -294,7 +294,7 @@ function resetTeamBattleStateForQuestion(state: TeamBattleState): TeamBattleStat
     guessVotes: {},
     pendingGuess: null,
     teamScores: state.teamScores,
-    message: "进入下一张图，红队先手选择要揭露的方块。",
+    message: "进入下一张图，红队先手选择要打开的方块。",
   };
 }
 
@@ -1156,7 +1156,7 @@ export async function createUploadedQuestionSet(params: {
   }
 
   if (imageUrls.length === 0) {
-    throw new Error("没有检测到有效图片 URL，请至少提供一张 http/https 图片。");
+    throw new Error("没有检测到有效图片链接，请至少提供一张 http/https 图片。");
   }
 
   const { data: room, error: roomError } = await d1
@@ -1231,7 +1231,7 @@ export async function createQuestionSetFromUrlText(params: {
   const questions = parseQuestionImportText(params.imageUrlsText);
 
   if (questions.length === 0) {
-    throw new Error("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
+    throw new Error("没有检测到有效图片链接。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
   }
 
   return createUploadedQuestionSet({
@@ -1524,7 +1524,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("揭露方块失败：当前游戏不存在，或你不是出题人。");
+    throw new Error("打开方块失败：当前游戏不存在，或你不是出题人。");
   }
 
   const roundStartedAt = currentGameSession.round_started_at;
@@ -1550,7 +1550,7 @@ export async function confirmRevealBlocks(params: {
   const nextBlocks = Array.from(new Set([...revealedBlocks, ...selectedBlocks])).sort((a, b) => a - b);
 
   if (nextBlocks.length === revealedBlocks.length) {
-    throw new Error("请至少选择一个尚未揭露的方块。");
+    throw new Error("请至少选择一个尚未打开的方块。");
   }
 
   const { data: updatedGameSession, error } = await d1
@@ -1570,7 +1570,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   if (!updatedGameSession) {
-    throw new Error("揭露方块失败：游戏状态已变化，请刷新后重试。");
+    throw new Error("打开方块失败：游戏状态已变化，请刷新后重试。");
   }
 
   return toGameSession(updatedGameSession);
@@ -3061,7 +3061,7 @@ export async function submitTeamBattleRevealVote(params: {
   const state = session.teamBattleState!;
 
   if (state.phase !== "REVEAL_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
-    throw new Error("还没轮到你所在队伍投票，或当前不是揭露投票阶段。");
+    throw new Error("还没轮到你所在队伍投票，或当前不是选格阶段。");
   }
 
   const revealedSet = new Set(session.revealedBlocks);
@@ -3072,7 +3072,7 @@ export async function submitTeamBattleRevealVote(params: {
   ).sort((a, b) => a - b);
 
   if (selectedBlocks.length !== requiredCount) {
-    throw new Error("本轮选择的方块数量不正确，请按要求选择尚未揭露的方块。");
+    throw new Error("本轮选择的方块数量不正确，请按要求选择尚未打开的方块。");
   }
 
   const revealVotes = {
@@ -3232,7 +3232,7 @@ export async function finalizeTeamBattleVote(params: {
       revealVotes: {},
       guessVotes: {},
       pendingGuess: null,
-      message: `${getTeamName(state.activeTeam)}揭露了 ${selectedBlocks.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
+      message: `${getTeamName(state.activeTeam)}打开了 ${selectedBlocks.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
     };
     const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
       revealed_blocks: nextBlocks,
@@ -3282,8 +3282,8 @@ export async function finalizeTeamBattleVote(params: {
       turnNumber: state.turnNumber + 1,
       message:
         nextPhase === "REVEAL_VOTE"
-          ? `${getTeamName(state.activeTeam)}选择不猜，轮到${getTeamName(nextTeam)}揭露 1 个方块。${tieMessage}`
-          : `${getTeamName(state.activeTeam)}选择不猜，图片已全部揭露，轮到${getTeamName(nextTeam)}决定是否猜测。${tieMessage}`,
+          ? `${getTeamName(state.activeTeam)}选择不猜，轮到${getTeamName(nextTeam)}打开 1 个方块。${tieMessage}`
+          : `${getTeamName(state.activeTeam)}选择不猜，图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。${tieMessage}`,
     };
     const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
       current_reveal_round: currentGameSession.current_reveal_round + 1,
@@ -3363,8 +3363,8 @@ export async function judgeTeamBattleGuess(params: {
       turnNumber: state.turnNumber + 1,
       message:
         nextPhase === "REVEAL_VOTE"
-          ? `${getTeamName(state.pendingGuess.team)}猜错，${getTeamName(nextTeam)}本回合可以揭露 2 个方块。`
-          : `${getTeamName(state.pendingGuess.team)}猜错，图片已全部揭露，轮到${getTeamName(nextTeam)}决定是否猜测。`,
+          ? `${getTeamName(state.pendingGuess.team)}猜错，${getTeamName(nextTeam)}本回合可以打开 2 个方块。`
+          : `${getTeamName(state.pendingGuess.team)}猜错，图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。`,
     };
     const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
       current_reveal_round: currentGameSession.current_reveal_round + 1,
@@ -3741,7 +3741,7 @@ export async function updateQuestionLabel(params: {
   const labelText = params.labelText.trim();
 
   if (!labelText) {
-    throw new Error("请先填写正确答案标签。");
+    throw new Error("请先填写正确答案。");
   }
 
   const { data: currentGameSession, error: currentError } = await d1
@@ -3756,7 +3756,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("更新标签失败：当前游戏不存在或已结束。");
+    throw new Error("保存正确答案失败：当前游戏不存在或已结束。");
   }
 
   const { data: room, error: roomLoadError } = await d1
@@ -3773,7 +3773,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!room) {
-    throw new Error("只有本局出题人可以更新答案标签。");
+    throw new Error("只有本局出题人可以填写正确答案。");
   }
 
   const currentSession = toGameSession(currentGameSession);
@@ -3781,7 +3781,7 @@ export async function updateQuestionLabel(params: {
     !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
 
   if (!isReviewingQuestion) {
-    throw new Error("当前还没有进入完整图片复盘阶段，不能更新答案标签。");
+    throw new Error("当前还没有进入完整图片复盘阶段，不能填写正确答案。");
   }
 
   const { data: question, error: questionError } = await d1
@@ -3797,11 +3797,11 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!question) {
-    throw new Error("当前题目不存在，不能更新答案标签。");
+    throw new Error("当前题目不存在，不能填写正确答案。");
   }
 
   if (question.label_text?.trim()) {
-    throw new Error("该题已经有答案标签，不能重复更新。");
+    throw new Error("该题已经有正确答案，不能重复填写。");
   }
 
   let sourceAnswerId: string | null = null;
@@ -3839,7 +3839,7 @@ export async function updateQuestionLabel(params: {
       }
 
       if (!buzzerAnswer) {
-        throw new Error("引用的答案不存在，不能作为标签来源。");
+        throw new Error("引用的答案不存在，不能作为正确答案。");
       }
 
       sourceAnswerId = buzzerAnswer.id;
@@ -3865,7 +3865,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!updatedQuestion) {
-    throw new Error("答案标签已被其他操作更新，请刷新后重试。");
+    throw new Error("正确答案已被其他操作更新，请刷新后重试。");
   }
 
   return toQuestion(updatedQuestion);

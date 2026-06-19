@@ -211,23 +211,23 @@ export default function HomePage() {
               动漫高手·一眼顶针
             </h1>
             <p className="mt-5 max-w-xl text-base leading-7 text-[var(--muted)]">
-              根据动画截图猜动画的多人实时小游戏。创建房间、选择出题人、上传或选择社区题库，实时揭露图片并猜出动画名称
+              和朋友一起开格子猜动画
             </p>
             <div className="mt-6">
               <QuestionGuideButton className="w-full sm:w-auto" />
             </div>
             <div className="mt-8 grid max-w-xl gap-3 sm:grid-cols-3">
               <div className="rounded-lg border border-white bg-white/70 p-4 shadow-sm">
-                <p className="text-2xl font-bold text-slate-950">6 位</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">房间号</p>
+                <p className="text-xl font-bold text-slate-950">逐格揭图</p>
+                <p className="mt-1 text-xs text-[var(--muted)]">看线索猜动画名</p>
               </div>
               <div className="rounded-lg border border-white bg-white/70 p-4 shadow-sm">
-                <p className="text-2xl font-bold text-slate-950">本地</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">临时身份</p>
+                <p className="text-xl font-bold text-slate-950">14w+ 截图题库</p>
+                <p className="mt-1 text-xs text-[var(--muted)]">覆盖 2k+ 部动画</p>
               </div>
               <div className="rounded-lg border border-white bg-white/70 p-4 shadow-sm">
-                <p className="text-2xl font-bold text-slate-950">15 人</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">房间上限</p>
+                <p className="text-xl font-bold text-slate-950">题库社区</p>
+                <p className="mt-1 text-xs text-[var(--muted)]">好题发布复用</p>
               </div>
             </div>
           </section>
@@ -247,7 +247,7 @@ export default function HomePage() {
               />
 
               <Button className="w-full" type="button" onClick={handleCreateRoom} disabled={isSubmitting}>
-                {isSubmitting ? "处理中..." : "创建房间"}
+                {isSubmitting ? "处理中…" : "创建房间"}
               </Button>
 
               <div className="border-t border-[var(--line)] pt-4">
@@ -270,7 +270,7 @@ export default function HomePage() {
                   onClick={handleJoinRoom}
                   disabled={isSubmitting}
                 >
-                  {isSubmitting ? "处理中..." : "加入房间"}
+                  {isSubmitting ? "处理中…" : "加入房间"}
                 </Button>
               </div>
 
@@ -282,8 +282,8 @@ export default function HomePage() {
 
         <footer className="home-footer" aria-label="相关信息">
           <div className="home-footer-grid">
-            <HomeFooterLinkItem href={null} icon="video" label="视频介绍" />
-            <HomeFooterLinkItem href={null} icon="rules" label="文字规则" />
+            <HomeFooterLinkItem href={null} icon="video" label="视频介绍（待补）" />
+            <HomeFooterLinkItem href={null} icon="rules" label="文字规则（待补）" />
             <HomeFooterLinkItem href={GITHUB_REPO_URL} icon="github" label="Github 仓库" />
             <HomeFooterLinkItem href={FEEDBACK_QQ_GROUP_URL} icon="group" label="交流反馈Q群" />
             <HomeFooterLinkItem href={OTHER_GAME_URL} icon="spark" label="作者其他动漫高手游戏：截码战" wide />
