@@ -47,7 +47,7 @@ export type UploadProgress = {
 };
 
 const r2UploadConfig = {
-  maxSize: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 960),
+  maxSize: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 1600),
   quality: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
   format: process.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
   concurrency: Number(process.env.NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY ?? 2),
@@ -177,7 +177,7 @@ async function compressImage(item: UploadableImage): Promise<PreparedImage> {
 
   const targetMime = r2UploadConfig.format || "image/webp";
   const quality = Math.max(0.1, Math.min(1, r2UploadConfig.quality || 0.78));
-  const maxSize = Math.max(100, r2UploadConfig.maxSize || 960);
+  const maxSize = Math.max(100, r2UploadConfig.maxSize || 1600);
   const image = await loadImageFromBlob(item.file);
   const width = image.naturalWidth || image.width;
   const height = image.naturalHeight || image.height;
