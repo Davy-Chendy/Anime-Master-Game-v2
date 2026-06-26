@@ -5,14 +5,11 @@ import type { Answer, BuzzerAnswer, GameSession, Question, QuestionSet, Realtime
 export interface Env {
   DB: D1Database;
   ROOM_OBJECTS: DurableObjectNamespace;
+  IMAGE_BUCKET: R2Bucket;
   ALLOWED_ORIGIN?: string;
-  CLOUDINARY_CLOUD_NAME?: string;
-  NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME?: string;
-  CLOUDINARY_API_KEY?: string;
-  CLOUDINARY_API_SECRET?: string;
-  CLOUDINARY_FOLDER?: string;
-  NEXT_PUBLIC_CLOUDINARY_FOLDER?: string;
-  CLOUDINARY_EXISTING_IMAGE_LIMIT?: string;
+  R2_IMAGE_PREFIX?: string;
+  R2_PUBLIC_BASE_URL?: string;
+  R2_EXISTING_IMAGE_LIMIT?: string;
 }
 
 type RpcBody = {
@@ -33,16 +30,10 @@ type BroadcastMessage = {
   roundSnapshot?: RoundSnapshot;
 };
 
-type CloudinaryResource = {
-  public_id: string;
-  secure_url: string;
-  width?: number;
-  height?: number;
-  created_at?: string;
-};
-
 const ACTION_RESULT_TTL_MS = 10_000;
 const ACTION_CACHE_MIN_ALARM_DELAY_MS = 100;
+const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
 
 const MUTATION_NAMES = new Set([
   "createRoom",
@@ -107,7 +98,7 @@ function corsHeaders(request: Request, env: Env) {
 
   return {
     "Access-Control-Allow-Origin": allowOrigin,
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
     "Access-Control-Allow-Headers": "content-type",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
@@ -432,56 +423,191 @@ async function handleRpc(request: Request, env: Env) {
   });
 }
 
-async function handleCloudinaryImages(request: Request, env: Env) {
-  const cloudName = env.CLOUDINARY_CLOUD_NAME ?? env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
-  const apiKey = env.CLOUDINARY_API_KEY;
-  const apiSecret = env.CLOUDINARY_API_SECRET;
-  const folder = env.CLOUDINARY_FOLDER ?? env.NEXT_PUBLIC_CLOUDINARY_FOLDER ?? "";
-  const limit = Math.max(1, Math.min(100, Number(env.CLOUDINARY_EXISTING_IMAGE_LIMIT ?? 50)));
+function getR2ImagePrefix(env: Env) {
+  return (env.R2_IMAGE_PREFIX ?? "question-images")
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\.\./g, "");
+}
 
-  if (!cloudName || !apiKey || !apiSecret) {
-    return json(
-      {
-        error: "缺少图片服务配置：请设置云名称、接口密钥和接口密钥密码。",
-      },
-      { status: 500 },
-      request,
-      env,
-    );
+function sanitizeFileName(name: string) {
+  const fallback = "image";
+  const withoutPath = name.split(/[\\/]/).filter(Boolean).pop() ?? fallback;
+  const dotIndex = withoutPath.lastIndexOf(".");
+  const rawBase = dotIndex > 0 ? withoutPath.slice(0, dotIndex) : withoutPath;
+  const rawExt = dotIndex > 0 ? withoutPath.slice(dotIndex).toLowerCase() : "";
+  const base = rawBase
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  const ext = /^\.[a-z0-9]{1,8}$/.test(rawExt) ? rawExt : "";
+  return `${base || fallback}${ext}`;
+}
+
+function encodeR2Key(key: string) {
+  return key.split("/").map(encodeURIComponent).join("/");
+}
+
+function getR2PublicUrl(request: Request, env: Env, key: string) {
+  const configuredBase = env.R2_PUBLIC_BASE_URL?.trim().replace(/\/+$/g, "");
+  if (configuredBase) {
+    return `${configuredBase}/${encodeR2Key(key)}`;
   }
 
-  const url = new URL(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/resources/image/upload`);
-  url.searchParams.set("max_results", String(limit));
+  const origin = new URL(request.url).origin;
+  return `${origin}${R2_IMAGE_ROUTE_PREFIX}${encodeR2Key(key)}`;
+}
 
-  if (folder) {
-    url.searchParams.set("prefix", folder.endsWith("/") ? folder : `${folder}/`);
+function buildR2ImageKey(request: Request, env: Env) {
+  const url = new URL(request.url);
+  const fileName = sanitizeFileName(url.searchParams.get("filename") ?? "image");
+  const now = new Date();
+  const datePath = now.toISOString().slice(0, 10).replace(/-/g, "/");
+  const prefix = getR2ImagePrefix(env);
+  const id = crypto.randomUUID();
+  return `${prefix}/${datePath}/${id}-${fileName}`;
+}
+
+function getRequestContentLength(request: Request) {
+  const value = request.headers.get("content-length");
+  if (!value) {
+    return null;
   }
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Basic ${btoa(`${apiKey}:${apiSecret}`)}`,
+  const size = Number(value);
+  return Number.isFinite(size) && size >= 0 ? size : null;
+}
+
+async function handleR2Upload(request: Request, env: Env) {
+  if (!env.IMAGE_BUCKET) {
+    return json({ error: "缺少 R2 存储绑定：请在 wrangler.toml 配置 IMAGE_BUCKET。" }, { status: 500 }, request, env);
+  }
+
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.startsWith("image/")) {
+    return json({ error: "只能上传图片文件。" }, { status: 415 }, request, env);
+  }
+
+  const contentLength = getRequestContentLength(request);
+  if (contentLength != null && contentLength > IMAGE_UPLOAD_MAX_BYTES) {
+    return json({ error: "单张图片不能超过 20 MB。" }, { status: 413 }, request, env);
+  }
+
+  const body = await request.arrayBuffer();
+  if (body.byteLength === 0) {
+    return json({ error: "上传内容为空。" }, { status: 400 }, request, env);
+  }
+
+  if (body.byteLength > IMAGE_UPLOAD_MAX_BYTES) {
+    return json({ error: "单张图片不能超过 20 MB。" }, { status: 413 }, request, env);
+  }
+
+  const key = buildR2ImageKey(request, env);
+  const checksum = await crypto.subtle.digest("SHA-256", body);
+  const object = await env.IMAGE_BUCKET.put(key, body, {
+    httpMetadata: {
+      contentType,
+      cacheControl: "public, max-age=31536000, immutable",
     },
+    customMetadata: {
+      uploadedAt: new Date().toISOString(),
+    },
+    sha256: checksum,
   });
 
-  const data = (await response.json().catch(() => ({}))) as {
-    resources?: CloudinaryResource[];
-    error?: { message?: string };
-  };
-
-  if (!response.ok) {
-    return json({ error: `图片服务请求失败，请检查配置和网络。状态码 ${response.status}。` }, { status: response.status }, request, env);
+  if (!object) {
+    return json({ error: "图片写入 R2 失败，请稍后重试。" }, { status: 500 }, request, env);
   }
 
-  const images = (data.resources ?? []).map((resource) => ({
-    publicId: resource.public_id,
-    url: resource.secure_url,
-    originalUrl: resource.secure_url,
-    width: resource.width ?? null,
-    height: resource.height ?? null,
-    createdAt: resource.created_at ?? null,
-  }));
+  return json(
+    {
+      key,
+      url: getR2PublicUrl(request, env, key),
+      publicId: key,
+      size: object.size,
+      etag: object.httpEtag,
+    },
+    {},
+    request,
+    env,
+  );
+}
 
-  return json({ images, folder, limit }, {}, request, env);
+function getR2ObjectKeyFromPath(pathname: string) {
+  if (!pathname.startsWith(R2_IMAGE_ROUTE_PREFIX)) {
+    return null;
+  }
+
+  const encodedKey = pathname.slice(R2_IMAGE_ROUTE_PREFIX.length);
+  if (!encodedKey) {
+    return null;
+  }
+
+  const key = encodedKey
+    .split("/")
+    .map((part) => decodeURIComponent(part))
+    .join("/");
+
+  if (!key || key.includes("..") || key.startsWith("/")) {
+    return null;
+  }
+
+  return key;
+}
+
+async function handleR2Image(request: Request, env: Env, key: string) {
+  if (!env.IMAGE_BUCKET) {
+    return json({ error: "缺少 R2 存储绑定。" }, { status: 500 }, request, env);
+  }
+
+  const object = request.method === "HEAD" ? await env.IMAGE_BUCKET.head(key) : await env.IMAGE_BUCKET.get(key);
+  if (!object) {
+    return new Response("Not found", { status: 404, headers: corsHeaders(request, env) });
+  }
+
+  const headers = new Headers(corsHeaders(request, env));
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  if (!headers.has("cache-control")) {
+    headers.set("cache-control", "public, max-age=31536000, immutable");
+  }
+
+  if (request.method === "HEAD") {
+    headers.set("content-length", String(object.size));
+    return new Response(null, { headers });
+  }
+
+  return new Response(object.body, { headers });
+}
+
+async function handleR2ImagesList(request: Request, env: Env) {
+  if (!env.IMAGE_BUCKET) {
+    return json({ error: "缺少 R2 存储绑定。" }, { status: 500 }, request, env);
+  }
+
+  const prefix = getR2ImagePrefix(env);
+  const limit = Math.max(1, Math.min(100, Number(env.R2_EXISTING_IMAGE_LIMIT ?? 50)));
+  const listed = await env.IMAGE_BUCKET.list({
+    prefix: prefix ? `${prefix}/` : undefined,
+    limit,
+    include: ["httpMetadata"],
+  });
+
+  const images = listed.objects
+    .slice()
+    .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime())
+    .map((object) => ({
+      publicId: object.key,
+      url: getR2PublicUrl(request, env, object.key),
+      originalUrl: getR2PublicUrl(request, env, object.key),
+      width: null,
+      height: null,
+      createdAt: object.uploaded.toISOString(),
+      size: object.size,
+    }));
+
+  return json({ images, folder: prefix, limit, truncated: listed.truncated, cursor: listed.cursor ?? null }, {}, request, env);
 }
 
 export class RoomDurableObject {
@@ -643,8 +769,17 @@ export default {
         return await handleRpc(request, env);
       }
 
-      if (url.pathname === "/api/cloudinary-images" && request.method === "GET") {
-        return await handleCloudinaryImages(request, env);
+      if (url.pathname === "/api/r2-upload" && request.method === "POST") {
+        return await handleR2Upload(request, env);
+      }
+
+      if (url.pathname === "/api/r2-images" && request.method === "GET") {
+        return await handleR2ImagesList(request, env);
+      }
+
+      const r2ImageKey = getR2ObjectKeyFromPath(url.pathname);
+      if (r2ImageKey && (request.method === "GET" || request.method === "HEAD")) {
+        return await handleR2Image(request, env, r2ImageKey);
       }
 
       const realtimeMatch = url.pathname.match(/^\/api\/realtime\/(.+)\/ws$/);

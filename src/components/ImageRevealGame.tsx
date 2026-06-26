@@ -858,6 +858,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
 
     const image = new Image();
+    image.crossOrigin = "anonymous";
     image.onload = () => {
       if (isCanceled) {
         return;
