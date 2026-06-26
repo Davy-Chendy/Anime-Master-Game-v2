@@ -1484,22 +1484,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
 
-  async function handleBackHome() {
-    try {
-      if (room?.id && playerId) {
-        await leaveRoom(room.id, playerId);
-      }
-    } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "离开房间失败，请稍后重试");
-      return;
-    }
-
-    clearLocalRoomSession();
-    router.push("/");
-  }
-
   async function handleExitRoom() {
-    if (!room?.id || !playerId || isCurrentPresenter) {
+    if (!room?.id || !playerId || (room.status === "PLAYING" && isCurrentPresenter)) {
       return;
     }
 
@@ -1683,13 +1669,6 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       {room?.status !== "PLAYING" ? (
         <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
-            <button
-              className="text-sm font-semibold text-[var(--primary)] hover:underline"
-              type="button"
-              onClick={handleBackHome}
-            >
-              返回首页
-            </button>
             <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">房间 {roomCode}</h1>
             <p className="text-sm text-[var(--muted)] sm:text-base">
               当前玩家：{nickname || "未设置昵称"}
@@ -1698,10 +1677,16 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           </div>
           <div className="flex shrink-0 flex-wrap justify-end gap-3">
             <QuestionGuideButton />
-            {isHost ? (
-              <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
-                {isDissolving ? "解散中…" : "解散房间"}
-              </Button>
+            {room ? (
+              isHost ? (
+                <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
+                  {isDissolving ? "解散中…" : "解散房间"}
+                </Button>
+              ) : (
+                <Button type="button" variant="secondary" onClick={handleExitRoom} disabled={isLeavingRoom}>
+                  {isLeavingRoom ? "退出中…" : "退出房间"}
+                </Button>
+              )
             ) : null}
           </div>
         </div>
