@@ -17,11 +17,14 @@ database_name = "anime_master_game"
 database_id = "bdc89668-68ab-48bd-968b-ebcc40367da2"
 migrations_dir = "d1/migrations"
 
+[[r2_buckets]]
+binding = "IMAGE_BUCKET"
+bucket_name = "anime-master-game-images"
+
 [vars]
 ALLOWED_ORIGIN = "anime-master-game-v2.monight.dpdns.org,http://localhost:3000,http://127.0.0.1:3000"
-CLOUDINARY_CLOUD_NAME = "dfdfibosf"
-CLOUDINARY_FOLDER = "anime-master-game"
-CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
+R2_IMAGE_PREFIX = "question-images"
+R2_EXISTING_IMAGE_LIMIT = "50"
 
 [observability]
 enabled = true

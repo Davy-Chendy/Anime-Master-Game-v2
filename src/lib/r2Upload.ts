@@ -8,25 +8,25 @@ export type UploadableImage = {
   type: string;
 };
 
-export type CloudinaryUploadResult = {
+export type R2UploadResult = {
   ok: true;
   path: string;
   url: string;
-  originalCloudinaryUrl: string;
+  r2Key: string;
   publicId: string;
   rawBytes: number;
   uploadBytes: number;
   usedOriginal: boolean;
 };
 
-export type CloudinaryUploadFailure = {
+export type R2UploadFailure = {
   ok: false;
   path: string;
   error: string;
   rawBytes: number;
 };
 
-export type CloudinaryUploadItemResult = CloudinaryUploadResult | CloudinaryUploadFailure;
+export type R2UploadItemResult = R2UploadResult | R2UploadFailure;
 
 type PreparedImage = {
   blob: Blob;
@@ -46,22 +46,27 @@ export type UploadProgress = {
   latestMessage: string;
 };
 
-const cloudinaryConfig = {
-  cloudName: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ?? "",
-  uploadPreset: process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET ?? "",
-  folder: process.env.NEXT_PUBLIC_CLOUDINARY_FOLDER ?? "anime-master-game",
+const r2UploadConfig = {
   maxSize: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 960),
   quality: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
   format: process.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
-  concurrency: Number(process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_CONCURRENCY ?? 2),
+  concurrency: Number(process.env.NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY ?? 2),
 };
 
-export function getCloudinaryUploadConfigStatus() {
+function apiBase() {
+  return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+}
+
+function apiUrl(path: string) {
+  return `${apiBase()}${path}`;
+}
+
+export function getR2UploadConfigStatus() {
   return {
-    isReady: Boolean(cloudinaryConfig.cloudName && cloudinaryConfig.uploadPreset),
-    maxSize: cloudinaryConfig.maxSize,
-    quality: cloudinaryConfig.quality,
-    format: cloudinaryConfig.format,
+    isReady: true,
+    maxSize: r2UploadConfig.maxSize,
+    quality: r2UploadConfig.quality,
+    format: r2UploadConfig.format,
   };
 }
 
@@ -89,17 +94,13 @@ export function filesToUploadableImages(fileList: FileList | File[]) {
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
-export async function uploadImagesToCloudinary(
+export async function uploadImagesToR2(
   items: UploadableImage[],
   onProgress: (progress: UploadProgress) => void,
 ) {
-  if (!cloudinaryConfig.cloudName || !cloudinaryConfig.uploadPreset) {
-    throw new Error("缺少图片上传配置：请设置云名称和免签上传预设。");
-  }
-
-  const results: CloudinaryUploadItemResult[] = [];
+  const results: R2UploadItemResult[] = [];
   const total = items.length;
-  const limit = Math.max(1, Math.min(6, cloudinaryConfig.concurrency || 2));
+  const limit = Math.max(1, Math.min(6, r2UploadConfig.concurrency || 2));
   let done = 0;
   let success = 0;
   let fail = 0;
@@ -117,8 +118,8 @@ export async function uploadImagesToCloudinary(
       results.push({
         ok: true,
         path: item.path,
-        url: uploaded.secureUrl,
-        originalCloudinaryUrl: uploaded.secureUrl,
+        url: uploaded.url,
+        r2Key: uploaded.key,
         publicId: uploaded.publicId,
         rawBytes: prepared.rawBytes,
         uploadBytes: prepared.uploadBytes,
@@ -174,9 +175,9 @@ async function compressImage(item: UploadableImage): Promise<PreparedImage> {
     };
   }
 
-  const targetMime = cloudinaryConfig.format || "image/webp";
-  const quality = Math.max(0.1, Math.min(1, cloudinaryConfig.quality || 0.78));
-  const maxSize = Math.max(100, cloudinaryConfig.maxSize || 960);
+  const targetMime = r2UploadConfig.format || "image/webp";
+  const quality = Math.max(0.1, Math.min(1, r2UploadConfig.quality || 0.78));
+  const maxSize = Math.max(100, r2UploadConfig.maxSize || 960);
   const image = await loadImageFromBlob(item.file);
   const width = image.naturalWidth || image.width;
   const height = image.naturalHeight || image.height;
@@ -277,34 +278,33 @@ function replaceExtension(name: string, extension: string) {
 }
 
 async function uploadPreparedFile(prepared: PreparedImage) {
-  const endpoint = `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudinaryConfig.cloudName)}/image/upload`;
-  const form = new FormData();
-  form.append("file", prepared.blob, prepared.uploadName);
-  form.append("upload_preset", cloudinaryConfig.uploadPreset);
-  form.append("tags", "anime-master-game,question-set");
-
-  if (cloudinaryConfig.folder) {
-    form.append("folder", cloudinaryConfig.folder);
-  }
-
-  const response = await fetch(endpoint, { method: "POST", body: form });
+  const endpoint = apiUrl(`/api/r2-upload?filename=${encodeURIComponent(prepared.uploadName)}`);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": prepared.blob.type || "application/octet-stream",
+    },
+    body: prepared.blob,
+  });
   const data = (await response.json().catch(() => ({}))) as {
-    secure_url?: string;
-    public_id?: string;
-    error?: { message?: string };
+    key?: string;
+    url?: string;
+    publicId?: string;
+    error?: string;
   };
 
   if (!response.ok) {
-    throw new Error(`图片上传失败，请检查上传预设和网络。状态码 ${response.status}。`);
+    throw new Error(data.error ?? `图片上传失败，请检查 R2 配置和网络。状态码 ${response.status}。`);
   }
 
-  if (!data.secure_url) {
+  if (!data.url || !data.key) {
     throw new Error("图片服务未返回图片地址。");
   }
 
   return {
-    secureUrl: data.secure_url,
-    publicId: data.public_id ?? "",
+    key: data.key,
+    url: data.url,
+    publicId: data.publicId ?? data.key,
   };
 }
 

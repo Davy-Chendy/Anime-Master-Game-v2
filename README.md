@@ -58,7 +58,7 @@
 - Cloudflare Pages
 - Cloudflare Workers + Durable Objects
 - Cloudflare D1
-- Cloudinary unsigned browser upload
+- Cloudflare R2 object storage
 
 ## 部署
 

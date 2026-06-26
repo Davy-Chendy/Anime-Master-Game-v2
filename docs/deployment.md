@@ -6,7 +6,7 @@
 - 后端 API + WebSocket：Cloudflare Workers
 - 实时房间：Durable Objects
 - 持久化：Cloudflare D1
-- 图片：Cloudinary
+- 图片：Cloudflare R2
 
 生产环境推荐使用自定义域名同源路由：
 
@@ -44,14 +44,12 @@ cp .env.example .env.local
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8787
 ```
 
-本地 Worker 如果要读取 Cloudinary 已有图片，在项目根目录创建 `.dev.vars`：
+图片上传会走本地 Worker 的 R2 绑定。首次运行前先创建本地 D1，并确认 `wrangler.toml` 里有 `IMAGE_BUCKET` 绑定：
 
-```env
-CLOUDINARY_CLOUD_NAME=your-cloud-name
-CLOUDINARY_API_KEY=your-cloudinary-api-key
-CLOUDINARY_API_SECRET=your-cloudinary-api-secret
-CLOUDINARY_FOLDER=anime-master-game
-CLOUDINARY_EXISTING_IMAGE_LIMIT=50
+```toml
+[[r2_buckets]]
+binding = "IMAGE_BUCKET"
+bucket_name = "anime-master-game-images"
 ```
 
 初始化本地 D1：
@@ -90,10 +88,10 @@ npm run build
 第一次部署顺序：
 
 1. 创建 D1。
-2. 填 `wrangler.toml`。
-3. 执行远程 D1 迁移。
-4. 部署 Worker：本地手动部署或 Git 连接部署二选一。
-5. 写入 Worker secrets。
+2. 创建 R2 bucket。
+3. 填 `wrangler.toml`。
+4. 执行远程 D1 迁移。
+5. 部署 Worker：本地手动部署或 Git 连接部署二选一。
 6. 连接 GitHub 自动部署 Pages。
 7. 绑定自定义域名，并配置 Worker 同源 `/api/*` route。
 8. 回填真实 `ALLOWED_ORIGIN`，按你的 Worker 部署方式更新 Worker。
@@ -128,9 +126,24 @@ migrations_dir = "d1/migrations"
 ```toml
 [vars]
 ALLOWED_ORIGIN = "*"
-CLOUDINARY_CLOUD_NAME = "your-cloud-name"
-CLOUDINARY_FOLDER = "anime-master-game"
-CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
+R2_IMAGE_PREFIX = "question-images"
+R2_EXISTING_IMAGE_LIMIT = "50"
+```
+
+### 2. 创建 R2 bucket
+
+创建远程 R2 bucket：
+
+```bash
+npx wrangler r2 bucket create anime-master-game-images
+```
+
+确认 `wrangler.toml` 里的 binding 名称是 `IMAGE_BUCKET`。Worker 代码通过绑定直接读写 R2，不需要 R2 API token，也不要把 Cloudflare API token 写进代码或配置：
+
+```toml
+[[r2_buckets]]
+binding = "IMAGE_BUCKET"
+bucket_name = "anime-master-game-images"
 ```
 
 执行远程 D1 迁移：
@@ -139,7 +152,7 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
 npm run d1:migrate:remote
 ```
 
-### 2. 部署 Worker
+### 3. 部署 Worker
 
 先检查 Worker：
 
@@ -161,15 +174,6 @@ npm run worker:deploy
 ```text
 https://anime-master-game-api.<your-name>.workers.dev
 ```
-
-写入 Worker secrets：
-
-```bash
-npx wrangler secret put CLOUDINARY_API_KEY
-npx wrangler secret put CLOUDINARY_API_SECRET
-```
-
-终端提示输入值时，分别填 Cloudinary API key 和 API secret。不要把这两个值写进 `wrangler.toml`，也不要配到 Pages。
 
 #### 方式 B：Git 连接部署
 
@@ -208,22 +212,7 @@ name = "anime-master-game-api"
 https://anime-master-game-api.<your-name>.workers.dev
 ```
 
-配置 Worker runtime secrets：
-
-```text
-Workers & Pages -> 你的 Worker -> Settings -> Variables & Secrets
-```
-
-添加：
-
-```text
-CLOUDINARY_API_KEY
-CLOUDINARY_API_SECRET
-```
-
-这两个是 Worker runtime secrets，不要写进 `wrangler.toml`，也不要配到 Pages。
-
-### 3. 部署 Pages
+### 4. 部署 Pages
 
 在 Cloudflare 创建 Pages：
 
@@ -244,27 +233,19 @@ Root directory: 项目根目录
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=https://anime-master-game-api.<your-name>.workers.dev
-NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=your-cloud-name
-NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=your-unsigned-upload-preset
 ```
 
-如果已经配置了自定义域名同源 `/api/*`，不要配置 `NEXT_PUBLIC_API_BASE_URL`。Pages 只需要填 Cloudinary 的两个变量：
-
-```env
-NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=your-cloud-name
-NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=your-unsigned-upload-preset
-```
+如果已经配置了自定义域名同源 `/api/*`，不要配置 `NEXT_PUBLIC_API_BASE_URL`。
 
 不要把 `NEXT_PUBLIC_API_BASE_URL` 保留为空字符串；直接删除这个环境变量。
 
 其他前端上传参数已有默认值，通常不用填：
 
 ```text
-NEXT_PUBLIC_CLOUDINARY_FOLDER=anime-master-game
 NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE=960
 NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT=image/webp
 NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY=0.78
-NEXT_PUBLIC_CLOUDINARY_UPLOAD_CONCURRENCY=2
+NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY=2
 ```
 
 保存后 Cloudflare Pages 会自动构建并部署。部署成功后，记下 Pages 地址：
@@ -273,7 +254,7 @@ NEXT_PUBLIC_CLOUDINARY_UPLOAD_CONCURRENCY=2
 https://anime-master-game-v2.pages.dev
 ```
 
-### 4. 回填 CORS
+### 5. 回填 CORS
 
 把 `wrangler.toml` 里的 `ALLOWED_ORIGIN` 从 `"*"` 改成真实 Pages origin：
 
@@ -298,7 +279,7 @@ npm run worker:deploy
 git push
 ```
 
-### 5. 推荐：自定义域名同源 `/api/*`
+### 6. 推荐：自定义域名同源 `/api/*`
 
 生产环境推荐做成：
 
@@ -418,20 +399,7 @@ git push
 Pages -> Deployments -> 重新运行最近一次 Git deployment
 ```
 
-改了 Worker secrets：
-
-本地手动部署：
-
-```bash
-npx wrangler secret put CLOUDINARY_API_KEY
-npx wrangler secret put CLOUDINARY_API_SECRET
-```
-
-Git 连接部署：
-
-```text
-Worker -> Settings -> Variables & Secrets
-```
+改了 R2 bucket 名称或绑定后，先更新 `wrangler.toml`，再重新部署 Worker。
 
 ## 常见问题
 
@@ -530,19 +498,20 @@ git push
 npm run d1:migrate:remote
 ```
 
-### 社区题库读取不到 Cloudinary 图片
+### 图片上传后无法显示
 
-检查 Worker secrets 是否已配置：
+先检查 Worker 是否绑定了 R2：
 
-```text
-CLOUDINARY_API_KEY
-CLOUDINARY_API_SECRET
+```toml
+[[r2_buckets]]
+binding = "IMAGE_BUCKET"
+bucket_name = "anime-master-game-images"
 ```
 
-检查 Worker vars 是否已配置：
+再检查图片 URL 是否走到了 Worker：
 
 ```text
-CLOUDINARY_CLOUD_NAME
-CLOUDINARY_FOLDER
-CLOUDINARY_EXISTING_IMAGE_LIMIT
+https://game.example.com/api/r2-images/question-images/...
 ```
+
+如果你配置了 `R2_PUBLIC_BASE_URL`，需要确保该域名已经绑定到 R2 bucket，且浏览器可以直接访问对象。

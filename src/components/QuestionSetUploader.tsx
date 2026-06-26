@@ -4,12 +4,12 @@ import { DragEvent, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import {
   filesToUploadableImages,
-  getCloudinaryUploadConfigStatus,
-  uploadImagesToCloudinary,
-  type CloudinaryUploadItemResult,
+  getR2UploadConfigStatus,
+  uploadImagesToR2,
+  type R2UploadItemResult,
   type UploadProgress,
   type UploadableImage,
-} from "@/lib/cloudinaryUpload";
+} from "@/lib/r2Upload";
 import {
   createQuestionSetFromUrlText,
   createUploadedQuestionSet,
@@ -165,9 +165,9 @@ export function QuestionSetUploader({
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
   const [isConfirmingQuestionSet, setIsConfirmingQuestionSet] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
-  const [results, setResults] = useState<CloudinaryUploadItemResult[]>([]);
+  const [results, setResults] = useState<R2UploadItemResult[]>([]);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
-  const configStatus = getCloudinaryUploadConfigStatus();
+  const configStatus = getR2UploadConfigStatus();
 
   const previewUrls = useMemo(() => getQuestionSetUrls(questionSet), [questionSet]);
   const previewItems = useMemo(() => getQuestionSetPreviewItems(questionSet), [questionSet]);
@@ -404,11 +404,11 @@ export function QuestionSetUploader({
     setProgress({ ...emptyProgress, total: items.length, latestMessage: "开始压缩并上传图片" });
 
     try {
-      const uploadResults = await uploadImagesToCloudinary(items, setProgress);
+      const uploadResults = await uploadImagesToR2(items, setProgress);
       setResults(uploadResults);
 
       const imageUrls = uploadResults
-        .filter((result): result is Extract<CloudinaryUploadItemResult, { ok: true }> => result.ok)
+        .filter((result): result is Extract<R2UploadItemResult, { ok: true }> => result.ok)
         .map((result) => result.url);
 
       if (imageUrls.length === 0) {
@@ -536,7 +536,7 @@ export function QuestionSetUploader({
           <div className="space-y-4">
             {!configStatus.isReady ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                缺少图片上传环境变量，无法上传新图片。
+                图片上传服务未就绪，无法上传新图片。
               </div>
             ) : null}
             <div
@@ -655,7 +655,7 @@ export function QuestionSetUploader({
               <textarea
                 className="min-h-52 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                 placeholder={
-                  "https://res.cloudinary.com/.../image.webp\nhttps://res.cloudinary.com/.../image2.webp\n\n{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"
+                  "https://game.example.com/api/r2-images/question-images/.../image.webp\nhttps://game.example.com/api/r2-images/question-images/.../image2.webp\n\n{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"
                 }
                 value={urlText}
                 onChange={(event) => {
