@@ -30,6 +30,19 @@ import type {
 } from "../src/types/game";
 
 type D1QueryClient = ReturnType<typeof createD1QueryClient>;
+type DbQuestionSnapshot = {
+  game_session_id: string;
+  question_index: number;
+  eligible_player_count: number;
+  eligible_player_ids?: string | null;
+  created_at: string;
+};
+type DbQuestionEligiblePlayer = {
+  game_session_id: string;
+  question_index: number;
+  player_id: string;
+  created_at: string;
+};
 
 const d1Context = new AsyncLocalStorage<D1QueryClient>();
 const unboundD1 = createD1QueryClient(null);
@@ -458,14 +471,244 @@ function isBuzzerAnswerReadyForJudging(answer: Pick<DbBuzzerAnswer, "submitted_a
   return nowMs - new Date(answer.submitted_at).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
 
+function parseEligiblePlayerIds(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((playerId): playerId is string => typeof playerId === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+function getQuestionEligiblePlayerIdsFromSnapshot(snapshot: DbQuestionSnapshot) {
+  const playerIds = parseEligiblePlayerIds(snapshot.eligible_player_ids);
+  return playerIds ?? null;
+}
+
+function isMissingEligibilityTableError(error: { message?: string } | null) {
+  const message = error?.message ?? "";
+  return /no such table/i.test(message) && /question_(snapshots|eligible_players)/i.test(message);
+}
+
+async function getCurrentRoomEligiblePlayerIds(roomId: string, presenterPlayerId: string) {
+  const { data: players, error: playersError } = await d1
+    .from("players")
+    .select("*")
+    .eq("room_id", roomId)
+    .order("joined_at", { ascending: true })
+    .returns<DbPlayer[]>();
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  return (players ?? [])
+    .filter((player) => player.id !== presenterPlayerId)
+    .map((player) => player.id);
+}
+
+async function getQuestionEligiblePlayerIdsFromDb(gameSessionId: string, questionIndex: number) {
+  const { data, error } = await d1
+    .from("question_eligible_players")
+    .select("*")
+    .eq("game_session_id", gameSessionId)
+    .eq("question_index", questionIndex)
+    .order("created_at", { ascending: true })
+    .returns<DbQuestionEligiblePlayer[]>();
+
+  if (error) {
+    if (isMissingEligibilityTableError(error)) {
+      return null;
+    }
+
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => row.player_id);
+}
+
+async function insertQuestionEligibilitySnapshot(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  eligiblePlayerIds: string[];
+}) {
+  const { error: snapshotError } = await d1.from("question_snapshots").insert(
+    {
+      game_session_id: params.gameSessionId,
+      question_index: params.questionIndex,
+      eligible_player_count: params.eligiblePlayerIds.length,
+      eligible_player_ids: JSON.stringify(params.eligiblePlayerIds),
+    },
+  );
+
+  if (snapshotError) {
+    if (isMissingEligibilityTableError(snapshotError)) {
+      return params.eligiblePlayerIds;
+    }
+
+    if (isUniqueViolation(snapshotError)) {
+      const { data: existingSnapshot, error: existingSnapshotError } = await d1
+        .from("question_snapshots")
+        .select("*")
+        .eq("game_session_id", params.gameSessionId)
+        .eq("question_index", params.questionIndex)
+        .maybeSingle<DbQuestionSnapshot>();
+
+      if (existingSnapshotError) {
+        if (isMissingEligibilityTableError(existingSnapshotError)) {
+          return params.eligiblePlayerIds;
+        }
+
+        throw new Error(existingSnapshotError.message);
+      }
+
+      if (existingSnapshot) {
+        return getQuestionEligiblePlayerIdsFromSnapshot(existingSnapshot) ??
+          await getQuestionEligiblePlayerIdsFromDb(params.gameSessionId, params.questionIndex) ??
+          params.eligiblePlayerIds;
+      }
+    }
+
+    throw new Error(snapshotError.message);
+  }
+
+  if (params.eligiblePlayerIds.length > 0) {
+    const { error: eligiblePlayersError } = await d1.from("question_eligible_players").upsert(
+      params.eligiblePlayerIds.map((playerId) => ({
+        game_session_id: params.gameSessionId,
+        question_index: params.questionIndex,
+        player_id: playerId,
+      })),
+      {
+        onConflict: "game_session_id,question_index,player_id",
+      },
+    );
+
+    if (eligiblePlayersError) {
+      if (isMissingEligibilityTableError(eligiblePlayersError)) {
+        return params.eligiblePlayerIds;
+      }
+
+      throw new Error(eligiblePlayersError.message);
+    }
+  }
+
+  return params.eligiblePlayerIds;
+}
+
+async function createQuestionEligibilitySnapshot(params: {
+  gameSessionId: string;
+  roomId: string;
+  questionIndex: number;
+  presenterPlayerId: string;
+}) {
+  const eligiblePlayerIds = await getCurrentRoomEligiblePlayerIds(params.roomId, params.presenterPlayerId);
+
+  return await insertQuestionEligibilitySnapshot({
+    gameSessionId: params.gameSessionId,
+    questionIndex: params.questionIndex,
+    eligiblePlayerIds,
+  });
+}
+
+async function createQuestionEligibilitySnapshotFromPlayers(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  presenterPlayerId: string;
+  players: DbPlayer[];
+}) {
+  const eligiblePlayerIds = params.players
+    .filter((player) => player.id !== params.presenterPlayerId)
+    .map((player) => player.id);
+
+  return await insertQuestionEligibilitySnapshot({
+    gameSessionId: params.gameSessionId,
+    questionIndex: params.questionIndex,
+    eligiblePlayerIds,
+  });
+}
+
+async function getOrCreateQuestionEligiblePlayerIds(params: {
+  gameSessionId: string;
+  roomId: string;
+  questionIndex: number;
+  presenterPlayerId: string;
+  knownEligiblePlayerIds?: string[];
+}) {
+  if (params.knownEligiblePlayerIds) {
+    return params.knownEligiblePlayerIds;
+  }
+
+  const { data: snapshot, error: snapshotError } = await d1
+    .from("question_snapshots")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .maybeSingle<DbQuestionSnapshot>();
+
+  if (snapshotError) {
+    if (isMissingEligibilityTableError(snapshotError)) {
+      return await getCurrentRoomEligiblePlayerIds(params.roomId, params.presenterPlayerId);
+    }
+
+    throw new Error(snapshotError.message);
+  }
+
+  if (snapshot) {
+    return getQuestionEligiblePlayerIdsFromSnapshot(snapshot) ??
+      await getQuestionEligiblePlayerIdsFromDb(params.gameSessionId, params.questionIndex) ??
+      await getCurrentRoomEligiblePlayerIds(params.roomId, params.presenterPlayerId);
+  }
+
+  return await createQuestionEligibilitySnapshot(params);
+}
+
+async function hydrateGameSessionEligibility(gameSession: GameSession) {
+  const eligiblePlayerIds = await getOrCreateQuestionEligiblePlayerIds({
+    gameSessionId: gameSession.id,
+    roomId: gameSession.roomId,
+    questionIndex: gameSession.currentQuestionIndex,
+    presenterPlayerId: gameSession.presenterPlayerId,
+    knownEligiblePlayerIds: gameSession.eligiblePlayerIds,
+  });
+
+  return {
+    ...gameSession,
+    eligiblePlayerIds,
+  };
+}
+
+async function getEligiblePlayerSetForCurrentQuestion(gameSession: GameSession) {
+  const eligiblePlayerIds = await getOrCreateQuestionEligiblePlayerIds({
+    gameSessionId: gameSession.id,
+    roomId: gameSession.roomId,
+    questionIndex: gameSession.currentQuestionIndex,
+    presenterPlayerId: gameSession.presenterPlayerId,
+    knownEligiblePlayerIds: gameSession.eligiblePlayerIds,
+  });
+
+  return new Set(eligiblePlayerIds);
+}
+
+async function assertPlayerEligibleForCurrentQuestion(gameSession: GameSession, playerId: string) {
+  const eligiblePlayerSet = await getEligiblePlayerSetForCurrentQuestion(gameSession);
+
+  if (!eligiblePlayerSet.has(playerId)) {
+    throw new Error("你是本题开始后加入的玩家，本题不能作答，请等待下一题。");
+  }
+}
+
 async function getRoundActionState(gameSession: GameSession) {
   const [
-    { data: players, error: playersError },
     { data: questionResults, error: resultsError },
     { data: currentRoundBuzzerAnswers, error: buzzerAnswersError },
     { data: currentRoundAnswers, error: answersError },
+    guesserIds,
   ] = await Promise.all([
-    d1.from("players").select("id").eq("room_id", gameSession.roomId).returns<Pick<DbPlayer, "id">[]>(),
     d1
       .from("question_results")
       .select("player_id")
@@ -486,11 +729,15 @@ async function getRoundActionState(gameSession: GameSession) {
       .eq("question_index", gameSession.currentQuestionIndex)
       .eq("reveal_round", gameSession.currentRevealRound)
       .returns<DbAnswer[]>(),
+    getOrCreateQuestionEligiblePlayerIds({
+      gameSessionId: gameSession.id,
+      roomId: gameSession.roomId,
+      questionIndex: gameSession.currentQuestionIndex,
+      presenterPlayerId: gameSession.presenterPlayerId,
+      knownEligiblePlayerIds: gameSession.eligiblePlayerIds,
+    }),
   ]);
 
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
   if (resultsError) {
     throw new Error(resultsError.message);
   }
@@ -501,7 +748,6 @@ async function getRoundActionState(gameSession: GameSession) {
     throw new Error(answersError.message);
   }
 
-  const guesserIds = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).map((player) => player.id);
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
   const eligibleGuesserIds = guesserIds.filter((guesserId) => !correctSet.has(guesserId));
   const buzzerAnswerByPlayerId = new Map((currentRoundBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
@@ -548,8 +794,8 @@ async function areAllGuessersCorrectForQuestion(params: {
   questionIndex: number;
   presenterPlayerId: string;
 }) {
-  const [{ data: players, error: playersError }, { data: questionResults, error: questionResultsError }] = await Promise.all([
-    d1.from("players").select("id").eq("room_id", params.roomId).returns<Pick<DbPlayer, "id">[]>(),
+  const [guesserIds, { data: questionResults, error: questionResultsError }] = await Promise.all([
+    getOrCreateQuestionEligiblePlayerIds(params),
     d1
       .from("question_results")
       .select("player_id")
@@ -558,15 +804,10 @@ async function areAllGuessersCorrectForQuestion(params: {
       .returns<Pick<DbQuestionResult, "player_id">[]>(),
   ]);
 
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
   if (questionResultsError) {
     throw new Error(questionResultsError.message);
   }
 
-  const guesserIds = (players ?? []).filter((player) => player.id !== params.presenterPlayerId).map((player) => player.id);
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
 
   return guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
@@ -1490,6 +1731,7 @@ export async function startGameWithQuestionSet(params: {
     .from("players")
     .select("*")
     .eq("room_id", params.roomId)
+    .order("joined_at", { ascending: true })
     .returns<DbPlayer[]>();
 
   if (playersError) {
@@ -1527,6 +1769,17 @@ export async function startGameWithQuestionSet(params: {
     throw new Error(gameSessionError.message);
   }
 
+  const eligiblePlayerIds = await createQuestionEligibilitySnapshotFromPlayers({
+    gameSessionId: gameSession.id,
+    questionIndex: gameSession.current_question_index,
+    presenterPlayerId: params.presenterPlayerId,
+    players: players ?? [],
+  });
+  const hydratedGameSession = {
+    ...toGameSession(gameSession),
+    eligiblePlayerIds,
+  };
+
   const { data: updatedRoom, error: updateRoomError } = await d1
     .from("rooms")
     .update({
@@ -1558,7 +1811,7 @@ export async function startGameWithQuestionSet(params: {
   }
 
   return {
-    gameSession: toGameSession(gameSession),
+    gameSession: hydratedGameSession,
     room: toRoom(updatedRoom),
   };
 }
@@ -1576,7 +1829,7 @@ export async function getGameSessionById(gameSessionId: string) {
     throw new Error(error.message);
   }
 
-  return data ? toGameSession(data) : null;
+  return data ? await hydrateGameSessionEligibility(toGameSession(data)) : null;
 }
 
 async function getDbQuestionsByQuestionSetId(questionSetId: string) {
@@ -2227,9 +2480,14 @@ async function addScoreToPlayer(params: {
 async function recalculateRankedBuzzerScores(params: {
   gameSession: DbGameSession;
 }) {
-  const [{ data: players, error: playersError }, { data: results, error: resultsError }, { data: correctBuzzerAnswers, error: answersError }] =
+  const [guesserIds, { data: results, error: resultsError }, { data: correctBuzzerAnswers, error: answersError }] =
     await Promise.all([
-      d1.from("players").select("id").eq("room_id", params.gameSession.room_id).returns<{ id: string }[]>(),
+      getOrCreateQuestionEligiblePlayerIds({
+        gameSessionId: params.gameSession.id,
+        roomId: params.gameSession.room_id,
+        questionIndex: params.gameSession.current_question_index,
+        presenterPlayerId: params.gameSession.presenter_player_id,
+      }),
       d1
         .from("question_results")
         .select("*")
@@ -2245,10 +2503,6 @@ async function recalculateRankedBuzzerScores(params: {
         .returns<DbBuzzerAnswer[]>(),
     ]);
 
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
   if (resultsError) {
     throw new Error(resultsError.message);
   }
@@ -2257,7 +2511,7 @@ async function recalculateRankedBuzzerScores(params: {
     throw new Error(answersError.message);
   }
 
-  const guesserCount = (players ?? []).filter((player) => player.id !== params.gameSession.presenter_player_id).length;
+  const guesserCount = guesserIds.length;
   const answerByPlayerId = new Map((correctBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
   const rankedResults = (results ?? [])
     .map((result) => ({ result, answer: answerByPlayerId.get(result.player_id) }))
@@ -2576,6 +2830,8 @@ export async function submitAnswer(params: {
     throw new Error("出题人不能提交答案。");
   }
 
+  await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
+
   if (!gameSession.roundStartedAt) {
     throw new Error("本轮尚未开始，暂时不能提交答案。");
   }
@@ -2681,6 +2937,8 @@ export async function submitForfeitAnswer(params: {
   if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
     throw new Error("当前不能放弃作答：出题人不能作答，或本轮尚未开始。");
   }
+
+  await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
     throw new Error("本轮答题时间已结束，不能再放弃作答。");
@@ -2796,6 +3054,8 @@ export async function cancelForfeitAnswer(params: {
     throw new Error("当前不能取消放弃：出题人不能作答，或本轮尚未开始。");
   }
 
+  await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
+
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
     throw new Error("本轮答题时间已结束，不能再取消放弃。");
   }
@@ -2861,6 +3121,8 @@ export async function submitBuzzerAnswer(params: {
   if (gameSession.presenterPlayerId === params.playerId) {
     throw new Error("出题人不能提交抢答答案。");
   }
+
+  await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
   if (!gameSession.roundStartedAt) {
     throw new Error("本轮尚未开始，暂时不能抢答。");
@@ -3013,8 +3275,13 @@ export async function judgeBuzzerAnswer(params: {
 
       scoreAwarded = 1;
     } else {
-      const [{ data: players, error: playersError }, { data: existingResults, error: resultsError }] = await Promise.all([
-        d1.from("players").select("id").eq("room_id", currentGameSession.room_id).returns<{ id: string }[]>(),
+      const [eligiblePlayerIds, { data: existingResults, error: resultsError }] = await Promise.all([
+        getOrCreateQuestionEligiblePlayerIds({
+          gameSessionId: currentGameSession.id,
+          roomId: currentGameSession.room_id,
+          questionIndex: currentGameSession.current_question_index,
+          presenterPlayerId: currentGameSession.presenter_player_id,
+        }),
         d1
           .from("question_results")
           .select("id")
@@ -3023,15 +3290,11 @@ export async function judgeBuzzerAnswer(params: {
           .returns<{ id: string }[]>(),
       ]);
 
-      if (playersError) {
-        throw new Error(playersError.message);
-      }
-
       if (resultsError) {
         throw new Error(resultsError.message);
       }
 
-      const guesserCount = (players ?? []).filter((player) => player.id !== currentGameSession.presenter_player_id).length;
+      const guesserCount = eligiblePlayerIds.length;
       const correctRank = (existingResults?.length ?? 0) + 1;
       scoreAwarded = Math.max(1, guesserCount - correctRank + 1);
     }
@@ -3602,8 +3865,15 @@ export async function gradeAnswersAndAdvance(params: {
   const questionIndex = currentGameSession.current_question_index;
   const currentSession = toGameSession(currentGameSession);
   const roundScore = currentSession.roundScores[currentRound - 1] ?? Math.max(1, currentSession.maxRevealRounds - currentRound + 1);
+  const eligiblePlayerIds = await getOrCreateQuestionEligiblePlayerIds({
+    gameSessionId: currentGameSession.id,
+    roomId: currentGameSession.room_id,
+    questionIndex,
+    presenterPlayerId: currentGameSession.presenter_player_id,
+  });
+  const eligiblePlayerSet = new Set(eligiblePlayerIds);
   const uniqueCorrectPlayerIds = Array.from(new Set(params.correctPlayerIds)).filter(
-    (playerId) => playerId && playerId !== params.presenterPlayerId,
+    (playerId) => playerId && playerId !== params.presenterPlayerId && eligiblePlayerSet.has(playerId),
   );
   const newlyScoredPlayerIds: string[] = [];
 
@@ -3658,20 +3928,6 @@ export async function gradeAnswersAndAdvance(params: {
     }
   }
 
-  const { data: players, error: playersError } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", currentGameSession.room_id)
-    .returns<DbPlayer[]>();
-
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
-  const guesserIds = (players ?? [])
-    .filter((player) => player.id !== currentGameSession.presenter_player_id)
-    .map((player) => player.id);
-
   const { data: questionResults, error: questionResultsError } = await d1
     .from("question_results")
     .select("*")
@@ -3684,7 +3940,7 @@ export async function gradeAnswersAndAdvance(params: {
   }
 
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
-  const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
+  const allPlayersCorrect = eligiblePlayerIds.length > 0 && eligiblePlayerIds.every((guesserId) => correctSet.has(guesserId));
 
   if (allPlayersCorrect) {
     const reviewedGameSession = await revealQuestionForReview(currentGameSession.id);
@@ -3800,6 +4056,13 @@ export async function advanceReviewedQuestion(params: {
     };
   }
 
+  const eligiblePlayerIds = await createQuestionEligibilitySnapshot({
+    gameSessionId: currentGameSession.id,
+    roomId: currentGameSession.room_id,
+    questionIndex: nextQuestionIndex,
+    presenterPlayerId: currentGameSession.presenter_player_id,
+  });
+
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
@@ -3819,8 +4082,13 @@ export async function advanceReviewedQuestion(params: {
     throw new Error(error.message);
   }
 
+  const hydratedGameSession = {
+    ...toGameSession(updatedGameSession),
+    eligiblePlayerIds,
+  };
+
   return {
-    gameSession: toGameSession(updatedGameSession),
+    gameSession: hydratedGameSession,
     room: null,
   };
 }
@@ -4027,6 +4295,13 @@ export async function skipCurrentQuestion(params: {
     };
   }
 
+  const eligiblePlayerIds = await createQuestionEligibilitySnapshot({
+    gameSessionId: currentGameSession.id,
+    roomId: currentGameSession.room_id,
+    questionIndex: nextQuestionIndex,
+    presenterPlayerId: currentGameSession.presenter_player_id,
+  });
+
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
@@ -4046,8 +4321,13 @@ export async function skipCurrentQuestion(params: {
     throw new Error(error.message);
   }
 
+  const hydratedGameSession = {
+    ...toGameSession(updatedGameSession),
+    eligiblePlayerIds,
+  };
+
   return {
-    gameSession: toGameSession(updatedGameSession),
+    gameSession: hydratedGameSession,
     room: null,
   };
 }

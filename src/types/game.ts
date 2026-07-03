@@ -114,6 +114,7 @@ export type GameSession = {
   maxRevealRounds: number;
   roundSeconds: number;
   roundScores: number[];
+  eligiblePlayerIds?: string[];
   roundStartedAt?: string | null;
   serverNow?: string;
   teamBattleState?: TeamBattleState | null;

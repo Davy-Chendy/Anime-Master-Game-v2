@@ -931,8 +931,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
-  const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
   const activePlayerById = new Map(room.players.map((player) => [player.id, player]));
+  const fallbackGuesserIds = room.players
+    .filter((player) => player.id !== room.currentPresenterPlayerId)
+    .map((player) => player.id);
+  const eligibleGuesserIds = gameSession?.eligiblePlayerIds ?? fallbackGuesserIds;
+  const eligibleGuesserIdSet = new Set(eligibleGuesserIds);
+  const isCurrentPlayerEligibleForQuestion = isPresenter || isTeamBattleMode || eligibleGuesserIdSet.has(playerId);
+  const guessers = room.players.filter((player) => eligibleGuesserIdSet.has(player.id));
   const teamBattlePlayerTeam: TeamBattleTeam | null = teamBattleState?.teams.red.includes(playerId)
     ? "red"
     : teamBattleState?.teams.blue.includes(playerId)
@@ -973,7 +979,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
     return Array.from(options.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }, [teamBattleState?.guessVotes]);
-  const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
+  const activeGuesserIds = eligibleGuesserIds.filter((guesserId) => !correctPlayerSet.has(guesserId));
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
   const currentRoundForfeitPlayerSet = useMemo(
     () => new Set(answers.filter((answer) => isForfeitAnswer(answer)).map((answer) => answer.playerId)),
@@ -1018,9 +1024,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
-    activeGuessers.length > 0 && activeGuessers.every((player) => buzzerActionPlayerSet.has(player.id));
+    activeGuesserIds.length > 0 && activeGuesserIds.every((guesserId) => buzzerActionPlayerSet.has(guesserId));
   const allActiveGuessersSubmitted =
-    activeGuessers.length > 0 && activeGuessers.every((player) => currentRoundAnswerPlayerSet.has(player.id));
+    activeGuesserIds.length > 0 && activeGuesserIds.every((guesserId) => currentRoundAnswerPlayerSet.has(guesserId));
   const allActiveGuessersUsedRoundChance = isBuzzerMode ? allActiveGuessersUsedBuzzerChance : allActiveGuessersSubmitted;
   const hasFirstCorrectAnswer = gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0;
   const isRoundClosedForPlayerActions = isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer;
@@ -1118,7 +1124,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
-  const areAllGuessersCorrect = guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id));
+  const areAllGuessersCorrect = eligibleGuesserIds.length > 0 && eligibleGuesserIds.every((guesserId) => correctPlayerSet.has(guesserId));
   const isRoundCompleteForDisplay =
     hasRoundStarted &&
     (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect);
@@ -1137,6 +1143,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isPresenter &&
     !isBuzzerMode &&
     !isTeamBattleMode &&
+    isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
@@ -1146,6 +1153,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canForfeitAnswer =
     !isPresenter &&
     !isTeamBattleMode &&
+    isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
@@ -1155,6 +1163,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canCancelForfeit =
     !isPresenter &&
     !isTeamBattleMode &&
+    isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
@@ -1163,6 +1172,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canSubmitBuzzerAnswer =
     !isPresenter &&
     isBuzzerMode &&
+    isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     !myBuzzerAnswer &&
@@ -1173,6 +1183,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canTypeAnswer =
     !isPresenter &&
     !isTeamBattleMode &&
+    isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
@@ -1284,7 +1295,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? "顺位"
         : "标准";
-  const rankedNextScore = Math.max(1, guessers.length - questionResults.length);
+  const rankedNextScore = Math.max(1, eligibleGuesserIds.length - questionResults.length);
   const scoreCardLabel =
     gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
       ? "抢答规则"
@@ -1297,11 +1308,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? `${rankedNextScore} 分`
         : `${displayScore} 分`;
-  const rawStandardSubmittedCount = isBuzzerMode ? buzzerActionPlayerSet.size : currentRoundAnswerPlayerSet.size;
+  const rawStandardSubmittedCount = isBuzzerMode
+    ? eligibleGuesserIds.filter((guesserId) => buzzerActionPlayerSet.has(guesserId)).length
+    : eligibleGuesserIds.filter((guesserId) => currentRoundAnswerPlayerSet.has(guesserId)).length;
   const standardSubmittedCount = isRoundEnded
-    ? Math.max(rawStandardSubmittedCount, activeGuessers.length)
+    ? Math.max(rawStandardSubmittedCount, activeGuesserIds.length)
     : rawStandardSubmittedCount;
-  const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
+  const standardTotalCount = Math.max(activeGuesserIds.length, standardSubmittedCount);
   const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
   const isBuzzerSettleToReview =
     isBuzzerMode &&
@@ -1355,6 +1368,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         standardTaskTitle = "等待作答";
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       }
+    } else if (!isCurrentPlayerEligibleForQuestion) {
+      standardTaskTitle = "本题观战";
+      standardTaskDetail = "下一题可以作答";
     } else if (isCurrentPlayerCorrect) {
       standardTaskBadge = "完成";
       standardTaskTone = "border-emerald-200 bg-emerald-50";
