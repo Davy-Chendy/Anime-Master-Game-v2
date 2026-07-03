@@ -175,6 +175,18 @@ export default function HomePage() {
         session = createNewLocalPlayerSession(trimmedNickname);
       }
 
+      if (existingRoom.game_status === "PLAYING") {
+        saveLocalSession({
+          playerId: session.playerId,
+          nickname: trimmedNickname,
+          roomCode: trimmedRoomCode,
+          isHost: existingRoom.host_player_id === session.playerId,
+        });
+
+        router.push(`/room/${existingRoom.room_code}`);
+        return;
+      }
+
       const result = await joinRoom(trimmedRoomCode, session.playerId, trimmedNickname);
 
       if (result.error || !result.room) {

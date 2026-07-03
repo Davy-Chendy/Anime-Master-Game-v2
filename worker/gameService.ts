@@ -18,6 +18,7 @@ import type {
   GameBootstrapSnapshot,
   LeaderboardEntry,
   Player,
+  PlayerRole,
   PlayerScore,
   Question,
   QuestionResult,
@@ -79,9 +80,22 @@ function toPlayer(player: DbPlayer): Player {
     roomId: player.room_id,
     nickname: player.nickname,
     isHost: player.is_host,
+    role: normalizePlayerRole(player.role),
     joinedAt: player.joined_at,
     lastSeenAt: player.last_seen_at,
   };
+}
+
+function normalizePlayerRole(role: unknown): PlayerRole {
+  return role === "SPECTATOR" ? "SPECTATOR" : "PLAYER";
+}
+
+function isPlayerRole(role: unknown): role is PlayerRole {
+  return role === "PLAYER" || role === "SPECTATOR";
+}
+
+function isGamePlayer(player: Pick<DbPlayer, "role">) {
+  return normalizePlayerRole(player.role) === "PLAYER";
 }
 
 function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
@@ -309,7 +323,7 @@ function shuffleItems<T>(items: T[]) {
 }
 
 function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: string, previousScores?: Record<TeamBattleTeam, number>): TeamBattleState {
-  const guessers = shuffleItems(players.filter((player) => player.id !== presenterPlayerId));
+  const guessers = shuffleItems(players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId));
   const largerTeamSize = Math.ceil(guessers.length / 2);
   const redGetsExtraPlayer = guessers.length % 2 === 1 ? randomInt(2) === 0 : true;
   const redTeamSize = redGetsExtraPlayer ? largerTeamSize : Math.floor(guessers.length / 2);
@@ -564,7 +578,7 @@ async function getCurrentRoomEligiblePlayerIds(roomId: string, presenterPlayerId
   }
 
   return (players ?? [])
-    .filter((player) => player.id !== presenterPlayerId)
+    .filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId)
     .map((player) => player.id);
 }
 
@@ -679,7 +693,7 @@ async function createQuestionEligibilitySnapshotFromPlayers(params: {
   players: DbPlayer[];
 }) {
   const eligiblePlayerIds = params.players
-    .filter((player) => player.id !== params.presenterPlayerId)
+    .filter((player) => isGamePlayer(player) && player.id !== params.presenterPlayerId)
     .map((player) => player.id);
 
   return await insertQuestionEligibilitySnapshot({
@@ -757,6 +771,25 @@ async function assertPlayerEligibleForCurrentQuestion(gameSession: GameSession, 
   if (!eligiblePlayerSet.has(playerId)) {
     throw new Error("你是本题开始后加入的玩家，本题不能作答，请等待下一题。");
   }
+}
+
+async function assertGamePlayerInRoom(roomId: string, playerId: string) {
+  const { data: player, error } = await d1
+    .from("players")
+    .select("*")
+    .eq("room_id", roomId)
+    .eq("id", playerId)
+    .maybeSingle<DbPlayer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!player || !isGamePlayer(player)) {
+    throw new Error("观战者不能执行玩家操作。");
+  }
+
+  return player;
 }
 
 async function getRoundActionState(gameSession: GameSession) {
@@ -1090,6 +1123,7 @@ export async function createRoom(playerId: string, nickname: string) {
         room_id: room.id,
         nickname,
         is_host: true,
+        role: "PLAYER",
         last_seen_at: new Date().toISOString(),
       },
       { onConflict: "id" },
@@ -1105,6 +1139,7 @@ export async function createRoom(playerId: string, nickname: string) {
         room_id: room.id,
         nickname,
         is_host: true,
+        role: "PLAYER",
         joined_at: new Date().toISOString(),
         last_seen_at: new Date().toISOString(),
       },
@@ -1164,7 +1199,7 @@ export async function getPlayersByRoomId(roomId: string) {
   return players.map(toPlayer);
 }
 
-export async function joinRoom(roomCode: string, playerId: string, nickname: string) {
+export async function joinRoom(roomCode: string, playerId: string, nickname: string, role?: PlayerRole) {
   const room = await getRoomByCode(roomCode);
 
   if (!room) {
@@ -1186,13 +1221,31 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     };
   }
 
-  const isExistingPlayer = players.some((player) => player.id === playerId);
+  const existingPlayer = players.find((player) => player.id === playerId);
+  const isExistingPlayer = Boolean(existingPlayer);
 
   if (!isExistingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
     return {
       room: null,
       error: `房间已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家。`,
     };
+  }
+
+  const requestedRole = isPlayerRole(role) ? role : "PLAYER";
+  let nextRole = existingPlayer ? normalizePlayerRole(existingPlayer.role) : requestedRole;
+
+  if (existingPlayer && role && requestedRole !== nextRole) {
+    if (room.game_status !== "LOBBY") {
+      return {
+        room: null,
+        error: "游戏进行中不能切换玩家/观战身份。",
+      };
+    }
+    nextRole = requestedRole;
+  }
+
+  if (!existingPlayer && room.game_status !== "PLAYING") {
+    nextRole = "PLAYER";
   }
 
   const isHost = room.host_player_id === playerId;
@@ -1202,6 +1255,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
       room_id: room.id,
       nickname,
       is_host: isHost,
+      role: nextRole,
       last_seen_at: new Date().toISOString(),
     },
     { onConflict: "id" },
@@ -1459,10 +1513,10 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
 
   const { data: presenter, error: presenterError } = await d1
     .from("players")
-    .select("id")
+    .select("*")
     .eq("room_id", roomId)
     .eq("id", presenterPlayerId)
-    .maybeSingle<{ id: string }>();
+    .maybeSingle<DbPlayer>();
 
   if (presenterError) {
     throw new Error(presenterError.message);
@@ -1470,6 +1524,10 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
 
   if (!presenter) {
     throw new Error("选择出题人失败：该玩家不在当前房间。");
+  }
+
+  if (!isGamePlayer(presenter)) {
+    throw new Error("选择出题人失败：观战者不能当出题人。");
   }
 
   const { data: room, error } = await d1
@@ -1820,12 +1878,18 @@ export async function startGameWithQuestionSet(params: {
     throw new Error(playersError.message);
   }
 
-  const teamBattleGuessers = (players ?? []).filter((player) => player.id !== params.presenterPlayerId);
+  const activeGamePlayers = (players ?? []).filter(isGamePlayer);
+  const presenter = activeGamePlayers.find((player) => player.id === params.presenterPlayerId);
+  if (!presenter) {
+    throw new Error("开始游戏失败：出题人必须是玩家身份。");
+  }
+
+  const teamBattleGuessers = activeGamePlayers.filter((player) => player.id !== params.presenterPlayerId);
   if (gameMode === "TEAM_BATTLE" && teamBattleGuessers.length < 2) {
     throw new Error("红蓝对抗模式至少需要 2 名答题者。");
   }
 
-  const teamBattleState = gameMode === "TEAM_BATTLE" ? createInitialTeamBattleState(players ?? [], params.presenterPlayerId) : null;
+  const teamBattleState = gameMode === "TEAM_BATTLE" ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId) : null;
   const roundScores = Array.from({ length: maxRevealRounds }, (_, index) => {
     const score = params.roundScores?.[index] ?? Math.max(1, maxRevealRounds - index);
     return Math.max(0, Math.floor(score));
@@ -1855,7 +1919,7 @@ export async function startGameWithQuestionSet(params: {
     gameSessionId: gameSession.id,
     questionIndex: gameSession.current_question_index,
     presenterPlayerId: params.presenterPlayerId,
-    players: players ?? [],
+    players: activeGamePlayers,
   });
   const hydratedGameSession = {
     ...toGameSession(gameSession),
@@ -1896,6 +1960,54 @@ export async function startGameWithQuestionSet(params: {
     gameSession: hydratedGameSession,
     room: toRoom(updatedRoom),
   };
+}
+
+export async function updatePlayerRole(roomId: string, playerId: string, role: PlayerRole) {
+  assertD1Env();
+
+  if (!isPlayerRole(role)) {
+    throw new Error("身份切换失败：未知的玩家身份。");
+  }
+
+  const { data: room, error: roomError } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .maybeSingle<DbRoom>();
+
+  if (roomError) {
+    throw new Error(roomError.message);
+  }
+
+  if (!room) {
+    throw new Error("身份切换失败：房间不存在。");
+  }
+
+  if (room.game_status !== "LOBBY") {
+    throw new Error("只有在房间大厅可以切换玩家/观战身份。");
+  }
+
+  const { data: updatedPlayer, error: updateError } = await d1
+    .from("players")
+    .update({
+      role,
+      last_seen_at: new Date().toISOString(),
+    })
+    .eq("room_id", roomId)
+    .eq("id", playerId)
+    .select()
+    .maybeSingle<DbPlayer>();
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  if (!updatedPlayer) {
+    throw new Error("身份切换失败：你不在当前房间。");
+  }
+
+  const players = await getDbPlayersByRoomId(roomId);
+  return toRoom(room, players);
 }
 
 export async function getGameSessionById(gameSessionId: string) {
@@ -2317,7 +2429,7 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
   const scoreByPlayerId = new Map(scores.map((score) => [score.playerId, score]));
 
   return (players ?? [])
-    .filter((player) => player.id !== gameSession.presenterPlayerId)
+    .filter((player) => isGamePlayer(player) && player.id !== gameSession.presenterPlayerId)
     .map((player) => {
       const score = scoreByPlayerId.get(player.id);
 
@@ -2381,10 +2493,15 @@ export async function rateCommunityQuestionSet(params: {
   questionSetId: string;
   playerId: string;
   rating: number;
+  roomId?: string;
 }) {
   assertD1Env();
 
   const rating = Math.max(1, Math.min(5, Math.floor(params.rating)));
+
+  if (params.roomId) {
+    await assertGamePlayerInRoom(params.roomId, params.playerId);
+  }
 
   const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
@@ -2932,6 +3049,7 @@ export async function submitAnswer(params: {
     throw new Error("出题人不能提交答案。");
   }
 
+  await assertGamePlayerInRoom(gameSession.roomId, params.playerId);
   await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
   if (!gameSession.roundStartedAt) {
@@ -3040,6 +3158,7 @@ export async function submitForfeitAnswer(params: {
     throw new Error("当前不能放弃作答：出题人不能作答，或本轮尚未开始。");
   }
 
+  await assertGamePlayerInRoom(gameSession.roomId, params.playerId);
   await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
@@ -3156,6 +3275,7 @@ export async function cancelForfeitAnswer(params: {
     throw new Error("当前不能取消放弃：出题人不能作答，或本轮尚未开始。");
   }
 
+  await assertGamePlayerInRoom(gameSession.roomId, params.playerId);
   await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
@@ -3224,6 +3344,7 @@ export async function submitBuzzerAnswer(params: {
     throw new Error("出题人不能提交抢答答案。");
   }
 
+  await assertGamePlayerInRoom(gameSession.roomId, params.playerId);
   await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
   if (!gameSession.roundStartedAt) {
@@ -3541,6 +3662,8 @@ export async function submitTeamBattleRevealVote(params: {
   const session = assertTeamBattleSession(currentGameSession);
   const state = session.teamBattleState!;
 
+  await assertGamePlayerInRoom(session.roomId, params.playerId);
+
   if (state.phase !== "REVEAL_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
     throw new Error("还没轮到你所在队伍投票，或当前不是选格阶段。");
   }
@@ -3601,6 +3724,8 @@ export async function submitTeamBattleGuessVote(params: {
 
   const session = assertTeamBattleSession(currentGameSession);
   const state = session.teamBattleState!;
+
+  await assertGamePlayerInRoom(session.roomId, params.playerId);
 
   if (state.phase !== "GUESS_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
     throw new Error("还没轮到你所在队伍投票，或当前不是猜测投票阶段。");

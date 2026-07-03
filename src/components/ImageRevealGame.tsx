@@ -50,6 +50,7 @@ type ImageRevealGameProps = {
   room: Room;
   playerId: string;
   isPresenter: boolean;
+  isSpectator?: boolean;
   onError: (message: string) => void;
   onRoomUpdated?: (room: Room) => void;
 };
@@ -327,7 +328,7 @@ function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageE
   }
 }
 
-export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
+export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = false, onError, onRoomUpdated }: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
@@ -363,6 +364,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
+  const [isSpectatorLabelOpen, setIsSpectatorLabelOpen] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
@@ -796,6 +798,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     setTeamGuessText("");
     setTeamSelectedBlocks([]);
     setIsRevealPreviewOpen(false);
+    setIsSpectatorLabelOpen(false);
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
@@ -931,14 +934,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
-  const activePlayerById = new Map(room.players.map((player) => [player.id, player]));
+  const gamePlayers = room.players.filter((player) => player.role !== "SPECTATOR");
+  const activePlayerById = new Map(gamePlayers.map((player) => [player.id, player]));
   const fallbackGuesserIds = room.players
-    .filter((player) => player.id !== room.currentPresenterPlayerId)
+    .filter((player) => player.role !== "SPECTATOR" && player.id !== room.currentPresenterPlayerId)
     .map((player) => player.id);
   const scoringEligibleGuesserIds = gameSession?.eligiblePlayerIds ?? fallbackGuesserIds;
   const eligibleGuesserIds = scoringEligibleGuesserIds.filter((guesserId) => activePlayerById.has(guesserId));
   const eligibleGuesserIdSet = new Set(eligibleGuesserIds);
-  const isCurrentPlayerEligibleForQuestion = isPresenter || isTeamBattleMode || eligibleGuesserIdSet.has(playerId);
+  const isCurrentPlayerEligibleForQuestion =
+    isPresenter || (!isSpectator && (isTeamBattleMode || eligibleGuesserIdSet.has(playerId)));
   const guessers = room.players.filter((player) => eligibleGuesserIdSet.has(player.id));
   const teamBattlePlayerTeam: TeamBattleTeam | null = teamBattleState?.teams.red.includes(playerId)
     ? "red"
@@ -948,7 +953,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const teamBattleActiveTeam = teamBattleState?.activeTeam ?? "red";
   const teamBattleActiveMembers = (teamBattleState?.teams[teamBattleActiveTeam] ?? []).filter((memberId) => activePlayerById.has(memberId));
   const teamBattleActiveMemberSet = new Set(teamBattleActiveMembers);
-  const teamBattleCanAct = Boolean(!isPresenter && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
+  const teamBattleCanAct = Boolean(!isPresenter && !isSpectator && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
   const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
   const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
   const teamBattleAvailableBlockCount = Math.max(0, TOTAL_BLOCKS - revealedBlockSet.size);
@@ -1031,7 +1036,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const allActiveGuessersUsedRoundChance = isBuzzerMode ? allActiveGuessersUsedBuzzerChance : allActiveGuessersSubmitted;
   const hasFirstCorrectAnswer = gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0;
   const isRoundClosedForPlayerActions = isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer;
-  const scoreRows = room.players
+  const scoreRows = gamePlayers
     .filter((player) => player.id !== room.currentPresenterPlayerId)
     .map((player) => ({
       player,
@@ -1142,6 +1147,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     currentRound <= maxRevealRounds;
   const canSubmitAnswer =
     !isPresenter &&
+    !isSpectator &&
     !isBuzzerMode &&
     !isTeamBattleMode &&
     isCurrentPlayerEligibleForQuestion &&
@@ -1153,6 +1159,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canForfeitAnswer =
     !isPresenter &&
+    !isSpectator &&
     !isTeamBattleMode &&
     isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
@@ -1163,6 +1170,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canCancelForfeit =
     !isPresenter &&
+    !isSpectator &&
     !isTeamBattleMode &&
     isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
@@ -1172,6 +1180,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     myHasForfeited;
   const canSubmitBuzzerAnswer =
     !isPresenter &&
+    !isSpectator &&
     isBuzzerMode &&
     isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
@@ -1183,6 +1192,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     answerText.trim().length > 0;
   const canTypeAnswer =
     !isPresenter &&
+    !isSpectator &&
     !isTeamBattleMode &&
     isCurrentPlayerEligibleForQuestion &&
     !isQuestionReviewing &&
@@ -1208,7 +1218,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canPreviewSelectedBlocks = canPreviewPresenterPlayerView && selectedBlocks.length > 0;
   const canPreviewTeamBattleOriginal =
     isPresenter && isTeamBattleMode && Boolean(teamBattleState) && Boolean(currentQuestion) && !isQuestionReviewing && !imageLoadFailed;
-  const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal;
+  const canPreviewSpectatorOriginal = isSpectator && Boolean(currentQuestion) && !imageLoadFailed;
+  const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal || canPreviewSpectatorOriginal;
 
   useEffect(() => {
     if (
@@ -2379,7 +2390,49 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const actionPanel = (
     <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
-      {isQuestionReviewing ? (
+      {isSpectator ? (
+        <div className="space-y-4">
+          <section className="rounded-md border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">观战</span>
+              {hasRoundStarted && !isQuestionReviewing ? (
+                <span className="rounded bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800">
+                  {displayedRemainingSeconds}s
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">
+              {isQuestionReviewing ? "本题复盘" : "玩家视角"}
+            </p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">
+              {isQuestionReviewing ? "等待切换下一题" : "按住 V 可临时查看原图"}
+            </p>
+          </section>
+
+          {!isQuestionReviewing ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-semibold text-slate-950">图片标签</p>
+                <Button
+                  className="h-9 px-3"
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
+                >
+                  {isSpectatorLabelOpen ? "隐藏" : "展开"}
+                </Button>
+              </div>
+              {isSpectatorLabelOpen ? (
+                <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
+                  {currentQuestionLabel}
+                </p>
+              ) : (
+                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
+              )}
+            </section>
+          ) : null}
+        </div>
+      ) : isQuestionReviewing ? (
         <>
               <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片</p>
               <p className="mt-1 text-sm text-[var(--muted)]">
@@ -2910,7 +2963,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         {actionPanel}
       </div>
 
-      {isPresenter && currentQuestion && isRevealPreviewOpen && canRenderPortal
+      {(isPresenter || isSpectator) && currentQuestion && isRevealPreviewOpen && canRenderPortal
         ? createPortal(
             <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6">
               <div

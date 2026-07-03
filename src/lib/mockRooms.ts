@@ -28,6 +28,7 @@ function makePlayer(playerId: string, nickname: string, isHost: boolean): Player
     id: playerId,
     nickname,
     isHost,
+    role: "PLAYER",
     joinedAt: Date.now(),
   };
 }

@@ -27,12 +27,14 @@ import {
   returnRoomToLobby,
   selectPresenterForRound,
   startGameWithQuestionSet,
+  updatePlayerRole,
 } from "@/lib/cloudflareRooms";
 import type {
   GameMode,
   GameSession,
   LeaderboardEntry,
   Player,
+  PlayerRole,
   QuestionResult,
   QuestionSet,
   RealtimeDelta,
@@ -239,60 +241,105 @@ function sortPlayersByJoinedAt(players: Player[]) {
   return [...players].sort((a, b) => getPlayerJoinedAtTime(a) - getPlayerJoinedAtTime(b) || a.id.localeCompare(b.id));
 }
 
+function getGamePlayers(players: Player[]) {
+  return players.filter((player) => player.role !== "SPECTATOR");
+}
+
+function getSpectators(players: Player[]) {
+  return players.filter((player) => player.role === "SPECTATOR");
+}
+
 function PlayerList({
   players,
   playerId,
   presenterPlayerId,
   gameMode,
+  spectatorAction,
   action,
 }: {
   players: Player[];
   playerId: string;
   presenterPlayerId?: string | null;
   gameMode: GameMode;
+  spectatorAction?: ReactNode;
   action?: ReactNode;
 }) {
-  const sortedPlayers = sortPlayersByJoinedAt(players);
+  const sortedPlayers = sortPlayersByJoinedAt(getGamePlayers(players));
+  const sortedSpectators = sortPlayersByJoinedAt(getSpectators(players));
   const title = `玩家 ${sortedPlayers.length}`;
 
   return (
-    <Panel className="h-full" title={title} action={action}>
-      <div className="space-y-3">
-        {sortedPlayers.map((player, index) => {
-          const isPresenter = player.id === presenterPlayerId;
+    <div className="space-y-4">
+      <Panel title={title} action={action}>
+        <div className="space-y-3">
+          {sortedPlayers.length > 0 ? (
+            sortedPlayers.map((player, index) => {
+              const isPresenter = player.id === presenterPlayerId;
 
-          return (
-            <div
-              className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
-              key={player.id}
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">
-                  {index + 1}
+              return (
+                <div
+                  className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
+                  key={player.id}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">
+                      {index + 1}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{player.nickname}</p>
+                      <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+                        {player.id === playerId ? <span>你</span> : null}
+                        {isPresenter ? <span>本局出题人</span> : null}
+                        {gameMode === "TEAM_BATTLE" ? <span>{isPresenter ? "裁判" : "答题玩家"}</span> : null}
+                      </div>
+                    </div>
+                  </div>
+                  <span
+                    className={
+                      player.isHost
+                        ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700"
+                        : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
+                    }
+                  >
+                    {player.isHost ? "房主" : "玩家"}
+                  </span>
                 </div>
+              );
+            })
+          ) : (
+            <p className="rounded-md border border-[var(--line)] bg-slate-50 px-3 py-3 text-sm text-[var(--muted)]">
+              当前没有可参赛玩家
+            </p>
+          )}
+        </div>
+      </Panel>
+
+      <Panel title={`观战区 ${sortedSpectators.length}`} action={spectatorAction}>
+        <div className="space-y-2">
+          {sortedSpectators.length > 0 ? (
+            sortedSpectators.map((player) => (
+              <div
+                className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2"
+                key={player.id}
+              >
                 <div className="min-w-0">
-                  <p className="truncate font-semibold">{player.nickname}</p>
+                  <p className="truncate text-sm font-semibold text-slate-950">{player.nickname}</p>
                   <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
                     {player.id === playerId ? <span>你</span> : null}
-                    {isPresenter ? <span>本局出题人</span> : null}
-                    {gameMode === "TEAM_BATTLE" ? <span>{isPresenter ? "裁判" : "答题玩家"}</span> : null}
+                    {player.isHost ? <span>房主</span> : null}
                   </div>
                 </div>
+                <span className="shrink-0 rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700">观战</span>
               </div>
-              <span
-                className={
-                  player.isHost
-                    ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700"
-                    : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
-                }
-              >
-                {player.isHost ? "房主" : "玩家"}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </Panel>
+            ))
+          ) : (
+            <p className="rounded-md border border-[var(--line)] bg-white px-3 py-3 text-sm text-[var(--muted)]">
+              还没有观战者
+            </p>
+          )}
+        </div>
+      </Panel>
+    </div>
   );
 }
 
@@ -343,25 +390,33 @@ function PresenterPicker({
   pendingPresenterId: string;
   onSelectPresenter: (presenterPlayerId: string) => void;
 }) {
+  const gamePlayers = getGamePlayers(room.players);
+
   return (
     <div className="grid gap-2 sm:grid-cols-2">
-      {room.players.map((player) => (
-        <button
-          className="flex min-h-14 w-full items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-left transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={Boolean(pendingPresenterId)}
-          key={player.id}
-          type="button"
-          onClick={() => onSelectPresenter(player.id)}
-        >
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold text-slate-950">{player.nickname}</span>
-            <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主也可以出题" : "玩家"}</span>
-          </span>
-          <span className="shrink-0 text-sm font-semibold text-[var(--primary)]">
-            {pendingPresenterId === player.id ? "选择中…" : "选择"}
-          </span>
-        </button>
-      ))}
+      {gamePlayers.length > 0 ? (
+        gamePlayers.map((player) => (
+          <button
+            className="flex min-h-14 w-full items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-left transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={Boolean(pendingPresenterId)}
+            key={player.id}
+            type="button"
+            onClick={() => onSelectPresenter(player.id)}
+          >
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-semibold text-slate-950">{player.nickname}</span>
+              <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主也可以出题" : "玩家"}</span>
+            </span>
+            <span className="shrink-0 text-sm font-semibold text-[var(--primary)]">
+              {pendingPresenterId === player.id ? "选择中…" : "选择"}
+            </span>
+          </button>
+        ))
+      ) : (
+        <p className="rounded-md border border-[var(--line)] bg-slate-50 px-3 py-3 text-sm text-[var(--muted)]">
+          当前没有玩家身份的成员，无法选择出题人
+        </p>
+      )}
     </div>
   );
 }
@@ -507,7 +562,7 @@ function KickPlayerModal({
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-slate-950">{player.nickname}</p>
                     <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
-                      <span>玩家</span>
+                      <span>{player.role === "SPECTATOR" ? "观战" : "玩家"}</span>
                       {isPresenter ? <span>当前出题人</span> : null}
                     </div>
                   </div>
@@ -778,6 +833,7 @@ function LobbyMainPanel({
   const actionText = getLobbyActionText(room, isHost, false);
   const hasQuestionSet = Boolean(room.preparedQuestionSetId);
   const canEditSettings = isHost && (room.status === "LOBBY" || room.status === "QUESTION_SETUP");
+  const gamePlayerCount = getGamePlayers(room.players).length;
 
   return (
     <Panel className="h-full" title="房间大厅">
@@ -800,7 +856,7 @@ function LobbyMainPanel({
           </div>
           <div className="flex shrink-0 flex-wrap gap-3">
             {isHost && room.status === "LOBBY" ? (
-              <Button type="button" onClick={onOpenPresenterPicker}>
+              <Button type="button" onClick={onOpenPresenterPicker} disabled={gamePlayerCount === 0}>
                 选择出题人
               </Button>
             ) : null}
@@ -858,7 +914,8 @@ function GameResultPanel({
   const [ratingValue, setRatingValue] = useState(5);
   const [isRating, setIsRating] = useState(false);
 
-  const playerIds = useMemo(() => room.players.map((player) => player.id), [room.players]);
+  const playerIds = useMemo(() => getGamePlayers(room.players).map((player) => player.id), [room.players]);
+  const canRateQuestionSet = room.players.find((player) => player.id === playerId)?.role === "PLAYER";
 
   async function loadRatingProgress(questionSetId: string) {
     const nextProgress = await getQuestionSetRatingProgress({
@@ -1005,7 +1062,7 @@ function GameResultPanel({
     }
   }
 
-  const canRate = Boolean(questionSet?.isPublic);
+  const canRate = Boolean(questionSet?.isPublic && canRateQuestionSet);
   const presenterName = getPresenterName(room.players, room.currentPresenterPlayerId);
   const isTeamBattleResult = gameSession?.gameMode === "TEAM_BATTLE" && Boolean(gameSession.teamBattleState);
   const playerById = new Map(room.players.map((player) => [player.id, player]));
@@ -1228,7 +1285,7 @@ function GameResultPanel({
                   <p className="mt-1 text-sm text-[var(--muted)]">{questionSet?.ratingCount ?? 0} 人评分</p>
                 </div>
                 <p className="text-sm font-semibold text-slate-950">
-                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? room.players.length} 已完成
+                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? playerIds.length} 已完成
                 </p>
               </div>
               <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
@@ -1252,7 +1309,9 @@ function GameResultPanel({
               </div>
             </>
           ) : (
-            <p className="text-sm leading-6 text-[var(--muted)]">本局题库未发布到社区，暂不开放评分</p>
+            <p className="text-sm leading-6 text-[var(--muted)]">
+              {questionSet?.isPublic ? "观战者不参与本局题库评分" : "本局题库未发布到社区，暂不开放评分"}
+            </p>
           )}
         </Panel>
 
@@ -1291,6 +1350,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [isLeavingRoom, setIsLeavingRoom] = useState(false);
+  const [isSwitchingRole, setIsSwitchingRole] = useState(false);
+  const [pendingJoinRole, setPendingJoinRole] = useState<PlayerRole | null>(null);
   const [isPresenterPickerOpen, setIsPresenterPickerOpen] = useState(false);
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
@@ -1333,6 +1394,32 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
 
       try {
+        const latestRoom = await getRoomWithPlayers(roomCode);
+
+        if (!latestRoom) {
+          if (isMounted) {
+            setError("没有找到房间");
+            setRoom(null);
+          }
+          return;
+        }
+
+        const existingMember = latestRoom.players.find((player) => player.id === session.playerId);
+
+        if (!existingMember && latestRoom.status === "PLAYING") {
+          saveLocalSession({
+            playerId: session.playerId,
+            nickname: session.nickname,
+            roomCode,
+            isHost: latestRoom.hostPlayerId === session.playerId,
+          });
+
+          if (isMounted) {
+            setRoom(latestRoom);
+          }
+          return;
+        }
+
         const joined = await joinRoom(roomCode, session.playerId, session.nickname);
 
         if (joined.error || !joined.room) {
@@ -1399,11 +1486,13 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
 
     function applyRoomUpdate(pushedRoom: Room) {
-      if (!isActive || pushedRoom.id !== room?.id) {
+      const activeRoom = room;
+      if (!isActive || !activeRoom || pushedRoom.id !== activeRoom.id) {
         return;
       }
 
-      if (pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
+      const wasRoomMember = activeRoom.players.some((player) => player.id === playerId);
+      if (wasRoomMember && pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
         markPlayerRemoved();
         return;
       }
@@ -1479,6 +1568,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   );
 
   const isHost = Boolean(currentPlayer?.isHost);
+  const isCurrentSpectator = currentPlayer?.role === "SPECTATOR";
   const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
   const canKickPlayers = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP" || room?.status === "PLAYING"));
@@ -1547,6 +1637,53 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError(caughtError instanceof Error ? caughtError.message : "踢出玩家失败，请稍后重试");
     } finally {
       setPendingKickPlayerId("");
+    }
+  }
+
+  async function handleSwitchRole(role: PlayerRole) {
+    if (!room?.id || !playerId || room.status !== "LOBBY" || currentPlayer?.role === role) {
+      return;
+    }
+
+    setIsSwitchingRole(true);
+    setError("");
+
+    try {
+      const nextRoom = await updatePlayerRole(room.id, playerId, role);
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom } : nextRoom));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "身份切换失败，请稍后重试");
+    } finally {
+      setIsSwitchingRole(false);
+    }
+  }
+
+  async function handleJoinPlayingRoom(role: PlayerRole) {
+    if (!room || currentPlayer || pendingJoinRole) {
+      return;
+    }
+
+    setPendingJoinRole(role);
+    setError("");
+
+    try {
+      const joined = await joinRoom(roomCode, playerId, nickname, role);
+      if (joined.error || !joined.room) {
+        setError(joined.error ?? "加入房间失败，请稍后重试");
+        return;
+      }
+
+      saveLocalSession({
+        playerId,
+        nickname,
+        roomCode,
+        isHost: joined.room.hostPlayerId === playerId,
+      });
+      setRoom(joined.room);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "加入房间失败，请稍后重试");
+    } finally {
+      setPendingJoinRole(null);
     }
   }
 
@@ -1730,12 +1867,38 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             回到首页
           </Button>
         </Panel>
+      ) : room.status === "PLAYING" && !currentPlayer ? (
+        <div className="mx-auto max-w-2xl">
+          <Panel title="选择加入方式">
+            <p className="text-sm leading-6 text-[var(--muted)]">
+              本局已经开始。选择玩家后当前题不能作答，下一题开始参与；选择观战后本局只观看。
+            </p>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <Button
+                type="button"
+                onClick={() => handleJoinPlayingRoom("PLAYER")}
+                disabled={Boolean(pendingJoinRole)}
+              >
+                {pendingJoinRole === "PLAYER" ? "加入中…" : "作为玩家加入"}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => handleJoinPlayingRoom("SPECTATOR")}
+                disabled={Boolean(pendingJoinRole)}
+              >
+                {pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}
+              </Button>
+            </div>
+          </Panel>
+        </div>
       ) : room.status === "PLAYING" ? (
         <main className="relative left-1/2 w-[calc(100vw-2rem)] -translate-x-1/2 space-y-4 sm:w-[calc(100vw-4rem)]">
           <ImageRevealGame
             room={room}
             playerId={playerId}
             isPresenter={isCurrentPresenter}
+            isSpectator={isCurrentSpectator}
             onError={setError}
             onRoomUpdated={(nextRoom) =>
               setRoom((currentRoom) =>
@@ -1781,6 +1944,19 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               playerId={playerId}
               presenterPlayerId={room.currentPresenterPlayerId}
               gameMode={gameSettings.gameMode}
+              spectatorAction={
+                room.status === "LOBBY" && currentPlayer ? (
+                  <Button
+                    className="h-9 px-3"
+                    type="button"
+                    variant="secondary"
+                    onClick={() => handleSwitchRole(isCurrentSpectator ? "PLAYER" : "SPECTATOR")}
+                    disabled={isSwitchingRole}
+                  >
+                    {isSwitchingRole ? "切换中…" : isCurrentSpectator ? "退出观战" : "加入观战"}
+                  </Button>
+                ) : null
+              }
               action={
                 canKickPlayers ? (
                   <Button

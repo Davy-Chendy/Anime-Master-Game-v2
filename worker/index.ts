@@ -41,6 +41,7 @@ const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
 const MUTATION_NAMES = new Set([
   "createRoom",
   "joinRoom",
+  "updatePlayerRole",
   "leaveRoom",
   "kickPlayerFromRoom",
   "dissolveRoom",

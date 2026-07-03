@@ -3,10 +3,12 @@ export type Player = {
   roomId?: string;
   nickname: string;
   isHost: boolean;
+  role: PlayerRole;
   joinedAt: number | string;
   lastSeenAt?: string;
 };
 
+export type PlayerRole = "PLAYER" | "SPECTATOR";
 export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
 export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED" | "TEAM_BATTLE";
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
@@ -66,6 +68,7 @@ export type DbPlayer = {
   room_id: string;
   nickname: string;
   is_host: boolean;
+  role?: PlayerRole | null;
   joined_at: string;
   last_seen_at: string;
 };

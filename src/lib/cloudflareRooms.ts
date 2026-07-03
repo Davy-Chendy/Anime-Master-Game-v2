@@ -10,6 +10,7 @@ import type {
   GameSession,
   LeaderboardEntry,
   Player,
+  PlayerRole,
   PlayerScore,
   Question,
   QuestionResult,
@@ -118,8 +119,11 @@ export const getRoomWithPlayers = (roomCode: string) => rpc<Room | null>("getRoo
 
 export const getPlayersByRoomId = (roomId: string) => rpc<Player[]>("getPlayersByRoomId", roomId);
 
-export const joinRoom = (roomCode: string, playerId: string, nickname: string) =>
-  rpc<{ room: Room | null; error: string | null }>("joinRoom", roomCode, playerId, nickname);
+export const joinRoom = (roomCode: string, playerId: string, nickname: string, role?: PlayerRole) =>
+  rpc<{ room: Room | null; error: string | null }>("joinRoom", roomCode, playerId, nickname, role);
+
+export const updatePlayerRole = (roomId: string, playerId: string, role: PlayerRole) =>
+  rpc<Room>("updatePlayerRole", roomId, playerId, role);
 
 export const leaveRoom = (roomId: string, playerId: string) => rpc<Room | null>("leaveRoom", roomId, playerId);
 
