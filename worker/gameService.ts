@@ -462,6 +462,44 @@ async function removePlayerFromCurrentTeamBattle(gameSessionId: string, playerId
   }
 }
 
+async function assertRemovingPlayerKeepsTeamBattlePlayable(gameSessionId: string, playerId: string) {
+  const { data: gameSession, error } = await d1.from("game_sessions").select("*").eq("id", gameSessionId).maybeSingle<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.game_mode !== "TEAM_BATTLE") {
+    return;
+  }
+
+  const state = parseTeamBattleState(gameSession.team_battle_state);
+  if (!state) {
+    return;
+  }
+
+  const playerTeam = getPlayerTeam(state, playerId);
+  if (playerTeam && getTeamMembers(state, playerTeam).length <= 1) {
+    throw new Error("踢出该玩家会导致队伍为空，请取消本局后重新开始。");
+  }
+}
+
+async function removePlayerFromCurrentGame(gameSessionId: string, playerId: string) {
+  const { data: gameSession, error } = await d1.from("game_sessions").select("*").eq("id", gameSessionId).maybeSingle<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!gameSession || gameSession.status !== "PLAYING") {
+    return;
+  }
+
+  if (gameSession.game_mode === "TEAM_BATTLE") {
+    await removePlayerFromCurrentTeamBattle(gameSession.id, playerId);
+  }
+}
+
 function assertTeamBattleSession(gameSession: DbGameSession) {
   const session = toGameSession(gameSession);
   if (session.gameMode !== "TEAM_BATTLE" || !session.teamBattleState) {
@@ -726,6 +764,7 @@ async function getRoundActionState(gameSession: GameSession) {
     { data: questionResults, error: resultsError },
     { data: currentRoundBuzzerAnswers, error: buzzerAnswersError },
     { data: currentRoundAnswers, error: answersError },
+    { data: roomPlayers, error: roomPlayersError },
     guesserIds,
   ] = await Promise.all([
     d1
@@ -748,6 +787,11 @@ async function getRoundActionState(gameSession: GameSession) {
       .eq("question_index", gameSession.currentQuestionIndex)
       .eq("reveal_round", gameSession.currentRevealRound)
       .returns<DbAnswer[]>(),
+    d1
+      .from("players")
+      .select("id")
+      .eq("room_id", gameSession.roomId)
+      .returns<Pick<DbPlayer, "id">[]>(),
     getOrCreateQuestionEligiblePlayerIds({
       gameSessionId: gameSession.id,
       roomId: gameSession.roomId,
@@ -766,25 +810,33 @@ async function getRoundActionState(gameSession: GameSession) {
   if (answersError) {
     throw new Error(answersError.message);
   }
+  if (roomPlayersError) {
+    throw new Error(roomPlayersError.message);
+  }
 
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
-  const eligibleGuesserIds = guesserIds.filter((guesserId) => !correctSet.has(guesserId));
-  const buzzerAnswerByPlayerId = new Map((currentRoundBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
-  const answerByPlayerId = new Map((currentRoundAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const activeRoomPlayerSet = new Set((roomPlayers ?? []).map((player) => player.id));
+  const activeGuesserIds = guesserIds.filter((guesserId) => activeRoomPlayerSet.has(guesserId));
+  const guesserIdSet = new Set(activeGuesserIds);
+  const activeCurrentRoundBuzzerAnswers = (currentRoundBuzzerAnswers ?? []).filter((answer) => guesserIdSet.has(answer.player_id));
+  const activeCurrentRoundAnswers = (currentRoundAnswers ?? []).filter((answer) => guesserIdSet.has(answer.player_id));
+  const eligibleGuesserIds = activeGuesserIds.filter((guesserId) => !correctSet.has(guesserId));
+  const buzzerAnswerByPlayerId = new Map(activeCurrentRoundBuzzerAnswers.map((answer) => [answer.player_id, answer]));
+  const answerByPlayerId = new Map(activeCurrentRoundAnswers.map((answer) => [answer.player_id, answer]));
   const hasPlayerActed = (guesserId: string) =>
     gameSession.gameMode === "ROUND_REVEAL"
       ? answerByPlayerId.has(guesserId)
       : answerByPlayerId.has(guesserId) || buzzerAnswerByPlayerId.has(guesserId);
 
   return {
-    guesserIds,
+    guesserIds: activeGuesserIds,
     correctSet,
     eligibleGuesserIds,
-    currentRoundBuzzerAnswers: currentRoundBuzzerAnswers ?? [],
-    currentRoundAnswers: currentRoundAnswers ?? [],
+    currentRoundBuzzerAnswers: activeCurrentRoundBuzzerAnswers,
+    currentRoundAnswers: activeCurrentRoundAnswers,
     buzzerAnswerByPlayerId,
     answerByPlayerId,
-    hasPendingAnswers: (currentRoundBuzzerAnswers ?? []).some((answer) => answer.status === "pending"),
+    hasPendingAnswers: activeCurrentRoundBuzzerAnswers.some((answer) => answer.status === "pending"),
     allEligiblePlayersUsedChance:
       eligibleGuesserIds.length === 0 || eligibleGuesserIds.every((guesserId) => hasPlayerActed(guesserId)),
     hasPlayerActed,
@@ -1210,7 +1262,7 @@ export async function leaveRoom(roomId: string, playerId: string) {
   const remainingPlayers = await getDbPlayersByRoomId(roomId);
 
   if (room.game_status === "PLAYING" && room.current_game_id) {
-    await removePlayerFromCurrentTeamBattle(room.current_game_id, playerId);
+    await removePlayerFromCurrentGame(room.current_game_id, playerId);
   }
 
   if (!isLeavingHost && !(isLeavingPresenter && room.game_status === "QUESTION_SETUP")) {
@@ -1297,10 +1349,6 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
     throw new Error("只有房主可以踢出玩家。");
   }
 
-  if (room.game_status === "PLAYING") {
-    throw new Error("游戏进行中不能踢出玩家，请先返回大厅。");
-  }
-
   const { data: targetPlayer, error: targetError } = await d1
     .from("players")
     .select("*")
@@ -1320,6 +1368,14 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
     throw new Error("不能踢出房主。");
   }
 
+  if (room.game_status === "PLAYING" && room.current_presenter_player_id === targetPlayerId) {
+    throw new Error("游戏进行中不能踢出当前出题人。如出题人掉线，请房主取消本局。");
+  }
+
+  if (room.game_status === "PLAYING" && room.current_game_id) {
+    await assertRemovingPlayerKeepsTeamBattlePlayable(room.current_game_id, targetPlayerId);
+  }
+
   const { error: deleteError } = await d1
     .from("players")
     .delete()
@@ -1331,6 +1387,10 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
   }
 
   let updatedRoom = room;
+  if (room.game_status === "PLAYING" && room.current_game_id) {
+    await removePlayerFromCurrentGame(room.current_game_id, targetPlayerId);
+  }
+
   if (room.current_presenter_player_id === targetPlayerId && room.game_status === "QUESTION_SETUP") {
     const { data: resetRoom, error: resetError } = await d1
       .from("rooms")
@@ -2102,6 +2162,7 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
     { data: questionAnswers, error: questionAnswersError },
     { data: currentRoundBuzzerAnswers, error: currentRoundBuzzerAnswersError },
     { data: questionBuzzerAnswers, error: questionBuzzerAnswersError },
+    { data: roomPlayers, error: roomPlayersError },
   ] = await Promise.all([
     d1
       .from("player_scores")
@@ -2145,6 +2206,11 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
       .eq("question_index", questionIndex)
       .order("submitted_at", { ascending: true })
       .returns<DbBuzzerAnswer[]>(),
+    d1
+      .from("players")
+      .select("id")
+      .eq("room_id", gameSession.roomId)
+      .returns<Pick<DbPlayer, "id">[]>(),
   ]);
 
   if (scoresError) {
@@ -2165,14 +2231,25 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
   if (questionBuzzerAnswersError) {
     throw new Error(questionBuzzerAnswersError.message);
   }
+  if (roomPlayersError) {
+    throw new Error(roomPlayersError.message);
+  }
+
+  const activeEligiblePlayerSet = new Set(
+    (gameSession.eligiblePlayerIds ?? []).filter((playerId) => (roomPlayers ?? []).some((player) => player.id === playerId)),
+  );
+  const activeCurrentRoundAnswers = (currentRoundAnswers ?? []).filter((answer) => activeEligiblePlayerSet.has(answer.player_id));
+  const activeCurrentRoundBuzzerAnswers = (currentRoundBuzzerAnswers ?? []).filter((answer) =>
+    activeEligiblePlayerSet.has(answer.player_id),
+  );
 
   return {
     gameSession,
     scores: (scores ?? []).map(toPlayerScore),
     questionResults: (questionResults ?? []).map(toQuestionResult),
-    answers: (currentRoundAnswers ?? []).map(toAnswer),
+    answers: activeCurrentRoundAnswers.map(toAnswer),
     labelAnswers: (questionAnswers ?? []).map(toAnswer),
-    buzzerAnswers: (currentRoundBuzzerAnswers ?? []).map(toBuzzerAnswer),
+    buzzerAnswers: activeCurrentRoundBuzzerAnswers.map(toBuzzerAnswer),
     labelBuzzerAnswers: (questionBuzzerAnswers ?? []).map(toBuzzerAnswer),
   };
 }
@@ -3262,21 +3339,40 @@ export async function judgeBuzzerAnswer(params: {
     throw new Error("红蓝对抗模式不能使用普通抢答判定。");
   }
 
-  const { data: firstPendingAnswer, error: pendingError } = await d1
-    .from("buzzer_answers")
-    .select("*")
-    .eq("game_session_id", currentGameSession.id)
-    .eq("question_index", currentGameSession.current_question_index)
-    .eq("reveal_round", currentGameSession.current_reveal_round)
-    .eq("status", "pending")
-    .order("submitted_at", { ascending: true })
-    .limit(1)
-    .maybeSingle<DbBuzzerAnswer>();
+  const eligiblePlayerIds = await getOrCreateQuestionEligiblePlayerIds({
+    gameSessionId: currentGameSession.id,
+    roomId: currentGameSession.room_id,
+    questionIndex: currentGameSession.current_question_index,
+    presenterPlayerId: currentGameSession.presenter_player_id,
+    knownEligiblePlayerIds: currentSession.eligiblePlayerIds,
+  });
+  const [{ data: roomPlayers, error: roomPlayersError }, { data: pendingAnswers, error: pendingError }] = await Promise.all([
+    d1
+      .from("players")
+      .select("id")
+      .eq("room_id", currentGameSession.room_id)
+      .returns<Pick<DbPlayer, "id">[]>(),
+    d1
+      .from("buzzer_answers")
+      .select("*")
+      .eq("game_session_id", currentGameSession.id)
+      .eq("question_index", currentGameSession.current_question_index)
+      .eq("reveal_round", currentGameSession.current_reveal_round)
+      .eq("status", "pending")
+      .order("submitted_at", { ascending: true })
+      .returns<DbBuzzerAnswer[]>(),
+  ]);
 
+  if (roomPlayersError) {
+    throw new Error(roomPlayersError.message);
+  }
   if (pendingError) {
     throw new Error(pendingError.message);
   }
 
+  const roomPlayerSet = new Set((roomPlayers ?? []).map((player) => player.id));
+  const activeEligiblePlayerSet = new Set(eligiblePlayerIds.filter((playerId) => roomPlayerSet.has(playerId)));
+  const firstPendingAnswer = (pendingAnswers ?? []).find((answer) => activeEligiblePlayerSet.has(answer.player_id)) ?? null;
   if (!firstPendingAnswer || firstPendingAnswer.id !== params.buzzerAnswerId) {
     throw new Error("请先判定最早提交的待判定抢答。");
   }
@@ -3734,7 +3830,12 @@ export async function judgeTeamBattleGuess(params: {
   }
 
   if (!params.isCorrect) {
-    const nextTeam = getOpposingTeam(state.pendingGuess.team);
+    const opposingTeam = getOpposingTeam(state.pendingGuess.team);
+    const nextTeam = getTeamMembers(state, opposingTeam).length > 0 ? opposingTeam : state.pendingGuess.team;
+    if (getTeamMembers(state, nextTeam).length === 0) {
+      throw new Error("红蓝对抗判定失败：没有可继续行动的队伍，请取消本局。");
+    }
+
     const nextPhase = session.revealedBlocks.length >= REVEAL_BLOCK_COUNT ? "GUESS_VOTE" : "REVEAL_VOTE";
     const nextState: TeamBattleState = {
       ...state,
@@ -3764,6 +3865,10 @@ export async function judgeTeamBattleGuess(params: {
 
   const winningTeam = state.pendingGuess.team;
   const winningMembers = getTeamMembers(state, winningTeam);
+  if (winningMembers.length === 0) {
+    throw new Error("红蓝对抗判定失败：猜测队伍已没有在线队员，请取消本局。");
+  }
+
   const nextScores = {
     ...state.teamScores,
     [winningTeam]: state.teamScores[winningTeam] + 1,

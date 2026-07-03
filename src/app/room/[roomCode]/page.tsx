@@ -498,6 +498,7 @@ function KickPlayerModal({
           <div className="mt-5 grid gap-2">
             {kickablePlayers.map((player) => {
               const isPresenter = player.id === room.currentPresenterPlayerId;
+              const canKickPlayer = !(room.status === "PLAYING" && isPresenter);
               return (
                 <div
                   className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
@@ -512,12 +513,12 @@ function KickPlayerModal({
                   </div>
                   <Button
                     className="h-10 shrink-0 px-3"
-                    disabled={Boolean(pendingKickPlayerId)}
+                    disabled={Boolean(pendingKickPlayerId) || !canKickPlayer}
                     type="button"
                     variant="secondary"
                     onClick={() => onKickPlayer(player.id)}
                   >
-                    {pendingKickPlayerId === player.id ? "踢出中…" : "踢出"}
+                    {pendingKickPlayerId === player.id ? "踢出中…" : canKickPlayer ? "踢出" : "不可踢"}
                   </Button>
                 </div>
               );
@@ -1480,7 +1481,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const isHost = Boolean(currentPlayer?.isHost);
   const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
-  const canKickPlayers = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP"));
+  const canKickPlayers = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP" || room?.status === "PLAYING"));
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
@@ -1737,15 +1738,33 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             isPresenter={isCurrentPresenter}
             onError={setError}
             onRoomUpdated={(nextRoom) =>
-              setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : nextRoom))
+              setRoom((currentRoom) =>
+                currentRoom
+                  ? {
+                      ...currentRoom,
+                      ...nextRoom,
+                      players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
+                    }
+                  : nextRoom,
+              )
             }
           />
           {isHost || !isCurrentPresenter ? (
             <div className="flex flex-wrap justify-end gap-3">
               {isHost ? (
-                <Button type="button" variant="secondary" onClick={handleRequestCancelRound} disabled={isCancelingRound}>
-                  {isCancelingRound ? "取消中…" : "取消本局"}
-                </Button>
+                <>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setIsKickPlayerModalOpen(true)}
+                    disabled={room.players.length <= 1}
+                  >
+                    踢出玩家
+                  </Button>
+                  <Button type="button" variant="secondary" onClick={handleRequestCancelRound} disabled={isCancelingRound}>
+                    {isCancelingRound ? "取消中…" : "取消本局"}
+                  </Button>
+                </>
               ) : (
                 <Button type="button" variant="secondary" onClick={handleExitRoom} disabled={isLeavingRoom}>
                   {isLeavingRoom ? "退出中…" : "退出房间"}

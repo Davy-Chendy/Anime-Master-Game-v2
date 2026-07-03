@@ -76,6 +76,7 @@ const MUTATION_NAMES = new Set([
 
 const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
+  "kickPlayerFromRoom",
   "confirmRevealBlocks",
   "submitAnswer",
   "submitForfeitAnswer",
@@ -213,11 +214,16 @@ async function getRoundSnapshotForMutation(name: string, result: unknown) {
   }
 
   const gameSessionId = getResultGameSessionId(result);
-  if (!gameSessionId) {
-    return null;
+  if (gameSessionId) {
+    return await gameService.getRoundSnapshot(gameSessionId);
   }
 
-  return await gameService.getRoundSnapshot(gameSessionId);
+  const room = getResultRoom(result);
+  if (name === "kickPlayerFromRoom" && room?.status === "PLAYING" && room.currentGameId) {
+    return await gameService.getRoundSnapshot(room.currentGameId);
+  }
+
+  return null;
 }
 
 function attachRoundSnapshot(result: unknown, roundSnapshot: RoundSnapshot | null) {

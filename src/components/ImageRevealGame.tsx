@@ -935,7 +935,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const fallbackGuesserIds = room.players
     .filter((player) => player.id !== room.currentPresenterPlayerId)
     .map((player) => player.id);
-  const eligibleGuesserIds = gameSession?.eligiblePlayerIds ?? fallbackGuesserIds;
+  const scoringEligibleGuesserIds = gameSession?.eligiblePlayerIds ?? fallbackGuesserIds;
+  const eligibleGuesserIds = scoringEligibleGuesserIds.filter((guesserId) => activePlayerById.has(guesserId));
   const eligibleGuesserIdSet = new Set(eligibleGuesserIds);
   const isCurrentPlayerEligibleForQuestion = isPresenter || isTeamBattleMode || eligibleGuesserIdSet.has(playerId);
   const guessers = room.players.filter((player) => eligibleGuesserIdSet.has(player.id));
@@ -1295,7 +1296,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? "顺位"
         : "标准";
-  const rankedNextScore = Math.max(1, eligibleGuesserIds.length - questionResults.length);
+  const rankedNextScore = Math.max(1, scoringEligibleGuesserIds.length - questionResults.length);
   const scoreCardLabel =
     gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
       ? "抢答规则"
