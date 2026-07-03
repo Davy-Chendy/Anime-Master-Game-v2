@@ -123,7 +123,7 @@ export const getRoomWithPlayers = (roomCode: string) => rpc<Room | null>("getRoo
 export const getPlayersByRoomId = (roomId: string) => rpc<Player[]>("getPlayersByRoomId", roomId);
 
 export const joinRoom = (roomCode: string, playerId: string, nickname: string, role?: PlayerRole) =>
-  rpc<{ room: Room | null; error: string | null }>("joinRoom", roomCode, playerId, nickname, role);
+  rpc<{ room: Room | null; error: string | null; errorCode?: string | null }>("joinRoom", roomCode, playerId, nickname, role);
 
 export const updatePlayerRole = (roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole) =>
   rpc<Room>("updatePlayerRole", roomId, actorPlayerId, targetPlayerId, role);

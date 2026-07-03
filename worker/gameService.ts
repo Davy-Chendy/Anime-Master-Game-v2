@@ -1060,6 +1060,7 @@ function isUniqueViolation(error: { code?: string } | null) {
 const REVEAL_BLOCK_COUNT = 45;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 15;
+const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
@@ -1318,6 +1319,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   if (nextRole === "PLAYER" && (!existingPlayer || !isGamePlayer(existingPlayer)) && countGamePlayers(players) >= MAX_PLAYERS_PER_ROOM) {
     return {
       room: null,
+      errorCode: PLAYER_CAPACITY_FULL_ERROR_CODE,
       error: `玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以选择观战加入。`,
     };
   }

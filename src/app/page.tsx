@@ -13,9 +13,10 @@ import { createRoom, getRoomByCode, joinRoom } from "@/lib/cloudflareRooms";
 const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
+const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 
-function isPlayerCapacityError(message: string | null | undefined) {
-  return Boolean(message?.includes("玩家已满"));
+function isPlayerCapacityError(errorCode: string | null | undefined) {
+  return errorCode === PLAYER_CAPACITY_FULL_ERROR_CODE;
 }
 
 type HomeFooterIcon = "video" | "rules" | "github" | "group" | "spark";
@@ -194,7 +195,7 @@ export default function HomePage() {
       const result = await joinRoom(trimmedRoomCode, session.playerId, trimmedNickname);
 
       if (result.error || !result.room) {
-        if (isPlayerCapacityError(result.error)) {
+        if (isPlayerCapacityError(result.errorCode)) {
           saveLocalSession({
             playerId: session.playerId,
             nickname: trimmedNickname,
@@ -202,7 +203,7 @@ export default function HomePage() {
             isHost: existingRoom.host_player_id === session.playerId,
           });
 
-          router.push(`/room/${existingRoom.room_code}`);
+          router.push(`/room/${existingRoom.room_code}?join=choose`);
           return;
         }
 

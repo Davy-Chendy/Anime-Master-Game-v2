@@ -51,6 +51,7 @@ type BroadcastMessage = {
 };
 
 const ACTION_RESULT_TTL_MS = 10_000;
+const LOCAL_ROOM_OBJECT_TOPIC_HEADER = "x-local-room-object-topic";
 const ACTION_CACHE_MIN_ALARM_DELAY_MS = 100;
 const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
@@ -443,7 +444,28 @@ async function broadcast(env: Env, message: BroadcastMessage) {
   });
 }
 
-async function handleRpc(request: Request, env: Env) {
+async function getJoinRoomTopic(env: Env, args: unknown[]) {
+  const roomCode = typeof args[0] === "string" ? args[0] : "";
+  if (!roomCode.trim()) {
+    return null;
+  }
+
+  return await runWithGameDatabase(env, async () => {
+    const room = await gameService.getRoomByCode(roomCode);
+    return room?.id ? `room:${room.id}` : null;
+  });
+}
+
+function getRoomIdArgTopic(args: unknown[]) {
+  const roomId = typeof args[0] === "string" ? args[0].trim() : "";
+  return roomId ? `room:${roomId}` : null;
+}
+
+async function handleRpc(
+  request: Request,
+  env: Env,
+  options: { localTopic?: string | null; localBroadcast?: (message: string) => void } = {},
+) {
   const body = (await request.json()) as RpcBody;
   const name = body.name ?? "";
   const args = body.args ?? [];
@@ -457,7 +479,7 @@ async function handleRpc(request: Request, env: Env) {
       const topic = await getRoomTopicForBroadcast(name, args, responseResult);
       const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
       if (topic && deltas.length > 0) {
-        await broadcast(env, {
+        const message = {
           type: "change",
           name,
           result: stripRoundSnapshotFromBroadcastResult(responseResult),
@@ -466,7 +488,13 @@ async function handleRpc(request: Request, env: Env) {
           clientActionId: body.clientActionId,
           delta: deltas[0],
           deltas,
-        });
+        } satisfies BroadcastMessage;
+
+        if (options.localTopic === topic && options.localBroadcast) {
+          options.localBroadcast(JSON.stringify(message));
+        } else {
+          await broadcast(env, message);
+        }
       }
     }
 
@@ -1299,7 +1327,9 @@ export class RoomDurableObject {
     }
 
     if (url.pathname === "/api/rpc" && request.method === "POST") {
-      return await this.enqueueR2BoundRpc(request);
+      return request.headers.has(LOCAL_ROOM_OBJECT_TOPIC_HEADER)
+        ? await this.enqueueActionBoundRpc(request)
+        : await this.enqueueR2BoundRpc(request);
     }
 
     if (request.headers.get("upgrade") === "websocket") {
@@ -1354,9 +1384,25 @@ export class RoomDurableObject {
     return task;
   }
 
+  private enqueueActionBoundRpc(request: Request) {
+    const task = this.actionQueue.then(
+      () => this.handleQueuedR2BoundRpc(request),
+      () => this.handleQueuedR2BoundRpc(request),
+    );
+    this.actionQueue = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  }
+
   private async handleQueuedR2BoundRpc(request: Request) {
     try {
-      return await handleRpc(request, this.env);
+      const localTopic = request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER);
+      return await handleRpc(request, this.env, {
+        localTopic,
+        localBroadcast: (message) => this.broadcast(message),
+      });
     } catch (error) {
       return errorResponse(error, request, this.env);
     }
@@ -1510,6 +1556,16 @@ export default {
         const body = (await request.clone().json().catch(() => null)) as RpcBody | null;
         if (body?.name === "createQuestionSetFromUrlText") {
           return await getR2UploadGateObject(env).fetch(request);
+        }
+
+        if (body?.name === "joinRoom" || body?.name === "updatePlayerRole") {
+          const topic =
+            body.name === "joinRoom" ? await getJoinRoomTopic(env, body.args ?? []) : getRoomIdArgTopic(body.args ?? []);
+          if (topic) {
+            const headers = new Headers(request.headers);
+            headers.set(LOCAL_ROOM_OBJECT_TOPIC_HEADER, topic);
+            return await getRoomObject(env, topic).fetch(new Request(request, { headers }));
+          }
         }
 
         return await handleRpc(request, env);

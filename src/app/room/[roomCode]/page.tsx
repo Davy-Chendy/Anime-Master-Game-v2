@@ -49,6 +49,7 @@ const statusText: Record<RoomStatus, string> = {
   PLAYING: "游戏中",
   GAME_RESULT: "本局结算",
 };
+const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 
 type GameSettings = {
   gameMode: GameMode;
@@ -249,8 +250,8 @@ function getSpectators(players: Player[]) {
   return players.filter((player) => player.role === "SPECTATOR");
 }
 
-function isPlayerCapacityError(message: string | null | undefined) {
-  return Boolean(message?.includes("玩家已满"));
+function isPlayerCapacityError(errorCode: string | null | undefined) {
+  return errorCode === PLAYER_CAPACITY_FULL_ERROR_CODE;
 }
 
 function canSwitchPlayerRole(room: Room | null | undefined, isCurrentPresenter: boolean) {
@@ -1413,8 +1414,12 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
 
         const existingMember = latestRoom.players.find((player) => player.id === session.playerId);
+        const shouldChooseJoinRole = new URLSearchParams(window.location.search).get("join") === "choose";
 
-        if (!existingMember && (latestRoom.status === "PLAYING" || latestRoom.status === "QUESTION_SETUP")) {
+        if (
+          !existingMember &&
+          (shouldChooseJoinRole || latestRoom.status === "PLAYING" || latestRoom.status === "QUESTION_SETUP")
+        ) {
           saveLocalSession({
             playerId: session.playerId,
             nickname: session.nickname,
@@ -1433,7 +1438,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         if (joined.error || !joined.room) {
           if (isMounted) {
             setError(joined.error ?? "没有找到房间");
-            setRoom(isPlayerCapacityError(joined.error) ? latestRoom : null);
+            setRoom(isPlayerCapacityError(joined.errorCode) ? latestRoom : null);
           }
           return;
         }
