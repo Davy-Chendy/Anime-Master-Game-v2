@@ -357,6 +357,79 @@ function withVoteDeadlineIfComplete(state: TeamBattleState, votes: Record<string
   };
 }
 
+function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: string): TeamBattleState {
+  const teams = {
+    red: state.teams.red.filter((memberId) => memberId !== playerId),
+    blue: state.teams.blue.filter((memberId) => memberId !== playerId),
+  };
+
+  if (teams.red.length === state.teams.red.length && teams.blue.length === state.teams.blue.length) {
+    return state;
+  }
+
+  const revealVotes = { ...state.revealVotes };
+  const guessVotes = { ...state.guessVotes };
+  const teamMemberNames = { ...(state.teamMemberNames ?? {}) };
+  delete revealVotes[playerId];
+  delete guessVotes[playerId];
+  delete teamMemberNames[playerId];
+
+  let nextState: TeamBattleState = {
+    ...state,
+    teams,
+    teamMemberNames,
+    revealVotes,
+    guessVotes,
+  };
+
+  if (teams[nextState.activeTeam].length === 0) {
+    const nextTeam = getOpposingTeam(nextState.activeTeam);
+    if (teams[nextTeam].length > 0) {
+      nextState = {
+        ...nextState,
+        activeTeam: nextTeam,
+        voteDeadlineAt: null,
+        revealVotes: {},
+        guessVotes: {},
+        pendingGuess: null,
+        message: `${getTeamName(getOpposingTeam(nextTeam))}没有在线队员，轮到${getTeamName(nextTeam)}。`,
+      };
+    }
+  }
+
+  const currentVotes =
+    nextState.phase === "REVEAL_VOTE" ? nextState.revealVotes : nextState.phase === "GUESS_VOTE" ? nextState.guessVotes : null;
+
+  return currentVotes ? withVoteDeadlineIfComplete(nextState, currentVotes) : nextState;
+}
+
+async function removePlayerFromCurrentTeamBattle(gameSessionId: string, playerId: string) {
+  const { data: gameSession, error } = await d1.from("game_sessions").select("*").eq("id", gameSessionId).maybeSingle<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.game_mode !== "TEAM_BATTLE") {
+    return;
+  }
+
+  const state = parseTeamBattleState(gameSession.team_battle_state);
+  if (!state) {
+    return;
+  }
+
+  const nextState = removePlayerFromTeamBattleState(state, playerId);
+  if (nextState === state) {
+    return;
+  }
+
+  const { error: updateError } = await updateTeamBattleState(gameSessionId, nextState);
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+}
+
 function assertTeamBattleSession(gameSession: DbGameSession) {
   const session = toGameSession(gameSession);
   if (session.gameMode !== "TEAM_BATTLE" || !session.teamBattleState) {
@@ -875,6 +948,10 @@ export async function leaveRoom(roomId: string, playerId: string) {
   }
 
   const remainingPlayers = await getDbPlayersByRoomId(roomId);
+
+  if (room.game_status === "PLAYING" && room.current_game_id) {
+    await removePlayerFromCurrentTeamBattle(room.current_game_id, playerId);
+  }
 
   if (!isLeavingHost && !(isLeavingPresenter && room.game_status === "QUESTION_SETUP")) {
     return toRoom(room, remainingPlayers);

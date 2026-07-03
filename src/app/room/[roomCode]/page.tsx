@@ -1008,7 +1008,6 @@ function GameResultPanel({
   const presenterName = getPresenterName(room.players, room.currentPresenterPlayerId);
   const isTeamBattleResult = gameSession?.gameMode === "TEAM_BATTLE" && Boolean(gameSession.teamBattleState);
   const playerById = new Map(room.players.map((player) => [player.id, player]));
-  const teamMemberNames = gameSession?.teamBattleState?.teamMemberNames ?? {};
   const questionCount = questionSet?.questions?.length ?? questionSet?.imageCount ?? 0;
   const questionIndexes = Array.from({ length: questionCount }, (_, index) => index);
   const scoreByPlayerQuestion = new Map<string, number>();
@@ -1035,10 +1034,11 @@ function GameResultPanel({
         .map((team) => ({
           team,
           score: gameSession.teamBattleState?.teamScores[team] ?? 0,
-          members: (gameSession.teamBattleState?.teams[team] ?? []).map((memberId) => ({
-            id: memberId,
-            nickname: playerById.get(memberId)?.nickname ?? teamMemberNames[memberId] ?? "已离开玩家",
-          })),
+          members: (gameSession.teamBattleState?.teams[team] ?? []).flatMap((memberId) => {
+            const player = playerById.get(memberId);
+
+            return player ? [{ id: memberId, nickname: player.nickname }] : [];
+          }),
           questionScores: questionIndexes.map((questionIndex) => scoreByTeamQuestion.get(`${team}:${questionIndex}`) ?? 0),
         }))
         .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))

@@ -390,7 +390,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (targetPlayerId: string) =>
       room.players.find((player) => player.id === targetPlayerId)?.nickname ??
       gameSessionRef.current?.teamBattleState?.teamMemberNames?.[targetPlayerId] ??
-      "已离开玩家",
+      "玩家",
     [room.players],
   );
 
@@ -932,13 +932,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
+  const activePlayerById = new Map(room.players.map((player) => [player.id, player]));
   const teamBattlePlayerTeam: TeamBattleTeam | null = teamBattleState?.teams.red.includes(playerId)
     ? "red"
     : teamBattleState?.teams.blue.includes(playerId)
       ? "blue"
       : null;
   const teamBattleActiveTeam = teamBattleState?.activeTeam ?? "red";
-  const teamBattleActiveMembers = teamBattleState?.teams[teamBattleActiveTeam] ?? [];
+  const teamBattleActiveMembers = (teamBattleState?.teams[teamBattleActiveTeam] ?? []).filter((memberId) => activePlayerById.has(memberId));
+  const teamBattleActiveMemberSet = new Set(teamBattleActiveMembers);
   const teamBattleCanAct = Boolean(!isPresenter && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
   const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
   const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
@@ -1035,13 +1037,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         .map((team) => ({
           team,
           score: teamBattleState.teamScores[team],
-          members: teamBattleState.teams[team].map((memberId) => {
-            const player = room.players.find((currentPlayer) => currentPlayer.id === memberId);
+          members: teamBattleState.teams[team].flatMap((memberId) => {
+            const player = activePlayerById.get(memberId);
 
-            return {
-              id: memberId,
-              nickname: player?.nickname ?? teamBattleState.teamMemberNames?.[memberId] ?? "已离开玩家",
-            };
+            return player ? [{ id: memberId, nickname: player.nickname }] : [];
           }),
         }))
         .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
@@ -1049,8 +1048,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const teamBattleActiveTone = getTeamTone(teamBattleActiveTeam);
   const teamBattlePlayerTone = teamBattlePlayerTeam ? getTeamTone(teamBattlePlayerTeam) : null;
   const teamBattlePhaseLabel = teamBattleState ? getTeamBattlePhaseLabel(teamBattleState.phase) : "";
-  const teamBattleRevealSubmittedCount = Object.keys(teamBattleState?.revealVotes ?? {}).length;
-  const teamBattleGuessSubmittedCount = Object.keys(teamBattleState?.guessVotes ?? {}).length;
+  const teamBattleRevealSubmittedCount = Object.keys(teamBattleState?.revealVotes ?? {}).filter((submittedPlayerId) =>
+    teamBattleActiveMemberSet.has(submittedPlayerId),
+  ).length;
+  const teamBattleGuessSubmittedCount = Object.keys(teamBattleState?.guessVotes ?? {}).filter((submittedPlayerId) =>
+    teamBattleActiveMemberSet.has(submittedPlayerId),
+  ).length;
   const teamBattleSubmittedCount =
     teamBattleState?.phase === "REVEAL_VOTE"
       ? teamBattleRevealSubmittedCount
