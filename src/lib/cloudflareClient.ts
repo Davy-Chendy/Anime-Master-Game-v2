@@ -77,6 +77,7 @@ const MUTATION_NAMES = new Set([
 ]);
 
 const LONG_ACTION_NAMES = new Set(["createUploadedQuestionSet", "createQuestionSetFromUrlText"]);
+const HTTP_ONLY_ACTION_NAMES = new Set(["createQuestionSetFromUrlText"]);
 const topicStates = new Map<string, TopicState>();
 const gameSessionTopics = new Map<string, string>();
 
@@ -381,7 +382,7 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
 }
 
 export async function callGameRpc<T>(name: string, args: unknown[] = []) {
-  if (MUTATION_NAMES.has(name)) {
+  if (MUTATION_NAMES.has(name) && !HTTP_ONLY_ACTION_NAMES.has(name)) {
     const topic = inferActionTopic(name, args);
     if (topic) {
       return await wsAction<T>(topic, name, args);

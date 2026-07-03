@@ -1733,6 +1733,26 @@ export async function createUploadedQuestionSet(params: {
   return toQuestionSet(questionSet, questions ?? []);
 }
 
+export async function assertCanCreateUploadedQuestionSet(params: { roomId: string; presenterPlayerId: string }) {
+  assertD1Env();
+
+  const { data: room, error: roomError } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", params.roomId)
+    .eq("current_presenter_player_id", params.presenterPlayerId)
+    .eq("game_status", "QUESTION_SETUP")
+    .maybeSingle<DbRoom>();
+
+  if (roomError) {
+    throw new Error(roomError.message);
+  }
+
+  if (!room) {
+    throw new Error("创建题库失败：当前房间不在出题阶段，或你不是本轮出题人。");
+  }
+}
+
 export async function createQuestionSetFromUrlText(params: {
   roomId: string;
   presenterPlayerId: string;

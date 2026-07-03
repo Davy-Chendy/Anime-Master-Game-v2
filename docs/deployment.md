@@ -7,6 +7,7 @@
 - 实时房间：Durable Objects
 - 持久化：Cloudflare D1
 - 图片：Cloudflare R2
+- 远端 URL 图片压缩：Cloudflare Images binding
 
 生产环境推荐使用自定义域名同源路由：
 
@@ -144,6 +145,9 @@ npx wrangler r2 bucket create anime-master-game-images
 [[r2_buckets]]
 binding = "IMAGE_BUCKET"
 bucket_name = "anime-master-game-images"
+
+[images]
+binding = "IMAGES"
 ```
 
 执行远程 D1 迁移：

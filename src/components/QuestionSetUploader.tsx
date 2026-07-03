@@ -18,7 +18,7 @@ import {
   parseQuestionImportText,
   prepareQuestionSetForStart,
 } from "@/lib/cloudflareRooms";
-import type { QuestionSet, Room } from "@/types/game";
+import type { FailedQuestionUrlImport, PreparedQuestionUrlImport, QuestionSet, QuestionUrlImportInput, Room } from "@/types/game";
 
 type QuestionSetUploaderProps = {
   room: Room;
@@ -53,6 +53,22 @@ const emptyProgress: UploadProgress = {
   uploadBytes: 0,
   latestMessage: "尚未开始",
 };
+
+function toImportInputs(items: ReturnType<typeof parseQuestionImportText>): QuestionUrlImportInput[] {
+  return items.map((item, index) => ({
+    imageUrl: item.imageUrl,
+    labelText: item.labelText ?? null,
+    orderIndex: index,
+  }));
+}
+
+function failedToImportInputs(items: FailedQuestionUrlImport[]): QuestionUrlImportInput[] {
+  return items.map((item) => ({
+    imageUrl: item.imageUrl,
+    labelText: item.labelText ?? null,
+    orderIndex: item.orderIndex,
+  }));
+}
 
 function getQuestionSetUrls(questionSet: QuestionSet | null) {
   if (!questionSet) {
@@ -452,18 +468,83 @@ export function QuestionSetUploader({
 
     setIsCreatingFromText(true);
     resetCreatedSet();
+    setProgress({ ...emptyProgress, total: importPreview.items.length, latestMessage: "开始抓取并压缩远端图片" });
 
     try {
-      const createdQuestionSet = await createQuestionSetFromUrlText({
-        roomId: room.id ?? "",
-        presenterPlayerId,
-        title: getDraftQuestionSetTitle(room),
-        description: "",
-        imageUrlsText: urlText,
-      });
-      setQuestionSet(createdQuestionSet);
-      clearError();
-      scrollToPreview();
+      let preparedQuestions: PreparedQuestionUrlImport[] = [];
+      let retryQuestions: QuestionUrlImportInput[] = toImportInputs(importPreview.items);
+      let fallbackToOriginalUrls = false;
+
+      while (true) {
+        setProgress((current) => ({
+          ...current,
+          total: preparedQuestions.length + retryQuestions.length,
+          done: preparedQuestions.length,
+          success: preparedQuestions.length,
+          fail: 0,
+          latestMessage: fallbackToOriginalUrls
+            ? "正在用原链接代替失败图片并创建题库"
+            : preparedQuestions.length > 0
+              ? `正在重试 ${retryQuestions.length} 张失败图片`
+              : "正在抓取、压缩并上传远端图片",
+        }));
+
+        const result = await createQuestionSetFromUrlText({
+          roomId: room.id ?? "",
+          presenterPlayerId,
+          title: getDraftQuestionSetTitle(room),
+          description: "",
+          retryQuestions,
+          preparedQuestions,
+          fallbackToOriginalUrls,
+        });
+
+        if (result.status === "created") {
+          setQuestionSet(result.questionSet);
+          setProgress({
+            ...emptyProgress,
+            total: result.importedCount + result.fallbackCount,
+            done: result.importedCount + result.fallbackCount,
+            success: result.importedCount,
+            fail: result.fallbackCount,
+            latestMessage:
+              result.fallbackCount > 0
+                ? `题库已创建：${result.importedCount} 张已上传图库，${result.fallbackCount} 张使用原链接`
+                : `题库已创建：${result.importedCount} 张图片已上传图库`,
+          });
+          clearError();
+          scrollToPreview();
+          break;
+        }
+
+        preparedQuestions = result.preparedQuestions;
+        retryQuestions = failedToImportInputs(result.failedQuestions);
+        setProgress({
+          ...emptyProgress,
+          total: result.totalCount,
+          done: result.preparedQuestions.length + result.failedQuestions.length,
+          success: result.preparedQuestions.length,
+          fail: result.failedQuestions.length,
+          latestMessage: `${result.failedQuestions.length} 张图片导入失败`,
+        });
+
+        const failedSummary = result.failedQuestions
+          .slice(0, 5)
+          .map((item) => `第 ${item.orderIndex + 1} 张：${item.error}`)
+          .join("\n");
+        const shouldRetry = window.confirm(
+          `有 ${result.failedQuestions.length} 张图片导入失败。\n\n${failedSummary}${
+            result.failedQuestions.length > 5 ? "\n..." : ""
+          }\n\n点击“确定”重试失败图片；点击“取消”则用原 URL 代替失败图片创建题库。`,
+        );
+
+        if (shouldRetry) {
+          fallbackToOriginalUrls = false;
+          continue;
+        }
+
+        fallbackToOriginalUrls = true;
+      }
     } catch (error) {
       onError(error instanceof Error ? error.message : "从图片链接创建题库失败");
     } finally {
@@ -681,8 +762,16 @@ export function QuestionSetUploader({
               </p>
             )}
             <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
-              {isCreatingFromText ? "创建中…" : "创建题库"}
+              {isCreatingFromText ? "抓取并创建中…" : "创建题库"}
             </Button>
+            {isCreatingFromText || progress.total > 0 ? (
+              <div>
+                <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full bg-[var(--primary)] transition-all" style={{ width: `${progressPercent}%` }} />
+                </div>
+                <p className="mt-2 text-xs text-[var(--muted)]">{progress.latestMessage}</p>
+              </div>
+            ) : null}
           </div>
         ) : null}
 

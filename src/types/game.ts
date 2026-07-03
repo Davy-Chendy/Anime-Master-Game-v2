@@ -105,6 +105,38 @@ export type Question = {
   createdAt: string;
 };
 
+export type QuestionUrlImportInput = {
+  imageUrl: string;
+  labelText?: string | null;
+  orderIndex: number;
+};
+
+export type PreparedQuestionUrlImport = QuestionUrlImportInput & {
+  originalImageUrl: string;
+  r2Key?: string | null;
+  rawBytes?: number | null;
+  uploadBytes?: number | null;
+  usedOriginal?: boolean;
+};
+
+export type FailedQuestionUrlImport = QuestionUrlImportInput & {
+  error: string;
+};
+
+export type QuestionSetUrlImportResult =
+  | {
+      status: "created";
+      questionSet: QuestionSet;
+      importedCount: number;
+      fallbackCount: number;
+    }
+  | {
+      status: "needs_decision";
+      preparedQuestions: PreparedQuestionUrlImport[];
+      failedQuestions: FailedQuestionUrlImport[];
+      totalCount: number;
+    };
+
 export type GameSession = {
   id: string;
   roomId: string;

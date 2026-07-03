@@ -1,16 +1,34 @@
 ﻿import * as gameService from "./gameService";
 
-import type { Answer, BuzzerAnswer, GameSession, Question, QuestionSet, RealtimeDelta, Room, RoundSnapshot } from "../src/types/game";
+import type {
+  Answer,
+  BuzzerAnswer,
+  FailedQuestionUrlImport,
+  GameSession,
+  PreparedQuestionUrlImport,
+  Question,
+  QuestionSet,
+  QuestionSetUrlImportResult,
+  QuestionUrlImportInput,
+  RealtimeDelta,
+  Room,
+  RoundSnapshot,
+} from "../src/types/game";
 
 export interface Env {
   DB: D1Database;
   ROOM_OBJECTS: DurableObjectNamespace;
   IMAGE_BUCKET: R2Bucket;
+  IMAGES?: ImagesBinding;
   ALLOWED_ORIGIN?: string;
   R2_IMAGE_PREFIX?: string;
   R2_PUBLIC_BASE_URL?: string;
   R2_EXISTING_IMAGE_LIMIT?: string;
   R2_IMAGE_STORAGE_LIMIT_BYTES?: string;
+  REMOTE_IMAGE_PROXY_CANDIDATES?: string;
+  REMOTE_UPLOAD_IMAGE_MAX_SIZE?: string;
+  REMOTE_UPLOAD_IMAGE_QUALITY?: string;
+  REMOTE_UPLOAD_IMAGE_FORMAT?: string;
 }
 
 type RpcBody = {
@@ -37,6 +55,15 @@ const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
 const R2_LIST_PAGE_LIMIT = 1000;
 const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
+const REMOTE_IMPORT_CONCURRENCY = 2;
+const REMOTE_UPLOAD_IMAGE_MAX_SIZE = 1600;
+const REMOTE_UPLOAD_IMAGE_QUALITY = 78;
+const REMOTE_UPLOAD_IMAGE_FORMAT = "image/webp";
+const DEFAULT_REMOTE_IMAGE_PROXY_CANDIDATES = [
+  "https://corsproxy.io/?url=",
+  "https://api.allorigins.win/raw?url=",
+  "https://api.codetabs.com/v1/proxy?quest=",
+];
 
 const MUTATION_NAMES = new Set([
   "createRoom",
@@ -178,6 +205,14 @@ async function runWithGameDatabase<T>(env: Env, callback: () => Promise<T>) {
 
 async function callGameFunction(name: string, args: unknown[]) {
   return await getExportedFunction(name)(...(args ?? []));
+}
+
+async function callGameFunctionWithEnv(name: string, args: unknown[], request: Request, env: Env) {
+  if (name === "createQuestionSetFromUrlText") {
+    return await createQuestionSetFromUrlTextWithRemoteImages(args[0], request, env);
+  }
+
+  return await callGameFunction(name, args);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -412,14 +447,14 @@ async function handleRpc(request: Request, env: Env) {
   const args = body.args ?? [];
 
   return await runWithGameDatabase(env, async () => {
-    const result = await callGameFunction(name, args);
+    const result = await callGameFunctionWithEnv(name, args, request, env);
     const roundSnapshot = await getRoundSnapshotForMutation(name, result);
     const responseResult = attachRoundSnapshot(result, roundSnapshot);
 
     if (MUTATION_NAMES.has(name)) {
       const topic = await getRoomTopicForBroadcast(name, args, responseResult);
-      if (topic) {
-        const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
+      const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
+      if (topic && deltas.length > 0) {
         await broadcast(env, {
           type: "change",
           name,
@@ -530,9 +565,9 @@ function getR2PublicUrl(request: Request, env: Env, key: string) {
   return `${origin}${R2_IMAGE_ROUTE_PREFIX}${encodeR2Key(key)}`;
 }
 
-function buildR2ImageKey(request: Request, env: Env) {
+function buildR2ImageKey(request: Request, env: Env, fileNameOverride?: string) {
   const url = new URL(request.url);
-  const fileName = sanitizeFileName(url.searchParams.get("filename") ?? "image");
+  const fileName = sanitizeFileName(fileNameOverride ?? url.searchParams.get("filename") ?? "image");
   const now = new Date();
   const datePath = now.toISOString().slice(0, 10).replace(/-/g, "/");
   const prefix = getR2ImagePrefix(env);
@@ -548,6 +583,461 @@ function getRequestContentLength(request: Request) {
 
   const size = Number(value);
   return Number.isFinite(size) && size >= 0 ? size : null;
+}
+
+async function putR2Image(
+  request: Request,
+  env: Env,
+  body: ArrayBuffer,
+  contentType: string,
+  fileName: string,
+  customMetadata: Record<string, string> = {},
+) {
+  const storageLimitBytes = getR2ImageStorageLimitBytes(env);
+  const currentStorageBytes = await getR2StoredImageBytes(env);
+  if (currentStorageBytes + body.byteLength > storageLimitBytes) {
+    return {
+      ok: false as const,
+      response: r2StorageLimitResponse(request, env, currentStorageBytes, body.byteLength, storageLimitBytes),
+    };
+  }
+
+  const key = buildR2ImageKey(request, env, fileName);
+  const checksum = await crypto.subtle.digest("SHA-256", body);
+  const object = await env.IMAGE_BUCKET.put(key, body, {
+    httpMetadata: {
+      contentType,
+      cacheControl: "public, max-age=31536000, immutable",
+    },
+    customMetadata: {
+      uploadedAt: new Date().toISOString(),
+      ...customMetadata,
+    },
+    sha256: checksum,
+  });
+
+  if (!object) {
+    throw new Error("图片写入 R2 失败，请稍后重试。");
+  }
+
+  const storageBytesAfterUpload = await getR2StoredImageBytes(env);
+  if (storageBytesAfterUpload > storageLimitBytes) {
+    await env.IMAGE_BUCKET.delete(key);
+    return {
+      ok: false as const,
+      response: r2StorageLimitResponse(request, env, Math.max(0, storageBytesAfterUpload - object.size), object.size, storageLimitBytes),
+    };
+  }
+
+  return {
+    ok: true as const,
+    key,
+    url: getR2PublicUrl(request, env, key),
+    publicId: key,
+    size: object.size,
+    etag: object.httpEtag,
+    storageBytes: storageBytesAfterUpload,
+    storageLimitBytes,
+  };
+}
+
+type CreateQuestionSetFromUrlTextParams = {
+  roomId?: string;
+  presenterPlayerId?: string;
+  title?: string;
+  description?: string;
+  imageUrlsText?: string;
+  retryQuestions?: unknown;
+  preparedQuestions?: unknown;
+  fallbackToOriginalUrls?: boolean;
+};
+
+type RemoteFetchResult = {
+  body: ArrayBuffer;
+  contentType: string;
+};
+
+function asCreateQuestionSetFromUrlTextParams(value: unknown): CreateQuestionSetFromUrlTextParams {
+  if (!isRecord(value)) {
+    throw new Error("创建题库参数无效。");
+  }
+  return value as CreateQuestionSetFromUrlTextParams;
+}
+
+function normalizeImportInput(value: unknown, fallbackOrderIndex: number): QuestionUrlImportInput | null {
+  if (!isRecord(value) || typeof value.imageUrl !== "string") {
+    return null;
+  }
+
+  const imageUrl = value.imageUrl.trim();
+  if (!isHttpImageUrl(imageUrl)) {
+    return null;
+  }
+
+  const orderIndex = typeof value.orderIndex === "number" && Number.isInteger(value.orderIndex) && value.orderIndex >= 0 ? value.orderIndex : fallbackOrderIndex;
+  return {
+    imageUrl,
+    labelText: typeof value.labelText === "string" ? value.labelText.trim() || null : null,
+    orderIndex,
+  };
+}
+
+function normalizePreparedQuestion(value: unknown, fallbackOrderIndex: number): PreparedQuestionUrlImport | null {
+  const input = normalizeImportInput(value, fallbackOrderIndex);
+  if (!input || !isRecord(value)) {
+    return null;
+  }
+
+  const originalImageUrl = typeof value.originalImageUrl === "string" && value.originalImageUrl.trim() ? value.originalImageUrl.trim() : input.imageUrl;
+  return {
+    ...input,
+    originalImageUrl,
+    r2Key: typeof value.r2Key === "string" ? value.r2Key : null,
+    rawBytes: typeof value.rawBytes === "number" ? value.rawBytes : null,
+    uploadBytes: typeof value.uploadBytes === "number" ? value.uploadBytes : null,
+    usedOriginal: Boolean(value.usedOriginal),
+  };
+}
+
+function parseRetryQuestions(params: CreateQuestionSetFromUrlTextParams) {
+  if (Array.isArray(params.retryQuestions)) {
+    return params.retryQuestions
+      .map((item, index) => normalizeImportInput(item, index))
+      .filter((item): item is QuestionUrlImportInput => Boolean(item));
+  }
+
+  return gameService.parseQuestionImportText(params.imageUrlsText ?? "").map((item, index) => ({
+    imageUrl: item.imageUrl,
+    labelText: item.labelText ?? null,
+    orderIndex: index,
+  }));
+}
+
+function parsePreparedQuestions(params: CreateQuestionSetFromUrlTextParams) {
+  if (!Array.isArray(params.preparedQuestions)) {
+    return [];
+  }
+
+  return params.preparedQuestions
+    .map((item, index) => normalizePreparedQuestion(item, index))
+    .filter((item): item is PreparedQuestionUrlImport => Boolean(item));
+}
+
+function isHttpImageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function getRemoteUploadMaxSize(env: Env) {
+  const value = Number(env.REMOTE_UPLOAD_IMAGE_MAX_SIZE);
+  return Number.isFinite(value) && value >= 100 ? value : REMOTE_UPLOAD_IMAGE_MAX_SIZE;
+}
+
+function getRemoteUploadQuality(env: Env) {
+  const value = Number(env.REMOTE_UPLOAD_IMAGE_QUALITY);
+  if (Number.isFinite(value) && value > 0) {
+    return value <= 1 ? Math.round(value * 100) : Math.min(100, Math.round(value));
+  }
+  return REMOTE_UPLOAD_IMAGE_QUALITY;
+}
+
+function getRemoteUploadFormat(env: Env) {
+  const value = (env.REMOTE_UPLOAD_IMAGE_FORMAT ?? REMOTE_UPLOAD_IMAGE_FORMAT).trim().toLowerCase();
+  return ["image/webp", "image/jpeg", "image/png", "image/avif"].includes(value) ? (value as ImageOutputOptions["format"]) : REMOTE_UPLOAD_IMAGE_FORMAT;
+}
+
+function getRemoteProxyCandidates(env: Env) {
+  const configured = (env.REMOTE_IMAGE_PROXY_CANDIDATES ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return Array.from(new Set([...configured, ...DEFAULT_REMOTE_IMAGE_PROXY_CANDIDATES]));
+}
+
+function isBlockedRemoteHost(hostname: string) {
+  const host = hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "0.0.0.0") {
+    return true;
+  }
+
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b] = ipv4.slice(1).map(Number);
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+
+  return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+}
+
+function getSourceFetchHeaders(url: URL) {
+  const headers = new Headers({
+    "User-Agent": "Mozilla/5.0 (compatible; AnimeMasterGame/1.0)",
+    Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+  });
+
+  if (url.hostname === "cdni.fancaps.net" || url.hostname === "fancaps.net") {
+    headers.set("Referer", "https://fancaps.net/");
+  } else if (url.hostname === "lain.bgm.tv") {
+    headers.set("Referer", "https://bgm.tv/");
+  }
+
+  return headers;
+}
+
+function fileNameFromRemoteUrl(rawUrl: string, contentType: string, fallbackFormat: string) {
+  const url = new URL(rawUrl);
+  const pathName = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "image");
+  const ext = pathName.match(/\.[a-z0-9]{1,8}$/i)?.[0];
+  if (ext) {
+    return pathName;
+  }
+
+  if (contentType === "image/webp" || fallbackFormat === "image/webp") return `${pathName}.webp`;
+  if (contentType === "image/png" || fallbackFormat === "image/png") return `${pathName}.png`;
+  if (contentType === "image/avif" || fallbackFormat === "image/avif") return `${pathName}.avif`;
+  if (contentType === "image/gif") return `${pathName}.gif`;
+  return `${pathName}.jpg`;
+}
+
+function replaceFileExtension(fileName: string, contentType: string) {
+  const ext =
+    contentType === "image/webp"
+      ? ".webp"
+      : contentType === "image/png"
+        ? ".png"
+        : contentType === "image/avif"
+          ? ".avif"
+          : contentType === "image/gif"
+            ? ".gif"
+            : ".jpg";
+  return fileName.replace(/\.[^.]+$/, "") + ext;
+}
+
+async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchResult> {
+  const targetUrl = new URL(rawUrl);
+  if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
+    throw new Error("只支持 http/https 图片链接。");
+  }
+  if (isBlockedRemoteHost(targetUrl.hostname)) {
+    throw new Error("不允许导入本地或私有网络图片。");
+  }
+
+  const attempts = [
+    { url: targetUrl.toString(), headers: getSourceFetchHeaders(targetUrl) },
+    ...getRemoteProxyCandidates(env).map((prefix) => ({
+      url: `${prefix}${encodeURIComponent(targetUrl.toString())}`,
+      headers: new Headers({ Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8" }),
+    })),
+  ];
+  let lastError = "远端图片请求失败。";
+
+  for (const attempt of attempts) {
+    try {
+      const response = await fetch(attempt.url, { method: "GET", headers: attempt.headers });
+      if (!response.ok) {
+        lastError = `远端返回 HTTP ${response.status}`;
+        continue;
+      }
+
+      const contentType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+      if (!contentType.startsWith("image/")) {
+        lastError = "远端返回的不是图片。";
+        continue;
+      }
+
+      const contentLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(contentLength) && contentLength > IMAGE_UPLOAD_MAX_BYTES) {
+        throw new Error("单张图片不能超过 20 MB。");
+      }
+
+      const body = await response.arrayBuffer();
+      if (body.byteLength === 0) {
+        lastError = "远端图片内容为空。";
+        continue;
+      }
+      if (body.byteLength > IMAGE_UPLOAD_MAX_BYTES) {
+        throw new Error("单张图片不能超过 20 MB。");
+      }
+
+      return { body, contentType };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  throw new Error(lastError);
+}
+
+async function compressRemoteImage(rawImage: RemoteFetchResult, env: Env) {
+  if (rawImage.contentType === "image/gif") {
+    return {
+      body: rawImage.body,
+      contentType: rawImage.contentType,
+      usedOriginal: true,
+    };
+  }
+
+  if (!env.IMAGES) {
+    throw new Error("缺少 Cloudflare Images binding：请在 wrangler.toml 配置 IMAGES 后再导入远端图片。");
+  }
+
+  const targetFormat = getRemoteUploadFormat(env);
+  const result = await env.IMAGES.input(new Response(rawImage.body).body!).transform({
+    width: getRemoteUploadMaxSize(env),
+    height: getRemoteUploadMaxSize(env),
+    fit: "scale-down",
+  }).output({
+    format: targetFormat,
+    quality: getRemoteUploadQuality(env),
+    anim: true,
+  });
+
+  const transformed = await new Response(result.image()).arrayBuffer();
+  const contentType = result.contentType();
+  if (transformed.byteLength > 0 && transformed.byteLength < rawImage.body.byteLength) {
+    return {
+      body: transformed,
+      contentType,
+      usedOriginal: false,
+    };
+  }
+
+  return {
+    body: rawImage.body,
+    contentType: rawImage.contentType,
+    usedOriginal: true,
+  };
+}
+
+async function importRemoteQuestionImage(input: QuestionUrlImportInput, request: Request, env: Env): Promise<PreparedQuestionUrlImport | FailedQuestionUrlImport> {
+  try {
+    const rawImage = await fetchRemoteImage(input.imageUrl, env);
+    const compressed = await compressRemoteImage(rawImage, env);
+    const uploadName = replaceFileExtension(fileNameFromRemoteUrl(input.imageUrl, rawImage.contentType, compressed.contentType), compressed.contentType);
+    const uploaded = await putR2Image(request, env, compressed.body, compressed.contentType, uploadName, {
+      originalUrl: input.imageUrl,
+      importSource: "url-text",
+    });
+    if (!uploaded.ok) {
+      throw new Error("图片存储空间不足。");
+    }
+
+    return {
+      imageUrl: uploaded.url,
+      originalImageUrl: input.imageUrl,
+      labelText: input.labelText ?? null,
+      orderIndex: input.orderIndex,
+      r2Key: uploaded.key,
+      rawBytes: rawImage.body.byteLength,
+      uploadBytes: compressed.body.byteLength,
+      usedOriginal: compressed.usedOriginal,
+    };
+  } catch (error) {
+    return {
+      imageUrl: input.imageUrl,
+      labelText: input.labelText ?? null,
+      orderIndex: input.orderIndex,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function runRemoteImportPool(inputs: QuestionUrlImportInput[], request: Request, env: Env) {
+  const results: Array<PreparedQuestionUrlImport | FailedQuestionUrlImport> = [];
+  let index = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(REMOTE_IMPORT_CONCURRENCY, inputs.length)) }, async () => {
+    while (index < inputs.length) {
+      const current = index;
+      index += 1;
+      results[current] = await importRemoteQuestionImage(inputs[current], request, env);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+function sortPreparedQuestions(items: PreparedQuestionUrlImport[]) {
+  return items.slice().sort((a, b) => a.orderIndex - b.orderIndex);
+}
+
+async function createQuestionSetFromPreparedUrlImport(
+  params: CreateQuestionSetFromUrlTextParams,
+  preparedQuestions: PreparedQuestionUrlImport[],
+  fallbackCount: number,
+): Promise<QuestionSetUrlImportResult> {
+  const questionSet = await gameService.createUploadedQuestionSet({
+    roomId: params.roomId ?? "",
+    presenterPlayerId: params.presenterPlayerId ?? "",
+    title: params.title ?? "",
+    description: params.description,
+    questions: sortPreparedQuestions(preparedQuestions).map((item) => ({
+      imageUrl: item.imageUrl,
+      labelText: item.labelText ?? null,
+    })),
+  });
+
+  return {
+    status: "created",
+    questionSet,
+    importedCount: Math.max(0, preparedQuestions.length - fallbackCount),
+    fallbackCount,
+  };
+}
+
+async function createQuestionSetFromUrlTextWithRemoteImages(value: unknown, request: Request, env: Env): Promise<QuestionSetUrlImportResult> {
+  if (!env.IMAGE_BUCKET) {
+    throw new Error("缺少 R2 存储绑定：请在 wrangler.toml 配置 IMAGE_BUCKET。");
+  }
+
+  const params = asCreateQuestionSetFromUrlTextParams(value);
+  const preparedQuestions = parsePreparedQuestions(params);
+  const retryQuestions = parseRetryQuestions(params);
+
+  if (!params.roomId || !params.presenterPlayerId) {
+    throw new Error("创建题库参数缺少房间或出题人。");
+  }
+
+  if (preparedQuestions.length + retryQuestions.length === 0) {
+    throw new Error("没有检测到有效图片链接。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
+  }
+
+  await gameService.assertCanCreateUploadedQuestionSet({
+    roomId: params.roomId,
+    presenterPlayerId: params.presenterPlayerId,
+  });
+
+  if (params.fallbackToOriginalUrls) {
+    const fallbackQuestions = retryQuestions.map((item) => ({
+      ...item,
+      originalImageUrl: item.imageUrl,
+      usedOriginal: true,
+    }));
+    return createQuestionSetFromPreparedUrlImport(params, [...preparedQuestions, ...fallbackQuestions], fallbackQuestions.length);
+  }
+
+  const imported = await runRemoteImportPool(retryQuestions, request, env);
+  const nextPrepared = [
+    ...preparedQuestions,
+    ...imported.filter((item): item is PreparedQuestionUrlImport => "originalImageUrl" in item),
+  ];
+  const failedQuestions = imported.filter((item): item is FailedQuestionUrlImport => "error" in item);
+
+  if (failedQuestions.length > 0) {
+    return {
+      status: "needs_decision",
+      preparedQuestions: sortPreparedQuestions(nextPrepared),
+      failedQuestions: failedQuestions.slice().sort((a, b) => a.orderIndex - b.orderIndex),
+      totalCount: nextPrepared.length + failedQuestions.length,
+    };
+  }
+
+  return createQuestionSetFromPreparedUrlImport(params, nextPrepared, 0);
 }
 
 async function handleR2Upload(request: Request, env: Env) {
@@ -574,44 +1064,20 @@ async function handleR2Upload(request: Request, env: Env) {
     return json({ error: "单张图片不能超过 20 MB。" }, { status: 413 }, request, env);
   }
 
-  const storageLimitBytes = getR2ImageStorageLimitBytes(env);
-  const currentStorageBytes = await getR2StoredImageBytes(env);
-  if (currentStorageBytes + body.byteLength > storageLimitBytes) {
-    return r2StorageLimitResponse(request, env, currentStorageBytes, body.byteLength, storageLimitBytes);
-  }
-
-  const key = buildR2ImageKey(request, env);
-  const checksum = await crypto.subtle.digest("SHA-256", body);
-  const object = await env.IMAGE_BUCKET.put(key, body, {
-    httpMetadata: {
-      contentType,
-      cacheControl: "public, max-age=31536000, immutable",
-    },
-    customMetadata: {
-      uploadedAt: new Date().toISOString(),
-    },
-    sha256: checksum,
-  });
-
-  if (!object) {
-    return json({ error: "图片写入 R2 失败，请稍后重试。" }, { status: 500 }, request, env);
-  }
-
-  const storageBytesAfterUpload = await getR2StoredImageBytes(env);
-  if (storageBytesAfterUpload > storageLimitBytes) {
-    await env.IMAGE_BUCKET.delete(key);
-    return r2StorageLimitResponse(request, env, Math.max(0, storageBytesAfterUpload - object.size), object.size, storageLimitBytes);
+  const uploaded = await putR2Image(request, env, body, contentType, new URL(request.url).searchParams.get("filename") ?? "image");
+  if (!uploaded.ok) {
+    return uploaded.response;
   }
 
   return json(
     {
-      key,
-      url: getR2PublicUrl(request, env, key),
-      publicId: key,
-      size: object.size,
-      etag: object.httpEtag,
-      storageBytes: storageBytesAfterUpload,
-      storageLimitBytes,
+      key: uploaded.key,
+      url: uploaded.url,
+      publicId: uploaded.publicId,
+      size: uploaded.size,
+      etag: uploaded.etag,
+      storageBytes: uploaded.storageBytes,
+      storageLimitBytes: uploaded.storageLimitBytes,
     },
     {},
     request,
@@ -799,7 +1265,7 @@ export class RoomDurableObject {
       }
 
       const { roundSnapshot, responseResult } = await runWithGameDatabase(this.env, async () => {
-        const result = await callGameFunction(payload.name ?? "", payload.args ?? []);
+        const result = await callGameFunctionWithEnv(payload.name ?? "", payload.args ?? [], request, this.env);
         const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
 
@@ -816,7 +1282,7 @@ export class RoomDurableObject {
       if (MUTATION_NAMES.has(payload.name)) {
         const topic = await getRoomTopicForBroadcast(payload.name, payload.args ?? [], responseResult);
         const deltas = buildRealtimeDeltas(payload.name, payload.args ?? [], responseResult, roundSnapshot);
-        if (topic) {
+        if (topic && deltas.length > 0) {
           const changeMessage = {
             type: "change",
             name: payload.name,
