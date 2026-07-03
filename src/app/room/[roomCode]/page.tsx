@@ -249,6 +249,10 @@ function getSpectators(players: Player[]) {
   return players.filter((player) => player.role === "SPECTATOR");
 }
 
+function canSwitchPlayerRole(room: Room | null | undefined, isCurrentPresenter: boolean) {
+  return Boolean(room && (room.status === "LOBBY" || (room.status === "QUESTION_SETUP" && !isCurrentPresenter)));
+}
+
 function PlayerList({
   players,
   playerId,
@@ -1572,6 +1576,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
   const canKickPlayers = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP" || room?.status === "PLAYING"));
+  const canSwitchRole = Boolean(currentPlayer && canSwitchPlayerRole(room, isCurrentPresenter));
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
@@ -1641,7 +1646,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   }
 
   async function handleSwitchRole(role: PlayerRole) {
-    if (!room?.id || !playerId || room.status !== "LOBBY" || currentPlayer?.role === role) {
+    if (!room?.id || !playerId || !canSwitchPlayerRole(room, isCurrentPresenter) || currentPlayer?.role === role) {
       return;
     }
 
@@ -1867,11 +1872,13 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             回到首页
           </Button>
         </Panel>
-      ) : room.status === "PLAYING" && !currentPlayer ? (
+      ) : (room.status === "PLAYING" || room.status === "QUESTION_SETUP") && !currentPlayer ? (
         <div className="mx-auto max-w-2xl">
           <Panel title="选择加入方式">
             <p className="text-sm leading-6 text-[var(--muted)]">
-              本局已经开始。选择玩家后当前题不能作答，下一题开始参与；选择观战后本局只观看。
+              {room.status === "PLAYING"
+                ? "本局已经开始。选择玩家后当前题不能作答，下一题开始参与；选择观战后本局只观看。"
+                : "出题人正在准备题库。选择玩家可参与本局，选择观战后本局只观看。"}
             </p>
             <div className="mt-5 grid gap-3 sm:grid-cols-2">
               <Button
@@ -1961,7 +1968,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               presenterPlayerId={room.currentPresenterPlayerId}
               gameMode={gameSettings.gameMode}
               spectatorAction={
-                room.status === "LOBBY" && currentPlayer ? (
+                canSwitchRole ? (
                   <Button
                     className="h-9 px-3"
                     type="button"

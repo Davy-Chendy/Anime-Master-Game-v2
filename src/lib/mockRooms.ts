@@ -126,7 +126,11 @@ export function updateMockPlayerRole(code: string, playerId: string, role: Playe
   const rooms = readRooms();
   const room = rooms[code];
 
-  if (!room || room.status !== "LOBBY") {
+  if (!room || (room.status !== "LOBBY" && room.status !== "QUESTION_SETUP")) {
+    return null;
+  }
+
+  if (room.status === "QUESTION_SETUP" && role === "SPECTATOR" && room.currentPresenterPlayerId === playerId) {
     return null;
   }
 

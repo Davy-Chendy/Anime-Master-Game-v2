@@ -1269,16 +1269,23 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   let nextRole = existingPlayer ? normalizePlayerRole(existingPlayer.role) : requestedRole;
 
   if (existingPlayer && role && requestedRole !== nextRole) {
-    if (room.game_status !== "LOBBY") {
+    const canSwitchRole = room.game_status === "LOBBY" || room.game_status === "QUESTION_SETUP";
+    if (!canSwitchRole) {
       return {
         room: null,
         error: "游戏进行中不能切换玩家/观战身份。",
       };
     }
+    if (room.game_status === "QUESTION_SETUP" && existingPlayer.id === room.current_presenter_player_id) {
+      return {
+        room: null,
+        error: "当前出题人不能切换为观战身份。",
+      };
+    }
     nextRole = requestedRole;
   }
 
-  if (!existingPlayer && room.game_status !== "PLAYING") {
+  if (!existingPlayer && room.game_status !== "PLAYING" && room.game_status !== "QUESTION_SETUP") {
     nextRole = "PLAYER";
   }
 
@@ -2041,8 +2048,13 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("身份切换失败：房间不存在。");
   }
 
-  if (room.game_status !== "LOBBY") {
-    throw new Error("只有在房间大厅可以切换玩家/观战身份。");
+  const canSwitchRole = room.game_status === "LOBBY" || room.game_status === "QUESTION_SETUP";
+  if (!canSwitchRole) {
+    throw new Error("只有在房间大厅或出题准备阶段可以切换玩家/观战身份。");
+  }
+
+  if (room.game_status === "QUESTION_SETUP" && role === "SPECTATOR" && targetPlayerId === room.current_presenter_player_id) {
+    throw new Error("当前出题人不能切换为观战身份。");
   }
 
   const { data: updatedPlayer, error: updateError } = await d1

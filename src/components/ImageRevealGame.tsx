@@ -2428,7 +2428,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               </div>
               {isSpectatorLabelOpen ? (
                 <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
-                  {currentQuestionLabel}
+                  {currentQuestionLabel || "暂无"}
                 </p>
               ) : (
                 <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
