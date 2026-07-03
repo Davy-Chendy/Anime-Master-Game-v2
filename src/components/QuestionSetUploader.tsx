@@ -466,6 +466,11 @@ export function QuestionSetUploader({
       return;
     }
 
+    if (importPreview.items.length > maxUploadImageCount) {
+      onError(`一次最多导入 ${maxUploadImageCount} 张图片，请删减题单后重试`);
+      return;
+    }
+
     setIsCreatingFromText(true);
     resetCreatedSet();
     setProgress({ ...emptyProgress, total: importPreview.items.length, latestMessage: "开始抓取并压缩远端图片" });

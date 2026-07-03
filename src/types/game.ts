@@ -114,6 +114,7 @@ export type QuestionUrlImportInput = {
 export type PreparedQuestionUrlImport = QuestionUrlImportInput & {
   originalImageUrl: string;
   r2Key?: string | null;
+  importToken?: string;
   rawBytes?: number | null;
   uploadBytes?: number | null;
   usedOriginal?: boolean;

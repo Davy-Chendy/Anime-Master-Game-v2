@@ -150,6 +150,12 @@ bucket_name = "anime-master-game-images"
 binding = "IMAGES"
 ```
 
+URL/JSONL 导入会在 Worker 内抓取远端图片、通过 Cloudflare Images 压缩，再写入 R2。它还需要一个签名密钥保存重试状态，使用 Wrangler secret 配置，不要写进仓库：
+
+```bash
+npx wrangler secret put REMOTE_IMPORT_STATE_SECRET
+```
+
 执行远程 D1 迁移：
 
 ```bash

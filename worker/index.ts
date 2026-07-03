@@ -26,6 +26,7 @@ export interface Env {
   R2_EXISTING_IMAGE_LIMIT?: string;
   R2_IMAGE_STORAGE_LIMIT_BYTES?: string;
   REMOTE_IMAGE_PROXY_CANDIDATES?: string;
+  REMOTE_IMPORT_STATE_SECRET?: string;
   REMOTE_UPLOAD_IMAGE_MAX_SIZE?: string;
   REMOTE_UPLOAD_IMAGE_QUALITY?: string;
   REMOTE_UPLOAD_IMAGE_FORMAT?: string;
@@ -56,6 +57,7 @@ const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
 const R2_LIST_PAGE_LIMIT = 1000;
 const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
 const REMOTE_IMPORT_CONCURRENCY = 2;
+const QUESTION_URL_IMPORT_MAX_COUNT = 120;
 const REMOTE_UPLOAD_IMAGE_MAX_SIZE = 1600;
 const REMOTE_UPLOAD_IMAGE_QUALITY = 78;
 const REMOTE_UPLOAD_IMAGE_FORMAT = "image/webp";
@@ -693,6 +695,7 @@ function normalizePreparedQuestion(value: unknown, fallbackOrderIndex: number): 
     ...input,
     originalImageUrl,
     r2Key: typeof value.r2Key === "string" ? value.r2Key : null,
+    importToken: typeof value.importToken === "string" ? value.importToken : undefined,
     rawBytes: typeof value.rawBytes === "number" ? value.rawBytes : null,
     uploadBytes: typeof value.uploadBytes === "number" ? value.uploadBytes : null,
     usedOriginal: Boolean(value.usedOriginal),
@@ -713,14 +716,22 @@ function parseRetryQuestions(params: CreateQuestionSetFromUrlTextParams) {
   }));
 }
 
-function parsePreparedQuestions(params: CreateQuestionSetFromUrlTextParams) {
+async function parsePreparedQuestions(params: CreateQuestionSetFromUrlTextParams, env: Env) {
   if (!Array.isArray(params.preparedQuestions)) {
     return [];
   }
 
-  return params.preparedQuestions
+  const preparedQuestions = params.preparedQuestions
     .map((item, index) => normalizePreparedQuestion(item, index))
     .filter((item): item is PreparedQuestionUrlImport => Boolean(item));
+
+  for (const item of preparedQuestions) {
+    if (!(await verifyPreparedQuestionToken(params, item, env))) {
+      throw new Error("远端图片导入状态已失效，请重新导入题单。");
+    }
+  }
+
+  return preparedQuestions;
 }
 
 function isHttpImageUrl(value: string) {
@@ -748,6 +759,66 @@ function getRemoteUploadQuality(env: Env) {
 function getRemoteUploadFormat(env: Env) {
   const value = (env.REMOTE_UPLOAD_IMAGE_FORMAT ?? REMOTE_UPLOAD_IMAGE_FORMAT).trim().toLowerCase();
   return ["image/webp", "image/jpeg", "image/png", "image/avif"].includes(value) ? (value as ImageOutputOptions["format"]) : REMOTE_UPLOAD_IMAGE_FORMAT;
+}
+
+function bytesToHex(bytes: ArrayBuffer) {
+  return Array.from(new Uint8Array(bytes))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function getImportStateHmacKey(env: Env) {
+  const secret = env.REMOTE_IMPORT_STATE_SECRET?.trim();
+  if (!secret) {
+    throw new Error("缺少 REMOTE_IMPORT_STATE_SECRET：请用 wrangler secret put 配置远端导入状态签名密钥。");
+  }
+
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+}
+
+function getPreparedQuestionTokenPayload(params: CreateQuestionSetFromUrlTextParams, item: PreparedQuestionUrlImport) {
+  return JSON.stringify({
+    roomId: params.roomId ?? "",
+    presenterPlayerId: params.presenterPlayerId ?? "",
+    orderIndex: item.orderIndex,
+    imageUrl: item.imageUrl,
+    originalImageUrl: item.originalImageUrl,
+    labelText: item.labelText ?? null,
+    r2Key: item.r2Key ?? null,
+  });
+}
+
+async function signPreparedQuestion(params: CreateQuestionSetFromUrlTextParams, item: PreparedQuestionUrlImport, env: Env) {
+  const key = await getImportStateHmacKey(env);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(getPreparedQuestionTokenPayload(params, item)));
+  return {
+    ...item,
+    importToken: bytesToHex(signature),
+  };
+}
+
+async function verifyPreparedQuestionToken(params: CreateQuestionSetFromUrlTextParams, item: PreparedQuestionUrlImport, env: Env) {
+  if (!item.importToken) {
+    return false;
+  }
+
+  const key = await getImportStateHmacKey(env);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(getPreparedQuestionTokenPayload(params, item)));
+  return bytesToHex(signature) === item.importToken;
+}
+
+async function signPreparedQuestions(params: CreateQuestionSetFromUrlTextParams, items: PreparedQuestionUrlImport[], env: Env) {
+  const signedItems: PreparedQuestionUrlImport[] = [];
+  for (const item of items) {
+    signedItems.push(await signPreparedQuestion(params, item, env));
+  }
+  return signedItems;
 }
 
 function getRemoteProxyCandidates(env: Env) {
@@ -855,13 +926,10 @@ async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchRe
         throw new Error("单张图片不能超过 20 MB。");
       }
 
-      const body = await response.arrayBuffer();
+      const body = await readResponseBodyWithLimit(response, IMAGE_UPLOAD_MAX_BYTES);
       if (body.byteLength === 0) {
         lastError = "远端图片内容为空。";
         continue;
-      }
-      if (body.byteLength > IMAGE_UPLOAD_MAX_BYTES) {
-        throw new Error("单张图片不能超过 20 MB。");
       }
 
       return { body, contentType };
@@ -871,6 +939,44 @@ async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchRe
   }
 
   throw new Error(lastError);
+}
+
+async function readResponseBodyWithLimit(response: Response, maxBytes: number) {
+  if (!response.body) {
+    throw new Error("远端图片响应为空。");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error("单张图片不能超过 20 MB。");
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return body.buffer;
 }
 
 async function compressRemoteImage(rawImage: RemoteFetchResult, env: Env) {
@@ -996,7 +1102,7 @@ async function createQuestionSetFromUrlTextWithRemoteImages(value: unknown, requ
   }
 
   const params = asCreateQuestionSetFromUrlTextParams(value);
-  const preparedQuestions = parsePreparedQuestions(params);
+  const preparedQuestions = await parsePreparedQuestions(params, env);
   const retryQuestions = parseRetryQuestions(params);
 
   if (!params.roomId || !params.presenterPlayerId) {
@@ -1005,6 +1111,10 @@ async function createQuestionSetFromUrlTextWithRemoteImages(value: unknown, requ
 
   if (preparedQuestions.length + retryQuestions.length === 0) {
     throw new Error("没有检测到有效图片链接。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
+  }
+
+  if (preparedQuestions.length + retryQuestions.length > QUESTION_URL_IMPORT_MAX_COUNT) {
+    throw new Error(`一次最多导入 ${QUESTION_URL_IMPORT_MAX_COUNT} 张图片。`);
   }
 
   await gameService.assertCanCreateUploadedQuestionSet({
@@ -1031,7 +1141,7 @@ async function createQuestionSetFromUrlTextWithRemoteImages(value: unknown, requ
   if (failedQuestions.length > 0) {
     return {
       status: "needs_decision",
-      preparedQuestions: sortPreparedQuestions(nextPrepared),
+      preparedQuestions: await signPreparedQuestions(params, sortPreparedQuestions(nextPrepared), env),
       failedQuestions: failedQuestions.slice().sort((a, b) => a.orderIndex - b.orderIndex),
       totalCount: nextPrepared.length + failedQuestions.length,
     };
@@ -1188,6 +1298,10 @@ export class RoomDurableObject {
       return await this.enqueueR2Upload(request);
     }
 
+    if (url.pathname === "/api/rpc" && request.method === "POST") {
+      return await this.enqueueR2BoundRpc(request);
+    }
+
     if (request.headers.get("upgrade") === "websocket") {
       const topic = url.searchParams.get("topic") ?? "";
       const pair = new WebSocketPair();
@@ -1222,6 +1336,27 @@ export class RoomDurableObject {
   private async handleQueuedR2Upload(request: Request) {
     try {
       return await handleR2Upload(request, this.env);
+    } catch (error) {
+      return errorResponse(error, request, this.env);
+    }
+  }
+
+  private enqueueR2BoundRpc(request: Request) {
+    const task = this.r2UploadQueue.then(
+      () => this.handleQueuedR2BoundRpc(request),
+      () => this.handleQueuedR2BoundRpc(request),
+    );
+    this.r2UploadQueue = task.then(
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  }
+
+  private async handleQueuedR2BoundRpc(request: Request) {
+    try {
+      return await handleRpc(request, this.env);
     } catch (error) {
       return errorResponse(error, request, this.env);
     }
@@ -1265,7 +1400,7 @@ export class RoomDurableObject {
       }
 
       const { roundSnapshot, responseResult } = await runWithGameDatabase(this.env, async () => {
-        const result = await callGameFunctionWithEnv(payload.name ?? "", payload.args ?? [], request, this.env);
+        const result = await callGameFunction(payload.name ?? "", payload.args ?? []);
         const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
 
@@ -1365,6 +1500,11 @@ export default {
 
     try {
       if (url.pathname === "/api/rpc" && request.method === "POST") {
+        const body = (await request.clone().json().catch(() => null)) as RpcBody | null;
+        if (body?.name === "createQuestionSetFromUrlText") {
+          return await getR2UploadGateObject(env).fetch(request);
+        }
+
         return await handleRpc(request, env);
       }
 
