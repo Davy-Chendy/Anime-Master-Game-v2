@@ -126,6 +126,7 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
     title: questionSet.title,
     description: questionSet.description,
     createdByPlayerId: questionSet.created_by_player_id,
+    createdByNickname: questionSet.created_by_nickname ?? null,
     source: questionSet.source,
     isPublic: questionSet.is_public,
     imageUrlsText: questionSet.image_urls_text ?? questionUrlsText,
@@ -136,6 +137,24 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
     updatedAt: questionSet.updated_at,
     questions: questions.map(toQuestion),
   };
+}
+
+async function getPlayerNickname(playerId: string, roomId?: string) {
+  assertD1Env();
+
+  let query = d1.from("players").select("*").eq("id", playerId);
+
+  if (roomId) {
+    query = query.eq("room_id", roomId);
+  }
+
+  const { data, error } = await query.maybeSingle<DbPlayer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data?.nickname.trim() || null;
 }
 
 function toGameSession(gameSession: DbGameSession): GameSession {
@@ -1513,12 +1532,15 @@ export async function createUploadedQuestionSet(params: {
     throw new Error("创建题库失败：当前房间不在出题阶段，或你不是本轮出题人。");
   }
 
+  const createdByNickname = await getPlayerNickname(params.presenterPlayerId, params.roomId);
+
   const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
     .insert({
       title,
       description: params.description?.trim() || null,
       created_by_player_id: params.presenterPlayerId,
+      created_by_nickname: createdByNickname,
       source: "uploaded",
       is_public: false,
       image_count: imageUrls.length,
@@ -2251,11 +2273,14 @@ export async function publishQuestionSetToCommunity(params: {
     throw new Error("发布社区题库前，请先输入题库标题。");
   }
 
+  const createdByNickname = await getPlayerNickname(params.playerId);
+
   const { data: questionSet, error } = await d1
     .from("question_sets")
     .update({
       title,
       description: params.description?.trim() || null,
+      created_by_nickname: createdByNickname ?? undefined,
       is_public: true,
     })
     .eq("id", params.questionSetId)

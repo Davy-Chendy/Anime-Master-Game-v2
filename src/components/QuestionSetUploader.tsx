@@ -99,6 +99,10 @@ function getDraftQuestionSetTitle(room: Room) {
   return `房间 ${room.code} 临时题库`;
 }
 
+function getQuestionSetUploaderName(questionSet: QuestionSet) {
+  return questionSet.createdByNickname?.trim() || "未知上传者";
+}
+
 function formatBytes(bytes: number) {
   if (bytes >= 1024 * 1024) {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -205,7 +209,7 @@ export function QuestionSetUploader({
     }
 
     return communitySets.filter((item) => {
-      const searchableText = `${item.title} ${item.description ?? ""}`.toLowerCase();
+      const searchableText = `${item.title} ${item.description ?? ""} ${item.createdByNickname ?? ""}`.toLowerCase();
       return terms.every((term) => searchableText.includes(term));
     });
   }, [communitySearch, communitySets]);
@@ -724,7 +728,7 @@ export function QuestionSetUploader({
                       <p className="truncate font-semibold text-slate-950">{item.title}</p>
                       <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">{item.description || "暂无简介"}</p>
                       <p className="mt-2 text-xs text-[var(--muted)]">
-                        {item.imageCount} 张 · {Number(item.ratingAvg).toFixed(1)} 分 · {item.ratingCount} 人评分
+                        上传者：{getQuestionSetUploaderName(item)} · {item.imageCount} 张 · {Number(item.ratingAvg).toFixed(1)} 分 · {item.ratingCount} 人评分
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
@@ -757,7 +761,7 @@ export function QuestionSetUploader({
                 <p className="text-lg font-semibold text-slate-950">{previewingCommunitySet.title}</p>
                 <p className="mt-1 text-sm text-[var(--muted)]">{previewingCommunitySet.description || "暂无简介"}</p>
                 <p className="mt-2 text-xs text-[var(--muted)]">
-                  {previewingCommunitySet.imageCount} 张，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，
+                  上传者：{getQuestionSetUploaderName(previewingCommunitySet)}，{previewingCommunitySet.imageCount} 张，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，
                   {previewingCommunitySet.ratingCount} 人评分
                 </p>
               </div>
@@ -810,6 +814,7 @@ export function QuestionSetUploader({
                 <p className="font-semibold text-slate-950">{questionSet.title}</p>
                 <p className="mt-1 text-sm text-[var(--muted)]">
                   {questionSet.imageCount} 张图片，{questionSet.isPublic ? "社区公开题库" : "未发布题库"}
+                  {questionSet.isPublic ? `，上传者：${getQuestionSetUploaderName(questionSet)}` : ""}
                 </p>
               </div>
               <Button type="button" onClick={handleConfirmQuestionSet} disabled={isConfirmingQuestionSet}>

@@ -77,6 +77,7 @@ export type QuestionSet = {
   title: string;
   description?: string | null;
   createdByPlayerId: string;
+  createdByNickname?: string | null;
   source: QuestionSetSource;
   isPublic: boolean;
   imageUrlsText?: string | null;
@@ -236,6 +237,7 @@ export type DbQuestionSet = {
   title: string;
   description: string | null;
   created_by_player_id: string;
+  created_by_nickname?: string | null;
   source: QuestionSetSource;
   is_public: boolean;
   image_urls_text?: string | null;
