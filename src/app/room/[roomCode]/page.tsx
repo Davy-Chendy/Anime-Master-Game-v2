@@ -249,6 +249,10 @@ function getSpectators(players: Player[]) {
   return players.filter((player) => player.role === "SPECTATOR");
 }
 
+function isPlayerCapacityError(message: string | null | undefined) {
+  return Boolean(message?.includes("玩家已满"));
+}
+
 function canSwitchPlayerRole(room: Room | null | undefined, isCurrentPresenter: boolean) {
   return Boolean(room && (room.status === "LOBBY" || (room.status === "QUESTION_SETUP" && !isCurrentPresenter)));
 }
@@ -1410,7 +1414,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
         const existingMember = latestRoom.players.find((player) => player.id === session.playerId);
 
-        if (!existingMember && latestRoom.status === "PLAYING") {
+        if (!existingMember && (latestRoom.status === "PLAYING" || latestRoom.status === "QUESTION_SETUP")) {
           saveLocalSession({
             playerId: session.playerId,
             nickname: session.nickname,
@@ -1429,7 +1433,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         if (joined.error || !joined.room) {
           if (isMounted) {
             setError(joined.error ?? "没有找到房间");
-            setRoom(null);
+            setRoom(isPlayerCapacityError(joined.error) ? latestRoom : null);
           }
           return;
         }
@@ -1872,13 +1876,17 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             回到首页
           </Button>
         </Panel>
-      ) : (room.status === "PLAYING" || room.status === "QUESTION_SETUP") && !currentPlayer ? (
+      ) : !currentPlayer ? (
         <div className="mx-auto max-w-2xl">
           <Panel title="选择加入方式">
             <p className="text-sm leading-6 text-[var(--muted)]">
               {room.status === "PLAYING"
                 ? "本局已经开始。选择玩家后当前题不能作答，下一题开始参与；选择观战后本局只观看。"
-                : "出题人正在准备题库。选择玩家可参与本局，选择观战后本局只观看。"}
+                : room.status === "QUESTION_SETUP"
+                  ? "出题人正在准备题库。选择玩家可参与本局，选择观战后本局只观看。"
+                  : room.status === "GAME_RESULT"
+                    ? "本局已结束。选择玩家可等待下一局，选择观战不占玩家名额。"
+                    : "选择玩家可参与下一局设置，选择观战不占玩家名额。"}
             </p>
             <div className="mt-5 grid gap-3 sm:grid-cols-2">
               <Button
@@ -1897,22 +1905,6 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
                 {pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}
               </Button>
             </div>
-          </Panel>
-        </div>
-      ) : !currentPlayer ? (
-        <div className="mx-auto max-w-2xl">
-          <Panel title="加入房间">
-            <p className="text-sm leading-6 text-[var(--muted)]">
-              {room.status === "GAME_RESULT" ? "本局已结束，加入房间后可以等待下一局。" : "加入房间大厅后可以参与下一局设置。"}
-            </p>
-            <Button
-              className="mt-5"
-              type="button"
-              onClick={() => handleJoinPlayingRoom("PLAYER")}
-              disabled={Boolean(pendingJoinRole)}
-            >
-              {pendingJoinRole === "PLAYER" ? "加入中…" : "加入房间"}
-            </Button>
           </Panel>
         </div>
       ) : room.status === "PLAYING" ? (

@@ -14,6 +14,10 @@ const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
 
+function isPlayerCapacityError(message: string | null | undefined) {
+  return Boolean(message?.includes("玩家已满"));
+}
+
 type HomeFooterIcon = "video" | "rules" | "github" | "group" | "spark";
 
 type HomeFooterLinkItemProps = {
@@ -190,6 +194,18 @@ export default function HomePage() {
       const result = await joinRoom(trimmedRoomCode, session.playerId, trimmedNickname);
 
       if (result.error || !result.room) {
+        if (isPlayerCapacityError(result.error)) {
+          saveLocalSession({
+            playerId: session.playerId,
+            nickname: trimmedNickname,
+            roomCode: existingRoom.room_code,
+            isHost: existingRoom.host_player_id === session.playerId,
+          });
+
+          router.push(`/room/${existingRoom.room_code}`);
+          return;
+        }
+
         setError(result.error ?? "加入房间失败，请稍后重试");
         return;
       }

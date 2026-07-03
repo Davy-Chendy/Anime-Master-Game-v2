@@ -98,6 +98,10 @@ function isGamePlayer(player: Pick<DbPlayer, "role">) {
   return normalizePlayerRole(player.role) === "PLAYER";
 }
 
+function countGamePlayers(players: Pick<DbPlayer, "role">[]) {
+  return players.filter(isGamePlayer).length;
+}
+
 function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
   return {
     id: room.id,
@@ -1291,14 +1295,6 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
 
   const existingPlayer = players.find((player) => player.id === playerId);
   const isExistingPlayer = Boolean(existingPlayer);
-
-  if (!isExistingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
-    return {
-      room: null,
-      error: `房间已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家。`,
-    };
-  }
-
   const requestedRole = isPlayerRole(role) ? role : "PLAYER";
   let nextRole = existingPlayer ? normalizePlayerRole(existingPlayer.role) : requestedRole;
 
@@ -1319,8 +1315,11 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     nextRole = requestedRole;
   }
 
-  if (!existingPlayer && room.game_status !== "PLAYING" && room.game_status !== "QUESTION_SETUP") {
-    nextRole = "PLAYER";
+  if (nextRole === "PLAYER" && (!existingPlayer || !isGamePlayer(existingPlayer)) && countGamePlayers(players) >= MAX_PLAYERS_PER_ROOM) {
+    return {
+      room: null,
+      error: `玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以选择观战加入。`,
+    };
   }
 
   const isHost = room.host_player_id === playerId;
@@ -2091,6 +2090,17 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("当前出题人不能切换为观战身份。");
   }
 
+  const players = await getDbPlayersByRoomId(roomId);
+  const targetPlayer = players.find((player) => player.id === targetPlayerId);
+
+  if (!targetPlayer) {
+    throw new Error("身份切换失败：你不在当前房间。");
+  }
+
+  if (role === "PLAYER" && !isGamePlayer(targetPlayer) && countGamePlayers(players) >= MAX_PLAYERS_PER_ROOM) {
+    throw new Error(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以继续观战。`);
+  }
+
   const { data: updatedPlayer, error: updateError } = await d1
     .from("players")
     .update({
@@ -2110,8 +2120,8 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("身份切换失败：你不在当前房间。");
   }
 
-  const players = await getDbPlayersByRoomId(roomId);
-  return toRoom(room, players);
+  const nextPlayers = await getDbPlayersByRoomId(roomId);
+  return toRoom(room, nextPlayers);
 }
 
 export async function getGameSessionById(gameSessionId: string) {
