@@ -2,7 +2,7 @@
 
 import { STORAGE_KEYS } from "@/lib/constants";
 import { createRoomCode } from "@/lib/id";
-import type { Player, Room } from "@/types/game";
+import type { Player, PlayerRole, Room } from "@/types/game";
 
 function readRooms(): Record<string, Room> {
   const raw = localStorage.getItem(STORAGE_KEYS.rooms);
@@ -23,12 +23,12 @@ function writeRooms(rooms: Record<string, Room>) {
   localStorage.setItem(STORAGE_KEYS.rooms, JSON.stringify(rooms));
 }
 
-function makePlayer(playerId: string, nickname: string, isHost: boolean): Player {
+function makePlayer(playerId: string, nickname: string, isHost: boolean, role: PlayerRole = "PLAYER"): Player {
   return {
     id: playerId,
     nickname,
     isHost,
-    role: "PLAYER",
+    role,
     joinedAt: Date.now(),
   };
 }
@@ -42,6 +42,7 @@ function upsertPlayer(room: Room, player: Player): Room {
       ...players[existingIndex],
       nickname: player.nickname,
       isHost: player.isHost,
+      role: player.role,
     };
 
     return {
@@ -78,7 +79,7 @@ export function createMockRoom(playerId: string, nickname: string) {
   return room;
 }
 
-export function joinMockRoom(code: string, playerId: string, nickname: string) {
+export function joinMockRoom(code: string, playerId: string, nickname: string, role: PlayerRole = "PLAYER") {
   const rooms = readRooms();
   const normalizedCode = code.trim();
   const existingRoom = rooms[normalizedCode];
@@ -88,7 +89,7 @@ export function joinMockRoom(code: string, playerId: string, nickname: string) {
   }
 
   const isHost = existingRoom.hostPlayerId === playerId;
-  const updatedRoom = upsertPlayer(existingRoom, makePlayer(playerId, nickname, isHost));
+  const updatedRoom = upsertPlayer(existingRoom, makePlayer(playerId, nickname, isHost, role));
   rooms[normalizedCode] = updatedRoom;
   writeRooms(rooms);
 
@@ -115,6 +116,29 @@ export function ensurePlayerInMockRoom(code: string, playerId: string, nickname:
 
   const isHost = room.hostPlayerId === playerId;
   const updatedRoom = upsertPlayer(room, makePlayer(playerId, nickname, isHost));
+  rooms[code] = updatedRoom;
+  writeRooms(rooms);
+
+  return updatedRoom;
+}
+
+export function updateMockPlayerRole(code: string, playerId: string, role: PlayerRole) {
+  const rooms = readRooms();
+  const room = rooms[code];
+
+  if (!room || room.status !== "LOBBY") {
+    return null;
+  }
+
+  const player = room.players.find((item) => item.id === playerId);
+  if (!player) {
+    return null;
+  }
+
+  const updatedRoom = {
+    ...room,
+    players: room.players.map((item) => (item.id === playerId ? { ...item, role } : item)),
+  };
   rooms[code] = updatedRoom;
   writeRooms(rooms);
 

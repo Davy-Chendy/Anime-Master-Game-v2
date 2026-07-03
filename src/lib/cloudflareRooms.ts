@@ -122,8 +122,8 @@ export const getPlayersByRoomId = (roomId: string) => rpc<Player[]>("getPlayersB
 export const joinRoom = (roomCode: string, playerId: string, nickname: string, role?: PlayerRole) =>
   rpc<{ room: Room | null; error: string | null }>("joinRoom", roomCode, playerId, nickname, role);
 
-export const updatePlayerRole = (roomId: string, playerId: string, role: PlayerRole) =>
-  rpc<Room>("updatePlayerRole", roomId, playerId, role);
+export const updatePlayerRole = (roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole) =>
+  rpc<Room>("updatePlayerRole", roomId, actorPlayerId, targetPlayerId, role);
 
 export const leaveRoom = (roomId: string, playerId: string) => rpc<Room | null>("leaveRoom", roomId, playerId);
 
@@ -256,7 +256,7 @@ export const publishQuestionSetToCommunity = (params: {
   roomId?: string;
 }) => rpc<QuestionSet>("publishQuestionSetToCommunity", params);
 
-export const rateCommunityQuestionSet = (params: { questionSetId: string; playerId: string; rating: number; roomId?: string }) =>
+export const rateCommunityQuestionSet = (params: { questionSetId: string; playerId: string; rating: number; roomId: string }) =>
   rpc<QuestionSet>("rateCommunityQuestionSet", params);
 
 export const getQuestionSetRatingProgress = (params: { questionSetId: string; playerIds: string[]; playerId?: string }) =>

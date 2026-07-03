@@ -723,10 +723,12 @@ export class RoomDurableObject {
     }
 
     if (request.headers.get("upgrade") === "websocket") {
+      const topic = url.searchParams.get("topic") ?? "";
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
-      server.send(JSON.stringify({ type: "connected", topic: url.searchParams.get("topic") ?? "" }));
+      server.serializeAttachment({ topic });
+      server.send(JSON.stringify({ type: "connected", topic }));
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -812,19 +814,27 @@ export class RoomDurableObject {
       }
 
       if (MUTATION_NAMES.has(payload.name)) {
+        const topic = await getRoomTopicForBroadcast(payload.name, payload.args ?? [], responseResult);
         const deltas = buildRealtimeDeltas(payload.name, payload.args ?? [], responseResult, roundSnapshot);
-        this.broadcast(
-          JSON.stringify({
+        if (topic) {
+          const changeMessage = {
             type: "change",
             name: payload.name,
             result: stripRoundSnapshotFromBroadcastResult(responseResult),
             args: payload.args ?? [],
-            topic: "",
+            topic,
             clientActionId: payload.clientActionId,
             delta: deltas[0],
             deltas,
-          } satisfies BroadcastMessage),
-        );
+          } satisfies BroadcastMessage;
+          const attachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+
+          if (attachment?.topic === topic) {
+            this.broadcast(JSON.stringify(changeMessage));
+          } else {
+            await broadcast(this.env, changeMessage);
+          }
+        }
       }
 
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult }));

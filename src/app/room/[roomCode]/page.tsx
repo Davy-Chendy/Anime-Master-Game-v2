@@ -1029,7 +1029,7 @@ function GameResultPanel({
   }, [playerId, questionSet?.id, room.id]);
 
   async function handleRateQuestionSet() {
-    if (!questionSet) {
+    if (!questionSet || !room.id) {
       return;
     }
 
@@ -1649,7 +1649,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     setError("");
 
     try {
-      const nextRoom = await updatePlayerRole(room.id, playerId, role);
+      const nextRoom = await updatePlayerRole(room.id, playerId, playerId, role);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom } : nextRoom));
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "身份切换失败，请稍后重试");
@@ -1890,6 +1890,22 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
                 {pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}
               </Button>
             </div>
+          </Panel>
+        </div>
+      ) : !currentPlayer ? (
+        <div className="mx-auto max-w-2xl">
+          <Panel title="加入房间">
+            <p className="text-sm leading-6 text-[var(--muted)]">
+              {room.status === "GAME_RESULT" ? "本局已结束，加入房间后可以等待下一局。" : "加入房间大厅后可以参与下一局设置。"}
+            </p>
+            <Button
+              className="mt-5"
+              type="button"
+              onClick={() => handleJoinPlayingRoom("PLAYER")}
+              disabled={Boolean(pendingJoinRole)}
+            >
+              {pendingJoinRole === "PLAYER" ? "加入中…" : "加入房间"}
+            </Button>
           </Panel>
         </div>
       ) : room.status === "PLAYING" ? (

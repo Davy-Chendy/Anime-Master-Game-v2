@@ -347,10 +347,42 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
   };
 }
 
-function resetTeamBattleStateForQuestion(state: TeamBattleState): TeamBattleState {
+async function resetTeamBattleStateForQuestion(state: TeamBattleState, roomId: string, presenterPlayerId: string): Promise<TeamBattleState> {
+  const players = await getDbPlayersByRoomId(roomId);
+  const activeGuessers = players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId);
+  const activeGuesserById = new Map(activeGuessers.map((player) => [player.id, player]));
+  const assigned = new Set<string>();
+  const teams: Record<TeamBattleTeam, string[]> = {
+    red: [],
+    blue: [],
+  };
+
+  for (const team of ["red", "blue"] as const) {
+    for (const memberId of state.teams[team]) {
+      if (activeGuesserById.has(memberId) && !assigned.has(memberId)) {
+        teams[team].push(memberId);
+        assigned.add(memberId);
+      }
+    }
+  }
+
+  const newGuessers = activeGuessers.filter((player) => !assigned.has(player.id));
+  for (const player of newGuessers) {
+    const targetTeam = teams.red.length <= teams.blue.length ? "red" : "blue";
+    teams[targetTeam].push(player.id);
+    assigned.add(player.id);
+  }
+
+  const teamMemberNames = Object.fromEntries(
+    [...teams.red, ...teams.blue].map((playerId) => [
+      playerId,
+      activeGuesserById.get(playerId)?.nickname.trim() || state.teamMemberNames?.[playerId] || "已离开玩家",
+    ]),
+  );
+
   return {
-    teams: state.teams,
-    teamMemberNames: state.teamMemberNames ?? {},
+    teams,
+    teamMemberNames,
     activeTeam: "red",
     phase: "REVEAL_VOTE",
     revealLimit: 1,
@@ -360,7 +392,9 @@ function resetTeamBattleStateForQuestion(state: TeamBattleState): TeamBattleStat
     guessVotes: {},
     pendingGuess: null,
     teamScores: state.teamScores,
-    message: "进入下一张图，红队先手选择要打开的方块。",
+    message: newGuessers.length > 0
+      ? "进入下一张图，新加入玩家已分配队伍，红队先手选择要打开的方块。"
+      : "进入下一张图，红队先手选择要打开的方块。",
   };
 }
 
@@ -822,9 +856,9 @@ async function getRoundActionState(gameSession: GameSession) {
       .returns<DbAnswer[]>(),
     d1
       .from("players")
-      .select("id")
+      .select("*")
       .eq("room_id", gameSession.roomId)
-      .returns<Pick<DbPlayer, "id">[]>(),
+      .returns<DbPlayer[]>(),
     getOrCreateQuestionEligiblePlayerIds({
       gameSessionId: gameSession.id,
       roomId: gameSession.roomId,
@@ -848,7 +882,7 @@ async function getRoundActionState(gameSession: GameSession) {
   }
 
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
-  const activeRoomPlayerSet = new Set((roomPlayers ?? []).map((player) => player.id));
+  const activeRoomPlayerSet = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
   const activeGuesserIds = guesserIds.filter((guesserId) => activeRoomPlayerSet.has(guesserId));
   const guesserIdSet = new Set(activeGuesserIds);
   const activeCurrentRoundBuzzerAnswers = (currentRoundBuzzerAnswers ?? []).filter((answer) => guesserIdSet.has(answer.player_id));
@@ -1962,11 +1996,15 @@ export async function startGameWithQuestionSet(params: {
   };
 }
 
-export async function updatePlayerRole(roomId: string, playerId: string, role: PlayerRole) {
+export async function updatePlayerRole(roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole) {
   assertD1Env();
 
   if (!isPlayerRole(role)) {
     throw new Error("身份切换失败：未知的玩家身份。");
+  }
+
+  if (actorPlayerId !== targetPlayerId) {
+    throw new Error("身份切换失败：只能切换自己的玩家/观战身份。");
   }
 
   const { data: room, error: roomError } = await d1
@@ -1994,7 +2032,7 @@ export async function updatePlayerRole(roomId: string, playerId: string, role: P
       last_seen_at: new Date().toISOString(),
     })
     .eq("room_id", roomId)
-    .eq("id", playerId)
+    .eq("id", targetPlayerId)
     .select()
     .maybeSingle<DbPlayer>();
 
@@ -2320,9 +2358,9 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
       .returns<DbBuzzerAnswer[]>(),
     d1
       .from("players")
-      .select("id")
+      .select("*")
       .eq("room_id", gameSession.roomId)
-      .returns<Pick<DbPlayer, "id">[]>(),
+      .returns<DbPlayer[]>(),
   ]);
 
   if (scoresError) {
@@ -2347,8 +2385,9 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
     throw new Error(roomPlayersError.message);
   }
 
+  const activeRoomGamePlayerSet = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
   const activeEligiblePlayerSet = new Set(
-    (gameSession.eligiblePlayerIds ?? []).filter((playerId) => (roomPlayers ?? []).some((player) => player.id === playerId)),
+    (gameSession.eligiblePlayerIds ?? []).filter((playerId) => activeRoomGamePlayerSet.has(playerId)),
   );
   const activeCurrentRoundAnswers = (currentRoundAnswers ?? []).filter((answer) => activeEligiblePlayerSet.has(answer.player_id));
   const activeCurrentRoundBuzzerAnswers = (currentRoundBuzzerAnswers ?? []).filter((answer) =>
@@ -2493,15 +2532,17 @@ export async function rateCommunityQuestionSet(params: {
   questionSetId: string;
   playerId: string;
   rating: number;
-  roomId?: string;
+  roomId: string;
 }) {
   assertD1Env();
 
   const rating = Math.max(1, Math.min(5, Math.floor(params.rating)));
 
-  if (params.roomId) {
-    await assertGamePlayerInRoom(params.roomId, params.playerId);
+  if (!params.roomId) {
+    throw new Error("评分失败：缺少房间信息。");
   }
+
+  await assertGamePlayerInRoom(params.roomId, params.playerId);
 
   const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
@@ -3470,9 +3511,9 @@ export async function judgeBuzzerAnswer(params: {
   const [{ data: roomPlayers, error: roomPlayersError }, { data: pendingAnswers, error: pendingError }] = await Promise.all([
     d1
       .from("players")
-      .select("id")
+      .select("*")
       .eq("room_id", currentGameSession.room_id)
-      .returns<Pick<DbPlayer, "id">[]>(),
+      .returns<DbPlayer[]>(),
     d1
       .from("buzzer_answers")
       .select("*")
@@ -3491,7 +3532,7 @@ export async function judgeBuzzerAnswer(params: {
     throw new Error(pendingError.message);
   }
 
-  const roomPlayerSet = new Set((roomPlayers ?? []).map((player) => player.id));
+  const roomPlayerSet = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
   const activeEligiblePlayerSet = new Set(eligiblePlayerIds.filter((playerId) => roomPlayerSet.has(playerId)));
   const firstPendingAnswer = (pendingAnswers ?? []).find((answer) => activeEligiblePlayerSet.has(answer.player_id)) ?? null;
   if (!firstPendingAnswer || firstPendingAnswer.id !== params.buzzerAnswerId) {
@@ -4317,6 +4358,14 @@ export async function advanceReviewedQuestion(params: {
     questionIndex: nextQuestionIndex,
     presenterPlayerId: currentGameSession.presenter_player_id,
   });
+  const nextTeamBattleState =
+    currentSession.gameMode === "TEAM_BATTLE" && currentSession.teamBattleState
+      ? await resetTeamBattleStateForQuestion(
+          currentSession.teamBattleState,
+          currentGameSession.room_id,
+          currentGameSession.presenter_player_id,
+        )
+      : null;
 
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
@@ -4324,9 +4373,7 @@ export async function advanceReviewedQuestion(params: {
       current_question_index: nextQuestionIndex,
       current_reveal_round: 1,
       revealed_blocks: [],
-      team_battle_state: currentSession.gameMode === "TEAM_BATTLE" && currentSession.teamBattleState
-        ? resetTeamBattleStateForQuestion(currentSession.teamBattleState)
-        : null,
+      team_battle_state: nextTeamBattleState,
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)
@@ -4556,6 +4603,15 @@ export async function skipCurrentQuestion(params: {
     questionIndex: nextQuestionIndex,
     presenterPlayerId: currentGameSession.presenter_player_id,
   });
+  const currentSession = toGameSession(currentGameSession);
+  const nextTeamBattleState =
+    currentSession.gameMode === "TEAM_BATTLE" && currentSession.teamBattleState
+      ? await resetTeamBattleStateForQuestion(
+          currentSession.teamBattleState,
+          currentGameSession.room_id,
+          currentGameSession.presenter_player_id,
+        )
+      : null;
 
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
@@ -4563,9 +4619,7 @@ export async function skipCurrentQuestion(params: {
       current_question_index: nextQuestionIndex,
       current_reveal_round: 1,
       revealed_blocks: [],
-      team_battle_state: toGameSession(currentGameSession).gameMode === "TEAM_BATTLE" && toGameSession(currentGameSession).teamBattleState
-        ? resetTeamBattleStateForQuestion(toGameSession(currentGameSession).teamBattleState)
-        : null,
+      team_battle_state: nextTeamBattleState,
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)

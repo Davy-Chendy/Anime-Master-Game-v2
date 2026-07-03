@@ -1104,8 +1104,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         teamBattleTaskDetail = `${teamBattlePhaseLabel}中`;
       }
     } else if (!teamBattlePlayerTeam) {
-      teamBattleTaskTitle = "观战";
-      teamBattleTaskDetail = "等待下一局分队";
+      teamBattleTaskTitle = isSpectator ? "观战" : "等待分队";
+      teamBattleTaskDetail = isSpectator ? "本局只观看" : "下一题开始参与";
     } else if (teamBattleCanAct && teamBattleState.phase === "REVEAL_VOTE") {
       teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
       teamBattleTaskBadge = teamBattleHasSubmittedRevealVote ? "可修改" : "轮到你";
@@ -1356,7 +1356,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
         } else if (hasPendingJudgement) {
           standardTaskTitle = "等待判定";
-          standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在准备判定，约等3秒" : `${pendingJudgementCount} 人待判定`;
+          standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认抢答顺序" : `${pendingJudgementCount} 人待判定`;
         } else if (canSettleBuzzerRound) {
           standardTaskTitle = buzzerSettleActionText;
           standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
@@ -1369,7 +1369,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
       } else if (hasPendingJudgement) {
         standardTaskTitle = "等待判定";
-        standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在准备判定，约等3秒" : `${pendingJudgementCount} 人待判定`;
+        standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认提交顺序" : `${pendingJudgementCount} 人待判定`;
       } else if (canSettleBuzzerRound) {
         standardTaskTitle = standardSettleActionText;
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -2130,7 +2130,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                   : teamBattlePlayerTone?.solid ?? "bg-slate-200 text-slate-700",
               ].join(" ")}
             >
-              {isPresenter ? "裁判" : teamBattlePlayerTeam ? getTeamName(teamBattlePlayerTeam) : "观战"}
+              {isPresenter ? "裁判" : teamBattlePlayerTeam ? getTeamName(teamBattlePlayerTeam) : isSpectator ? "观战" : "待分队"}
             </span>
           </div>
           <p className="mb-2 text-sm font-semibold text-slate-900">队伍</p>
@@ -2733,7 +2733,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                 ) : (
                   <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
                     {isWaitingForBuzzerQueueStability
-                      ? "正在准备判定，约等3秒"
+                      ? "正在等待抢答顺序稳定"
                       : hasPendingJudgement
                         ? "正在同步待判定答案"
                       : isBuzzerMode
