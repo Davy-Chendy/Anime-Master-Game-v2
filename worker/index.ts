@@ -1399,14 +1399,23 @@ export class RoomDurableObject {
         return;
       }
 
-      const { roundSnapshot, responseResult } = await runWithGameDatabase(this.env, async () => {
+      const { deltas, roundSnapshot, responseResult, topic } = await runWithGameDatabase(this.env, async () => {
         const result = await callGameFunction(payload.name ?? "", payload.args ?? []);
         const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
+        const nextTopic = MUTATION_NAMES.has(payload.name ?? "")
+          ? await getRoomTopicForBroadcast(payload.name ?? "", payload.args ?? [], nextResponseResult)
+          : null;
+        const nextDeltas =
+          MUTATION_NAMES.has(payload.name ?? "") && nextTopic
+            ? buildRealtimeDeltas(payload.name ?? "", payload.args ?? [], nextResponseResult, nextRoundSnapshot)
+            : [];
 
         return {
+          deltas: nextDeltas,
           roundSnapshot: nextRoundSnapshot,
           responseResult: nextResponseResult,
+          topic: nextTopic,
         };
       });
       if (actionKey) {
@@ -1415,8 +1424,6 @@ export class RoomDurableObject {
       }
 
       if (MUTATION_NAMES.has(payload.name)) {
-        const topic = await getRoomTopicForBroadcast(payload.name, payload.args ?? [], responseResult);
-        const deltas = buildRealtimeDeltas(payload.name, payload.args ?? [], responseResult, roundSnapshot);
         if (topic && deltas.length > 0) {
           const changeMessage = {
             type: "change",
