@@ -2201,29 +2201,29 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                     </div>
                     <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
                   </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
                     <span>答对 {correctCount} 题</span>
                     {alreadyCorrect ? (
-                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
+                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
                     ) : null}
                     {currentQuestionScoreAwarded > 0 ? (
-                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
                         +{currentQuestionScoreAwarded} 分
                       </span>
                     ) : null}
                     {!alreadyCorrect && hasForfeitedCurrentRound ? (
-                      <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">已放弃</span>
+                      <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
                     ) : null}
                     {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound ? (
-                      <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
+                      <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
                     ) : null}
                     {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
-                      <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                      <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
                         {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
                       </span>
                     ) : null}
                     {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
-                      <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
+                      <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
                     ) : null}
                   </div>
                 </div>
