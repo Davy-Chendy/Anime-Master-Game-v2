@@ -170,6 +170,7 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
   const teamsRecord = record.teams && typeof record.teams === "object" ? record.teams : null;
   const redTeam = Array.isArray(teamsRecord?.red) ? teamsRecord.red.filter((id): id is string => typeof id === "string") : [];
   const blueTeam = Array.isArray(teamsRecord?.blue) ? teamsRecord.blue.filter((id): id is string => typeof id === "string") : [];
+  const teamMemberNames = normalizeTeamMemberNames(record.teamMemberNames);
   const activeTeam = record.activeTeam === "blue" ? "blue" : "red";
   const phase =
     record.phase === "GUESS_VOTE" || record.phase === "JUDGING" || record.phase === "REVIEW" ? record.phase : "REVEAL_VOTE";
@@ -180,6 +181,7 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
       red: redTeam,
       blue: blueTeam,
     },
+    teamMemberNames,
     activeTeam,
     phase,
     revealLimit: Math.max(1, Math.min(10, Math.floor(Number(record.revealLimit) || 1))),
@@ -203,6 +205,21 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     },
     message: typeof record.message === "string" ? record.message : null,
   };
+}
+
+function normalizeTeamMemberNames(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const names: Record<string, string> = {};
+  for (const [playerId, nickname] of Object.entries(value)) {
+    if (typeof nickname === "string" && nickname.trim()) {
+      names[playerId] = nickname.trim();
+    }
+  }
+
+  return names;
 }
 
 function normalizeRevealVotes(value: unknown) {
@@ -266,9 +283,11 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
   const redTeamSize = redGetsExtraPlayer ? largerTeamSize : Math.floor(guessers.length / 2);
   const red = guessers.slice(0, redTeamSize).map((player) => player.id);
   const blue = guessers.slice(redTeamSize).map((player) => player.id);
+  const teamMemberNames = Object.fromEntries(guessers.map((player) => [player.id, player.nickname.trim() || "已离开玩家"]));
 
   return {
     teams: { red, blue },
+    teamMemberNames,
     activeTeam: "red",
     phase: "REVEAL_VOTE",
     revealLimit: 1,
@@ -285,6 +304,7 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
 function resetTeamBattleStateForQuestion(state: TeamBattleState): TeamBattleState {
   return {
     teams: state.teams,
+    teamMemberNames: state.teamMemberNames ?? {},
     activeTeam: "red",
     phase: "REVEAL_VOTE",
     revealLimit: 1,

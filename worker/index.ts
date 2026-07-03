@@ -10,6 +10,7 @@ export interface Env {
   R2_IMAGE_PREFIX?: string;
   R2_PUBLIC_BASE_URL?: string;
   R2_EXISTING_IMAGE_LIMIT?: string;
+  R2_IMAGE_STORAGE_LIMIT_BYTES?: string;
 }
 
 type RpcBody = {
@@ -33,6 +34,8 @@ type BroadcastMessage = {
 const ACTION_RESULT_TTL_MS = 10_000;
 const ACTION_CACHE_MIN_ALARM_DELAY_MS = 100;
 const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
+const R2_LIST_PAGE_LIMIT = 1000;
 const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
 
 const MUTATION_NAMES = new Set([
@@ -161,6 +164,10 @@ function getExportedFunction(name: string) {
 
 function getRoomObject(env: Env, topic: string) {
   return env.ROOM_OBJECTS.get(env.ROOM_OBJECTS.idFromName(topic));
+}
+
+function getR2UploadGateObject(env: Env) {
+  return getRoomObject(env, "r2-image-upload-gate");
 }
 
 async function runWithGameDatabase<T>(env: Env, callback: () => Promise<T>) {
@@ -430,6 +437,63 @@ function getR2ImagePrefix(env: Env) {
     .replace(/\.\./g, "");
 }
 
+function getR2ImageStorageLimitBytes(env: Env) {
+  const configuredLimit = Number(env.R2_IMAGE_STORAGE_LIMIT_BYTES);
+  return Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : R2_IMAGE_STORAGE_LIMIT_BYTES;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${bytes} B`;
+}
+
+async function getR2StoredImageBytes(env: Env) {
+  const prefix = getR2ImagePrefix(env);
+  const listPrefix = prefix ? `${prefix}/` : undefined;
+  let cursor: string | undefined;
+  let totalBytes = 0;
+
+  do {
+    const listed = await env.IMAGE_BUCKET.list({
+      prefix: listPrefix,
+      limit: R2_LIST_PAGE_LIMIT,
+      cursor,
+    });
+
+    totalBytes += listed.objects.reduce((sum, object) => sum + object.size, 0);
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+
+  return totalBytes;
+}
+
+function r2StorageLimitResponse(request: Request, env: Env, currentBytes: number, uploadBytes: number, limitBytes: number) {
+  return json(
+    {
+      error: `图片存储空间不足：当前已使用 ${formatBytes(currentBytes)}，本次上传 ${formatBytes(uploadBytes)}，上限 ${formatBytes(
+        limitBytes,
+      )}。请先清理图片后再上传。`,
+      currentBytes,
+      uploadBytes,
+      limitBytes,
+    },
+    { status: 507 },
+    request,
+    env,
+  );
+}
+
 function sanitizeFileName(name: string) {
   const fallback = "image";
   const withoutPath = name.split(/[\\/]/).filter(Boolean).pop() ?? fallback;
@@ -503,6 +567,12 @@ async function handleR2Upload(request: Request, env: Env) {
     return json({ error: "单张图片不能超过 20 MB。" }, { status: 413 }, request, env);
   }
 
+  const storageLimitBytes = getR2ImageStorageLimitBytes(env);
+  const currentStorageBytes = await getR2StoredImageBytes(env);
+  if (currentStorageBytes + body.byteLength > storageLimitBytes) {
+    return r2StorageLimitResponse(request, env, currentStorageBytes, body.byteLength, storageLimitBytes);
+  }
+
   const key = buildR2ImageKey(request, env);
   const checksum = await crypto.subtle.digest("SHA-256", body);
   const object = await env.IMAGE_BUCKET.put(key, body, {
@@ -520,6 +590,12 @@ async function handleR2Upload(request: Request, env: Env) {
     return json({ error: "图片写入 R2 失败，请稍后重试。" }, { status: 500 }, request, env);
   }
 
+  const storageBytesAfterUpload = await getR2StoredImageBytes(env);
+  if (storageBytesAfterUpload > storageLimitBytes) {
+    await env.IMAGE_BUCKET.delete(key);
+    return r2StorageLimitResponse(request, env, Math.max(0, storageBytesAfterUpload - object.size), object.size, storageLimitBytes);
+  }
+
   return json(
     {
       key,
@@ -527,6 +603,8 @@ async function handleR2Upload(request: Request, env: Env) {
       publicId: key,
       size: object.size,
       etag: object.httpEtag,
+      storageBytes: storageBytesAfterUpload,
+      storageLimitBytes,
     },
     {},
     request,
@@ -607,17 +685,35 @@ async function handleR2ImagesList(request: Request, env: Env) {
       size: object.size,
     }));
 
-  return json({ images, folder: prefix, limit, truncated: listed.truncated, cursor: listed.cursor ?? null }, {}, request, env);
+  return json(
+    {
+      images,
+      folder: prefix,
+      limit,
+      truncated: listed.truncated,
+      cursor: listed.cursor ?? null,
+      storageBytes: await getR2StoredImageBytes(env),
+      storageLimitBytes: getR2ImageStorageLimitBytes(env),
+    },
+    {},
+    request,
+    env,
+  );
 }
 
 export class RoomDurableObject {
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
   private actionQueue: Promise<void> = Promise.resolve();
+  private r2UploadQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/r2-upload" && request.method === "POST") {
+      return await this.enqueueR2Upload(request);
+    }
 
     if (request.headers.get("upgrade") === "websocket") {
       const pair = new WebSocketPair();
@@ -634,6 +730,26 @@ export class RoomDurableObject {
     }
 
     return new Response("未找到对应的实时接口。", { status: 404 });
+  }
+
+  private enqueueR2Upload(request: Request) {
+    const task = this.r2UploadQueue.then(
+      () => this.handleQueuedR2Upload(request),
+      () => this.handleQueuedR2Upload(request),
+    );
+    this.r2UploadQueue = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  }
+
+  private async handleQueuedR2Upload(request: Request) {
+    try {
+      return await handleR2Upload(request, this.env);
+    } catch (error) {
+      return errorResponse(error, request, this.env);
+    }
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -770,7 +886,7 @@ export default {
       }
 
       if (url.pathname === "/api/r2-upload" && request.method === "POST") {
-        return await handleR2Upload(request, env);
+        return await getR2UploadGateObject(env).fetch(request);
       }
 
       if (url.pathname === "/api/r2-images" && request.method === "GET") {

@@ -387,7 +387,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }, []);
 
   const getPlayerName = useCallback(
-    (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
+    (targetPlayerId: string) =>
+      room.players.find((player) => player.id === targetPlayerId)?.nickname ??
+      gameSessionRef.current?.teamBattleState?.teamMemberNames?.[targetPlayerId] ??
+      "已离开玩家",
     [room.players],
   );
 
@@ -1037,7 +1040,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
             return {
               id: memberId,
-              nickname: player?.nickname ?? memberId,
+              nickname: player?.nickname ?? teamBattleState.teamMemberNames?.[memberId] ?? "已离开玩家",
             };
           }),
         }))
