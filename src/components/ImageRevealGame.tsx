@@ -2184,6 +2184,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             {scoreRows.map(({ player, score, correctCount }, index) => {
               const alreadyCorrect = correctPlayerSet.has(player.id);
               const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
+              const hasForfeitedCurrentRound = currentRoundForfeitPlayerSet.has(player.id);
               const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
               const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
               return (
@@ -2210,7 +2211,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                         +{currentQuestionScoreAwarded} 分
                       </span>
                     ) : null}
-                    {!alreadyCorrect && hasAnsweredCurrentRound ? (
+                    {!alreadyCorrect && hasForfeitedCurrentRound ? (
+                      <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">已放弃</span>
+                    ) : null}
+                    {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound ? (
                       <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
                     ) : null}
                     {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
