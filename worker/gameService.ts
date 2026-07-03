@@ -568,6 +568,40 @@ function isForfeitAnswer(answer: Pick<DbAnswer, "answer_text"> | Pick<Answer, "a
   return "answer_text" in answer ? answer.answer_text === FORFEIT_ANSWER_TEXT : answer.answerText === FORFEIT_ANSWER_TEXT;
 }
 
+function getCorrectAnswersForLabel<T extends { player_id: string; submitted_at: string; reveal_round: number; id: string }>(
+  answers: T[],
+  questionResults: DbQuestionResult[],
+) {
+  const correctAnswerKeySet = new Set(
+    questionResults.map((result) => getPlayerRoundAnswerKey(result.player_id, result.scored_round)),
+  );
+
+  return answers
+    .filter((answer) => correctAnswerKeySet.has(getPlayerRoundAnswerKey(answer.player_id, answer.reveal_round)))
+    .sort(compareAnswerOrder);
+}
+
+function getPlayerRoundAnswerKey(playerId: string, revealRound: number) {
+  return `${playerId}:${revealRound}`;
+}
+
+function compareAnswerOrder(
+  left: { submitted_at: string; reveal_round: number; id: string },
+  right: { submitted_at: string; reveal_round: number; id: string },
+) {
+  const submittedAtDiff = new Date(left.submitted_at).getTime() - new Date(right.submitted_at).getTime();
+  if (Number.isFinite(submittedAtDiff) && submittedAtDiff !== 0) {
+    return submittedAtDiff;
+  }
+
+  const submittedAtTextDiff = left.submitted_at.localeCompare(right.submitted_at);
+  if (submittedAtTextDiff !== 0) {
+    return submittedAtTextDiff;
+  }
+
+  return left.reveal_round - right.reveal_round || left.id.localeCompare(right.id);
+}
+
 function canUseForfeitAnswer(gameMode: GameMode) {
   return gameMode !== "TEAM_BATTLE";
 }
@@ -2425,15 +2459,19 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
   const activeCurrentRoundBuzzerAnswers = (currentRoundBuzzerAnswers ?? []).filter((answer) =>
     activeEligiblePlayerSet.has(answer.player_id),
   );
+  const correctQuestionResults = questionResults ?? [];
 
   return {
     gameSession,
     scores: (scores ?? []).map(toPlayerScore),
     questionResults: (questionResults ?? []).map(toQuestionResult),
     answers: activeCurrentRoundAnswers.map(toAnswer),
-    labelAnswers: (questionAnswers ?? []).map(toAnswer),
+    labelAnswers: getCorrectAnswersForLabel(questionAnswers ?? [], correctQuestionResults).map(toAnswer),
     buzzerAnswers: activeCurrentRoundBuzzerAnswers.map(toBuzzerAnswer),
-    labelBuzzerAnswers: (questionBuzzerAnswers ?? []).map(toBuzzerAnswer),
+    labelBuzzerAnswers: getCorrectAnswersForLabel(
+      (questionBuzzerAnswers ?? []).filter((answer) => answer.status === "correct"),
+      correctQuestionResults,
+    ).map(toBuzzerAnswer),
   };
 }
 
