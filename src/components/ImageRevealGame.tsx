@@ -1345,7 +1345,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
         } else if (hasPendingJudgement) {
           standardTaskTitle = "等待判定";
-          standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认抢答顺序" : `${pendingJudgementCount} 人待判定`;
+          standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在准备判定，约等3秒" : `${pendingJudgementCount} 人待判定`;
         } else if (canSettleBuzzerRound) {
           standardTaskTitle = buzzerSettleActionText;
           standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
@@ -1358,7 +1358,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
       } else if (hasPendingJudgement) {
         standardTaskTitle = "等待判定";
-        standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认提交顺序" : `${pendingJudgementCount} 人待判定`;
+        standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在准备判定，约等3秒" : `${pendingJudgementCount} 人待判定`;
       } else if (canSettleBuzzerRound) {
         standardTaskTitle = standardSettleActionText;
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -2680,7 +2680,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 ) : (
                   <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
                     {isWaitingForBuzzerQueueStability
-                      ? "正在等待抢答顺序稳定"
+                      ? "正在准备判定，约等3秒"
                       : hasPendingJudgement
                         ? "正在同步待判定答案"
                       : isBuzzerMode
