@@ -194,8 +194,8 @@ function getResultRankStyles(rank: number) {
 
   if (rank === 2) {
     return {
-      row: "bg-zinc-50",
-      badge: "bg-zinc-200 text-zinc-900 ring-zinc-300",
+      row: "bg-slate-100/80",
+      badge: "bg-gradient-to-br from-slate-50 via-slate-300 to-slate-500 text-slate-950 ring-slate-400",
     };
   }
 
