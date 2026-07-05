@@ -203,7 +203,7 @@ export default function HomePage() {
             isHost: existingRoom.host_player_id === session.playerId,
           });
 
-          router.push(`/room/${existingRoom.room_code}?join=choose`);
+          router.push(`/room/${existingRoom.room_code}`);
           return;
         }
 
