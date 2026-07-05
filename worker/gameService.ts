@@ -1078,7 +1078,7 @@ function isUniqueViolation(error: { code?: string } | null) {
 const REVEAL_BLOCK_COUNT = 45;
 const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
-const MAX_PLAYERS_PER_ROOM = 15;
+const MAX_PLAYERS_PER_ROOM = 30;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
