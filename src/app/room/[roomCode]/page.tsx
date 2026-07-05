@@ -187,22 +187,22 @@ function isRoomDissolvedDelta(delta: RealtimeDelta): delta is Extract<RealtimeDe
 function getResultRankStyles(rank: number) {
   if (rank === 1) {
     return {
-      row: "bg-rose-50/70",
-      badge: "bg-rose-600 text-white ring-rose-200",
+      row: "bg-amber-50/70",
+      badge: "bg-amber-400 text-amber-950 ring-amber-300",
     };
   }
 
   if (rank === 2) {
     return {
-      row: "bg-slate-50",
-      badge: "bg-slate-200 text-slate-800 ring-slate-300",
+      row: "bg-zinc-50",
+      badge: "bg-zinc-200 text-zinc-900 ring-zinc-300",
     };
   }
 
   if (rank === 3) {
     return {
-      row: "bg-amber-50/55",
-      badge: "bg-amber-100 text-amber-800 ring-amber-200",
+      row: "bg-orange-50/60",
+      badge: "bg-orange-700 text-white ring-orange-300",
     };
   }
 
