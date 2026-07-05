@@ -22,6 +22,7 @@ export type TeamBattleGuessVote = {
 
 export type TeamBattleState = {
   teams: Record<TeamBattleTeam, string[]>;
+  initialTeams?: Record<TeamBattleTeam, string[]>;
   teamMemberNames?: Record<string, string>;
   activeTeam: TeamBattleTeam;
   phase: TeamBattlePhase;
