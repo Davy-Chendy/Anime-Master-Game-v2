@@ -926,19 +926,6 @@ function GameResultPanel({
   const playerIds = useMemo(() => getGamePlayers(room.players).map((player) => player.id), [room.players]);
   const canRateQuestionSet = room.players.find((player) => player.id === playerId)?.role === "PLAYER";
 
-  async function loadRatingProgress(questionSetId: string) {
-    const nextProgress = await getQuestionSetRatingProgress({
-      questionSetId,
-      playerIds,
-      playerId,
-    });
-    setRatingProgress(nextProgress);
-
-    if (nextProgress.playerRating) {
-      setRatingValue(nextProgress.playerRating);
-    }
-  }
-
   useEffect(() => {
     let isMounted = true;
 
@@ -960,24 +947,12 @@ function GameResultPanel({
         ]);
         const loadedQuestionSet = loadedGameSession ? await getQuestionSetById(loadedGameSession.questionSetId) : null;
         const loadedQuestionResults = loadedGameSession ? await getQuestionResultsForGameSession(loadedGameSession.id) : [];
-        const nextRatingProgress =
-          loadedQuestionSet?.isPublic && loadedQuestionSet.id
-            ? await getQuestionSetRatingProgress({
-                questionSetId: loadedQuestionSet.id,
-                playerIds,
-                playerId,
-              })
-            : null;
 
         if (isMounted) {
           setLeaderboard(nextLeaderboard);
           setGameSession(loadedGameSession);
           setQuestionSet(loadedQuestionSet);
           setQuestionResults(loadedQuestionResults);
-          setRatingProgress(nextRatingProgress);
-          if (nextRatingProgress?.playerRating) {
-            setRatingValue(nextRatingProgress.playerRating);
-          }
         }
       } catch (caughtError) {
         if (isMounted) {
@@ -995,7 +970,43 @@ function GameResultPanel({
     return () => {
       isMounted = false;
     };
-  }, [currentGameId, onError, playerId, playerIds]);
+  }, [currentGameId, onError]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function refreshRatingProgress() {
+      if (!questionSet?.isPublic || !questionSet.id) {
+        setRatingProgress(null);
+        return;
+      }
+
+      try {
+        const nextProgress = await getQuestionSetRatingProgress({
+          questionSetId: questionSet.id,
+          playerIds,
+          playerId,
+        });
+
+        if (isMounted) {
+          setRatingProgress(nextProgress);
+          if (nextProgress.playerRating) {
+            setRatingValue(nextProgress.playerRating);
+          }
+        }
+      } catch (caughtError) {
+        if (isMounted) {
+          onError(caughtError instanceof Error ? caughtError.message : "加载评分进度失败");
+        }
+      }
+    }
+
+    refreshRatingProgress();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [onError, playerId, playerIds, questionSet?.id, questionSet?.isPublic]);
 
   useEffect(() => {
     if (!room.id || !questionSet?.id) {
@@ -1101,10 +1112,11 @@ function GameResultPanel({
         .map((team) => ({
           team,
           score: gameSession.teamBattleState?.teamScores[team] ?? 0,
-          members: (gameSession.teamBattleState?.teams[team] ?? []).flatMap((memberId) => {
+          members: (gameSession.teamBattleState?.initialTeams?.[team] ?? gameSession.teamBattleState?.teams[team] ?? []).flatMap((memberId) => {
             const player = playerById.get(memberId);
 
-            return player ? [{ id: memberId, nickname: player.nickname }] : [];
+            const nickname = player?.nickname ?? gameSession.teamBattleState?.teamMemberNames?.[memberId] ?? "已离开玩家";
+            return [{ id: memberId, nickname }];
           }),
           questionScores: questionIndexes.map((questionIndex) => scoreByTeamQuestion.get(`${team}:${questionIndex}`) ?? 0),
         }))
