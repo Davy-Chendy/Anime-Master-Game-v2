@@ -57,7 +57,9 @@ type ImageRevealGameProps = {
 
 const LANDSCAPE_GRID_COLUMNS = 9;
 const PORTRAIT_GRID_COLUMNS = 5;
-const TOTAL_BLOCKS = 45;
+const LANDSCAPE_TOTAL_BLOCKS = 45;
+const PORTRAIT_TOTAL_BLOCKS = 35;
+const MAX_REVEAL_BLOCKS = LANDSCAPE_TOTAL_BLOCKS;
 const DEFAULT_ROUND_SECONDS = 60;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
@@ -89,6 +91,32 @@ function buildRetryImageUrl(imageUrl: string, retryAttempt: number, retryToken: 
   return `${urlWithoutHash}${separator}amgImageRetry=${retryToken}-${retryAttempt}${hash}`;
 }
 
+function getRevealGridConfig(isPortrait: boolean) {
+  const columns = isPortrait ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
+  const blockCount = isPortrait ? PORTRAIT_TOTAL_BLOCKS : LANDSCAPE_TOTAL_BLOCKS;
+
+  return {
+    columns,
+    rows: blockCount / columns,
+    blockCount,
+  };
+}
+
+function countVisibleRevealedBlocks(revealedBlocks: Iterable<number>, blockCount: number) {
+  let count = 0;
+  for (const block of revealedBlocks) {
+    if (block >= 0 && block < blockCount) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+function getHiddenRevealBlocks(blockCount: number) {
+  return Array.from({ length: MAX_REVEAL_BLOCKS - blockCount }, (_, index) => blockCount + index);
+}
+
 function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
     ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
@@ -107,7 +135,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
       ? Array.from(
           new Set(
             gameSession.revealed_blocks.filter(
-              (block): block is number => Number.isInteger(block) && block >= 0 && block < TOTAL_BLOCKS,
+              (block): block is number => Number.isInteger(block) && block >= 0 && block < MAX_REVEAL_BLOCKS,
             ),
           ),
         ).sort((a, b) => a - b)
@@ -308,8 +336,7 @@ function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageE
 
   const width = image.naturalWidth || image.width;
   const height = image.naturalHeight || image.height;
-  const columns = height > width ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
-  const rows = TOTAL_BLOCKS / columns;
+  const { columns, rows, blockCount } = getRevealGridConfig(height > width);
   const blockWidth = width / columns;
   const blockHeight = height / rows;
 
@@ -319,6 +346,10 @@ function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageE
   context.fillRect(0, 0, width, height);
 
   for (const blockIndex of revealedBlocks) {
+    if (blockIndex >= blockCount) {
+      continue;
+    }
+
     const column = blockIndex % columns;
     const row = Math.floor(blockIndex / columns);
     const sourceX = column * blockWidth;
@@ -814,9 +845,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
   const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
-  const gridColumns = isPortraitImage ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
-  const gridRows = TOTAL_BLOCKS / gridColumns;
+  const revealGrid = getRevealGridConfig(isPortraitImage);
+  const gridColumns = revealGrid.columns;
+  const gridRows = revealGrid.rows;
+  const visibleBlockCount = revealGrid.blockCount;
   const revealedBlockSet = useMemo(() => new Set(gameSession?.revealedBlocks ?? []), [gameSession?.revealedBlocks]);
+  const visibleRevealedBlockCount = useMemo(
+    () => countVisibleRevealedBlocks(revealedBlockSet, visibleBlockCount),
+    [revealedBlockSet, visibleBlockCount],
+  );
   const selectedBlockSet = useMemo(() => new Set(selectedBlocks), [selectedBlocks]);
   const previewRevealedBlockSet = useMemo(
     () => new Set([...(gameSession?.revealedBlocks ?? []), ...selectedBlocks]),
@@ -930,10 +967,22 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     gameSession?.roundScores[displayRound - 1] ?? Math.max(1, maxRevealRounds - displayRound + 1);
   const isQuestionReviewing = isTeamBattleMode
     ? teamBattleState?.phase === "REVIEW"
-    : !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
+    : !hasRoundStarted && visibleRevealedBlockCount === visibleBlockCount;
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
+
+  useEffect(() => {
+    setSelectedBlocks((currentBlocks) => {
+      const nextBlocks = currentBlocks.filter((blockIndex) => blockIndex < visibleBlockCount && !revealedBlockSet.has(blockIndex));
+
+      if (nextBlocks.length === currentBlocks.length && nextBlocks.every((blockIndex, index) => blockIndex === currentBlocks[index])) {
+        return currentBlocks;
+      }
+
+      return nextBlocks;
+    });
+  }, [revealedBlockSet, visibleBlockCount]);
 
   useEffect(() => {
     if (!isTeamBattleMode) {
@@ -943,7 +992,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     setTeamSelectedBlocks((currentBlocks) => {
       const nextBlocks =
         teamBattleState?.phase === "REVEAL_VOTE"
-          ? currentBlocks.filter((blockIndex) => !revealedBlockSet.has(blockIndex))
+          ? currentBlocks.filter((blockIndex) => blockIndex < visibleBlockCount && !revealedBlockSet.has(blockIndex))
           : [];
 
       if (nextBlocks.length === currentBlocks.length && nextBlocks.every((blockIndex, index) => blockIndex === currentBlocks[index])) {
@@ -952,7 +1001,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
       return nextBlocks;
     });
-  }, [isTeamBattleMode, revealedBlockSet, teamBattleState?.phase]);
+  }, [isTeamBattleMode, revealedBlockSet, teamBattleState?.phase, visibleBlockCount]);
 
   const gamePlayers = room.players.filter((player) => player.role !== "SPECTATOR");
   const activePlayerById = new Map(gamePlayers.map((player) => [player.id, player]));
@@ -976,7 +1025,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const teamBattleCanAct = Boolean(!isPresenter && !isSpectator && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
   const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
   const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
-  const teamBattleAvailableBlockCount = Math.max(0, TOTAL_BLOCKS - revealedBlockSet.size);
+  const teamBattleAvailableBlockCount = Math.max(0, visibleBlockCount - visibleRevealedBlockCount);
   const teamBattleRequiredBlockCount = Math.min(teamBattleState?.revealLimit ?? 1, teamBattleAvailableBlockCount);
   const teamBattleVoteSeconds = teamBattleState?.voteDeadlineAt
     ? Math.max(0, Math.ceil((new Date(teamBattleState.voteDeadlineAt).getTime() - teamBattleClockMs) / 1000))
@@ -1614,6 +1663,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     if (
       !isPresenter ||
       revealedBlockSet.has(blockIndex) ||
+      blockIndex >= visibleBlockCount ||
       Boolean(gameSession?.roundStartedAt)
     ) {
       return;
@@ -1631,6 +1681,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       !teamBattleCanAct ||
       teamBattleState?.phase !== "REVEAL_VOTE" ||
       revealedBlockSet.has(blockIndex) ||
+      blockIndex >= visibleBlockCount ||
       teamBattleVoteSeconds === 0
     ) {
       return;
@@ -1657,10 +1708,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
     setIsConfirmingReveal(true);
     try {
+      const nextVisibleRevealedBlockCount = countVisibleRevealedBlocks(
+        new Set([...gameSession.revealedBlocks, ...selectedBlocks]),
+        visibleBlockCount,
+      );
+      const selectedBlocksForReveal =
+        nextVisibleRevealedBlockCount >= visibleBlockCount
+          ? Array.from(new Set([...selectedBlocks, ...getHiddenRevealBlocks(visibleBlockCount)])).sort((a, b) => a - b)
+          : selectedBlocks;
       const updatedGameSession = await confirmRevealBlocks({
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
-        selectedBlocks,
+        selectedBlocks: selectedBlocksForReveal,
+        revealBlockCount: visibleBlockCount,
       });
       applyRoundSnapshotFromResult(updatedGameSession) || applyGameSessionDelta(updatedGameSession);
       setSelectedBlocks([]);
@@ -1682,6 +1742,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         gameSessionId: gameSession.id,
         playerId,
         selectedBlocks: teamSelectedBlocks,
+        revealBlockCount: visibleBlockCount,
       });
       applyGameSession(updatedGameSession);
     } catch (error) {
@@ -2124,7 +2185,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         : gameSession.gameMode === "BUZZER_RANKED"
           ? "个人 · 顺位得分模式"
           : "团队 · 对抗模式";
-  const revealedBlocksCardValue = `${revealedBlockSet.size} / ${TOTAL_BLOCKS} 格`;
+  const revealedBlocksCardValue = `${visibleRevealedBlockCount} / ${visibleBlockCount} 格`;
   const teamBattleScoreCardValue = teamBattleState
     ? `红队 ${teamBattleState.teamScores.red} : ${teamBattleState.teamScores.blue} 蓝队`
     : "";
@@ -2315,7 +2376,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
             }}
           >
-            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
+            {Array.from({ length: visibleBlockCount }, (_, blockIndex) => {
               const isRevealed = revealedBlockSet.has(blockIndex);
               const isSelected =
                 teamBattleState?.phase === "REVEAL_VOTE" && !isRevealed && teamSelectedBlocks.includes(blockIndex);
@@ -2364,7 +2425,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
             }}
           >
-            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
+            {Array.from({ length: visibleBlockCount }, (_, blockIndex) => (
               <div className={revealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
             ))}
           </div>
@@ -2378,7 +2439,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
             }}
           >
-            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
+            {Array.from({ length: visibleBlockCount }, (_, blockIndex) => {
               const isRevealed = revealedBlockSet.has(blockIndex);
               const isSelected = selectedBlockSet.has(blockIndex);
 
@@ -2727,7 +2788,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             <div className="mb-3 flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-950">操作</p>
               <span className="text-xs font-semibold text-[var(--muted)]">
-                已打开 {revealedBlockSet.size}/{TOTAL_BLOCKS}
+                已打开 {visibleRevealedBlockCount}/{visibleBlockCount}
               </span>
             </div>
 
@@ -3008,7 +3069,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                       gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
                     }}
                   >
-                    {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
+                    {Array.from({ length: visibleBlockCount }, (_, blockIndex) => (
                       <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
                     ))}
                   </div>

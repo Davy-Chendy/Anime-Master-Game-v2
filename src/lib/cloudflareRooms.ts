@@ -210,6 +210,7 @@ export const confirmRevealBlocks = (params: {
   gameSessionId: string;
   presenterPlayerId: string;
   selectedBlocks: number[];
+  revealBlockCount?: number;
 }) => rpc<GameSession & { roundSnapshot?: RoundSnapshot }>("confirmRevealBlocks", params);
 
 export const getAnswersForQuestionRound = (params: {
@@ -302,7 +303,7 @@ export const judgeBuzzerAnswer = (params: {
 export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
 
-export const submitTeamBattleRevealVote = (params: { gameSessionId: string; playerId: string; selectedBlocks: number[] }) =>
+export const submitTeamBattleRevealVote = (params: { gameSessionId: string; playerId: string; selectedBlocks: number[]; revealBlockCount?: number }) =>
   rpc<GameSession>("submitTeamBattleRevealVote", params);
 
 export const submitTeamBattleGuessVote = (params: { gameSessionId: string; playerId: string; vote: TeamBattleGuessVote }) =>

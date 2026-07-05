@@ -234,6 +234,7 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     teamMemberNames,
     activeTeam,
     phase,
+    revealBlockCount: normalizeRevealBlockCount(record.revealBlockCount),
     revealLimit: Math.max(1, Math.min(10, Math.floor(Number(record.revealLimit) || 1))),
     turnNumber: Math.max(1, Math.floor(Number(record.turnNumber) || 1)),
     voteDeadlineAt: typeof record.voteDeadlineAt === "string" ? record.voteDeadlineAt : null,
@@ -1075,6 +1076,7 @@ function isUniqueViolation(error: { code?: string } | null) {
 }
 
 const REVEAL_BLOCK_COUNT = 45;
+const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 15;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
@@ -1082,6 +1084,18 @@ const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+
+function normalizeRevealBlockCount(value: unknown) {
+  return Number(value) === PORTRAIT_REVEAL_BLOCK_COUNT ? PORTRAIT_REVEAL_BLOCK_COUNT : REVEAL_BLOCK_COUNT;
+}
+
+function getVisibleRevealedBlockCount(blocks: number[], revealBlockCount: number) {
+  return blocks.filter((block) => block >= 0 && block < revealBlockCount).length;
+}
+
+function getRevealBlocks(revealBlockCount: number) {
+  return Array.from({ length: revealBlockCount }, (_, index) => index);
+}
 
 export type QuestionImportItem = {
   imageUrl: string;
@@ -2185,6 +2199,7 @@ export async function confirmRevealBlocks(params: {
   gameSessionId: string;
   presenterPlayerId: string;
   selectedBlocks: number[];
+  revealBlockCount?: number;
 }) {
   assertD1Env();
 
@@ -2221,6 +2236,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   const revealedBlocks = toGameSession(currentGameSession).revealedBlocks;
+  const revealBlockCount = normalizeRevealBlockCount(params.revealBlockCount);
   const selectedBlocks = params.selectedBlocks.filter(
     (block) => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT,
   );
@@ -2233,7 +2249,8 @@ export async function confirmRevealBlocks(params: {
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
-      revealed_blocks: nextBlocks,
+      revealed_blocks:
+        getVisibleRevealedBlockCount(nextBlocks, revealBlockCount) >= revealBlockCount ? ALL_REVEALED_BLOCKS : nextBlocks,
       round_started_at: new Date().toISOString(),
     })
     .eq("id", params.gameSessionId)
@@ -3781,6 +3798,7 @@ export async function submitTeamBattleRevealVote(params: {
   gameSessionId: string;
   playerId: string;
   selectedBlocks: number[];
+  revealBlockCount?: number;
 }) {
   assertD1Env();
 
@@ -3801,6 +3819,7 @@ export async function submitTeamBattleRevealVote(params: {
 
   const session = assertTeamBattleSession(currentGameSession);
   const state = session.teamBattleState!;
+  const revealBlockCount = normalizeRevealBlockCount(params.revealBlockCount ?? state.revealBlockCount);
 
   await assertGamePlayerInRoom(session.roomId, params.playerId);
 
@@ -3809,10 +3828,10 @@ export async function submitTeamBattleRevealVote(params: {
   }
 
   const revealedSet = new Set(session.revealedBlocks);
-  const availableCount = REVEAL_BLOCK_COUNT - revealedSet.size;
+  const availableCount = revealBlockCount - getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount);
   const requiredCount = Math.min(state.revealLimit, availableCount);
   const selectedBlocks = Array.from(
-    new Set(params.selectedBlocks.filter((block) => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT && !revealedSet.has(block))),
+    new Set(params.selectedBlocks.filter((block) => Number.isInteger(block) && block >= 0 && block < revealBlockCount && !revealedSet.has(block))),
   ).sort((a, b) => a - b);
 
   if (selectedBlocks.length !== requiredCount) {
@@ -3826,6 +3845,7 @@ export async function submitTeamBattleRevealVote(params: {
   const nextState = withVoteDeadlineIfComplete(
     {
       ...state,
+      revealBlockCount,
       revealVotes,
       message: `${getTeamName(state.activeTeam)}正在投票选择 ${requiredCount} 个方块。`,
     },
@@ -3932,8 +3952,9 @@ export async function finalizeTeamBattleVote(params: {
   }
 
   if (state.phase === "REVEAL_VOTE") {
+    const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
     const revealedSet = new Set(session.revealedBlocks);
-    const availableBlocks = ALL_REVEALED_BLOCKS.filter((block) => !revealedSet.has(block));
+    const availableBlocks = getRevealBlocks(revealBlockCount).filter((block) => !revealedSet.has(block));
     const revealCount = Math.min(state.revealLimit, availableBlocks.length);
     const voteCounts = new Map(availableBlocks.map((block) => [block, 0]));
 
@@ -4014,8 +4035,9 @@ export async function finalizeTeamBattleVote(params: {
       : "";
 
   if (winningOption.vote.type === "skip") {
+    const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
     const nextTeam = getOpposingTeam(state.activeTeam);
-    const nextPhase = session.revealedBlocks.length >= REVEAL_BLOCK_COUNT ? "GUESS_VOTE" : "REVEAL_VOTE";
+    const nextPhase = getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount) >= revealBlockCount ? "GUESS_VOTE" : "REVEAL_VOTE";
     const nextState: TeamBattleState = {
       ...state,
       activeTeam: nextTeam,
@@ -4095,13 +4117,14 @@ export async function judgeTeamBattleGuess(params: {
   }
 
   if (!params.isCorrect) {
+    const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
     const opposingTeam = getOpposingTeam(state.pendingGuess.team);
     const nextTeam = getTeamMembers(state, opposingTeam).length > 0 ? opposingTeam : state.pendingGuess.team;
     if (getTeamMembers(state, nextTeam).length === 0) {
       throw new Error("红蓝对抗判定失败：没有可继续行动的队伍，请取消本局。");
     }
 
-    const nextPhase = session.revealedBlocks.length >= REVEAL_BLOCK_COUNT ? "GUESS_VOTE" : "REVEAL_VOTE";
+    const nextPhase = getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount) >= revealBlockCount ? "GUESS_VOTE" : "REVEAL_VOTE";
     const nextState: TeamBattleState = {
       ...state,
       activeTeam: nextTeam,

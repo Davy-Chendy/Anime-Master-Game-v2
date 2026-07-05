@@ -25,6 +25,7 @@ export type TeamBattleState = {
   teamMemberNames?: Record<string, string>;
   activeTeam: TeamBattleTeam;
   phase: TeamBattlePhase;
+  revealBlockCount?: number;
   revealLimit: number;
   turnNumber: number;
   voteDeadlineAt?: string | null;
