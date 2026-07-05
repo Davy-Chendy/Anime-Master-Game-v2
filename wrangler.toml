@@ -27,6 +27,7 @@ binding = "IMAGES"
 [vars]
 ALLOWED_ORIGIN = "https://anipeek.animaster.dpdns.org"
 R2_IMAGE_PREFIX = "question-images"
+R2_PUBLIC_BASE_URL = "https://assets.animaster.dpdns.org"
 R2_EXISTING_IMAGE_LIMIT = "50"
 R2_IMAGE_STORAGE_LIMIT_BYTES = "10737418240"
 REMOTE_UPLOAD_IMAGE_MAX_SIZE = "1600"
