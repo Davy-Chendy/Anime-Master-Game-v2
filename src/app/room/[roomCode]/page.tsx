@@ -187,8 +187,8 @@ function isRoomDissolvedDelta(delta: RealtimeDelta): delta is Extract<RealtimeDe
 function getResultRankStyles(rank: number) {
   if (rank === 1) {
     return {
-      row: "bg-amber-50/70",
-      badge: "bg-amber-400 text-amber-950 ring-amber-300",
+      row: "bg-amber-50/80",
+      badge: "bg-gradient-to-br from-yellow-100 via-amber-400 to-yellow-700 text-amber-950 ring-amber-400",
     };
   }
 
@@ -201,8 +201,8 @@ function getResultRankStyles(rank: number) {
 
   if (rank === 3) {
     return {
-      row: "bg-orange-50/60",
-      badge: "bg-orange-700 text-white ring-orange-300",
+      row: "bg-orange-50/70",
+      badge: "bg-gradient-to-br from-orange-200 via-orange-700 to-stone-700 text-white ring-orange-400",
     };
   }
 
