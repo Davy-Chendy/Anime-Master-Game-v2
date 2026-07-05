@@ -3,12 +3,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/Button";
-import { bindGameSessionRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
+import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
   cancelForfeitAnswer,
   confirmRevealBlocks,
-  finalizeTeamBattleVote,
   getGameBootstrapSnapshot,
   getQuestionSetById,
   getRoundSnapshot,
@@ -384,7 +383,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [isJudgingBuzzer, setIsJudgingBuzzer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
   const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
-  const [isFinalizingTeamBattle, setIsFinalizingTeamBattle] = useState(false);
   const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
@@ -411,6 +409,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
+  const roundSnapshotFetchRef = useRef<{ gameSessionId: string; promise: Promise<RoundSnapshot> } | null>(null);
+  const isBootstrapLoadingRef = useRef(false);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
     playerImageCanvasRef.current = canvas;
@@ -461,11 +461,60 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     return Math.max(0, getEstimatedServerNowMs() - roundStartedAtMs);
   }
 
+  function getGameSessionPosition(gameSession: GameSession) {
+    return {
+      questionIndex: gameSession.currentQuestionIndex,
+      revealRound: gameSession.currentRevealRound,
+      roundStartedAtMs: gameSession.roundStartedAt ? new Date(gameSession.roundStartedAt).getTime() : null,
+      serverNowMs: gameSession.serverNow ? new Date(gameSession.serverNow).getTime() : null,
+    };
+  }
+
+  function isStaleGameSession(nextGameSession: GameSession, currentGameSession: GameSession | null) {
+    if (!currentGameSession || nextGameSession.id !== currentGameSession.id) {
+      return false;
+    }
+
+    const next = getGameSessionPosition(nextGameSession);
+    const current = getGameSessionPosition(currentGameSession);
+
+    if (next.questionIndex !== current.questionIndex) {
+      return next.questionIndex < current.questionIndex;
+    }
+
+    if (next.revealRound !== current.revealRound) {
+      return next.revealRound < current.revealRound;
+    }
+
+    if (
+      next.roundStartedAtMs != null &&
+      current.roundStartedAtMs != null &&
+      Number.isFinite(next.roundStartedAtMs) &&
+      Number.isFinite(current.roundStartedAtMs) &&
+      next.roundStartedAtMs !== current.roundStartedAtMs
+    ) {
+      return next.roundStartedAtMs < current.roundStartedAtMs;
+    }
+
+    return (
+      next.serverNowMs != null &&
+      current.serverNowMs != null &&
+      Number.isFinite(next.serverNowMs) &&
+      Number.isFinite(current.serverNowMs) &&
+      next.serverNowMs < current.serverNowMs
+    );
+  }
+
   function applyGameSession(nextGameSession: GameSession, options: { syncClock?: boolean } = {}) {
+    if (isStaleGameSession(nextGameSession, gameSessionRef.current)) {
+      return false;
+    }
+
     const shouldSyncClock = options.syncClock ?? true;
     if (shouldSyncClock) {
       syncServerClock(nextGameSession);
     }
+    gameSessionRef.current = nextGameSession;
     setGameSession(nextGameSession);
     const nowMs =
       shouldSyncClock || serverClockRef.current ? getEstimatedServerNowMs() : new Date(nextGameSession.serverNow ?? "").getTime();
@@ -476,6 +525,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         Number.isFinite(nowMs) ? nowMs : Date.now(),
       ),
     );
+    return true;
   }
 
   function clearRoundAnswerState() {
@@ -494,7 +544,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       currentGameSession.currentRevealRound !== nextGameSession.currentRevealRound ||
       (!currentGameSession.roundStartedAt && Boolean(nextGameSession.roundStartedAt));
 
-    applyGameSession(nextGameSession, { syncClock: !serverClockRef.current });
+    const didApply = applyGameSession(nextGameSession, { syncClock: !serverClockRef.current });
+    if (!didApply) {
+      return;
+    }
 
     if (shouldClearRoundAnswers) {
       clearRoundAnswerState();
@@ -504,7 +557,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const applyRoundSnapshot = useCallback(
     (snapshot: RoundSnapshot) => {
       const targetGameSession = snapshot.gameSession;
-      applyGameSession(targetGameSession);
+      const didApply = applyGameSession(targetGameSession);
+      if (!didApply) {
+        return;
+      }
       setScores(snapshot.scores);
       setQuestionResults(snapshot.questionResults);
 
@@ -566,7 +622,21 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       return;
     }
 
-    getRoundSnapshot(room.currentGameId)
+    const currentFetch = roundSnapshotFetchRef.current;
+    const snapshotPromise =
+      currentFetch?.gameSessionId === room.currentGameId
+        ? currentFetch.promise
+        : getRoundSnapshot(room.currentGameId).finally(() => {
+            if (roundSnapshotFetchRef.current?.gameSessionId === room.currentGameId) {
+              roundSnapshotFetchRef.current = null;
+            }
+          });
+
+    if (!currentFetch || currentFetch.gameSessionId !== room.currentGameId) {
+      roundSnapshotFetchRef.current = { gameSessionId: room.currentGameId, promise: snapshotPromise };
+    }
+
+    snapshotPromise
       .then((snapshot) => {
         if (snapshot.gameSession.id !== room.currentGameId) {
           return;
@@ -635,12 +705,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
   useEffect(() => {
     let isMounted = true;
+    let unbindGameSessionTopic: () => void = () => undefined;
 
     async function loadGame() {
-      if (!room.currentGameId) {
+      if (!room.id || !room.currentGameId) {
         return;
       }
 
+      unbindGameSessionTopic = bindGameSessionRealtimeTopic(room.currentGameId, `room:${room.id}`);
+      ensureRealtimeTopic(`room:${room.id}`);
+      isBootstrapLoadingRef.current = true;
       setIsLoading(true);
       try {
         const bootstrapSnapshot = await getGameBootstrapSnapshot(room.currentGameId);
@@ -656,6 +730,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           onError(error instanceof Error ? error.message : "加载游戏失败");
         }
       } finally {
+        isBootstrapLoadingRef.current = false;
         if (isMounted) {
           setIsLoading(false);
         }
@@ -666,13 +741,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
     return () => {
       isMounted = false;
+      unbindGameSessionTopic();
     };
-  }, [applyRoundSnapshot, onError, room.currentGameId]);
+  }, [applyRoundSnapshot, onError, room.currentGameId, room.id]);
 
   useEffect(() => {
     if (!room.id || !room.currentGameId) {
       return;
     }
+
+    let hasOpenedRealtime = false;
 
     return subscribeRealtimeTopic(
       `room:${room.id}`,
@@ -798,7 +876,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           });
         }
       },
-      { onOpen: catchUpRoundSnapshot },
+      {
+        onOpen: () => {
+          if (!hasOpenedRealtime) {
+            hasOpenedRealtime = true;
+            return;
+          }
+
+          if (!isBootstrapLoadingRef.current) {
+            catchUpRoundSnapshot();
+          }
+        },
+      },
     );
   }, [
     applyRoundSnapshot,
@@ -812,14 +901,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     room.id,
     showAnswerBubble,
   ]);
-
-  useEffect(() => {
-    if (!room.id || !room.currentGameId) {
-      return;
-    }
-
-    return bindGameSessionRealtimeTopic(room.currentGameId, `room:${room.id}`);
-  }, [room.currentGameId, room.id]);
 
   useEffect(() => {
     setAnswerBubbles({});
@@ -1526,31 +1607,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       setLastAutoLabelKey(autoLabelKey);
     }
   }, [canAddQuestionLabel, gameSession, isLabelModalOpen, isLabelPromptDisabledForGame, lastAutoLabelKey]);
-
-  useEffect(() => {
-    if (!gameSession || !teamBattleState?.voteDeadlineAt || isFinalizingTeamBattle) {
-      return;
-    }
-
-    const delayMs = Math.max(0, new Date(teamBattleState.voteDeadlineAt).getTime() - Date.now());
-    const timer = window.setTimeout(() => {
-      setIsFinalizingTeamBattle(true);
-      finalizeTeamBattleVote({ gameSessionId: gameSession.id })
-        .then(async (finalized) => {
-          applyRoundSnapshotFromResult(finalized) || applyGameSession(finalized.gameSession);
-          setSelectedBlocks([]);
-          setTeamSelectedBlocks([]);
-        })
-        .catch((error) => {
-          onError(error instanceof Error ? error.message : "结算团队投票失败");
-        })
-        .finally(() => {
-          setIsFinalizingTeamBattle(false);
-        });
-    }, delayMs + 80);
-
-    return () => window.clearTimeout(timer);
-  }, [applyRoundSnapshotFromResult, gameSession, isFinalizingTeamBattle, onError, teamBattleState?.voteDeadlineAt]);
 
   useEffect(() => {
     if (!teamBattleState?.voteDeadlineAt) {

@@ -7,6 +7,7 @@ import type {
   DbRoom,
   GameBootstrapSnapshot,
   GameMode,
+  GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
   Player,
@@ -249,6 +250,9 @@ export const getRoundSnapshot = (gameSessionId: string) => rpc<RoundSnapshot>("g
 
 export const getGameBootstrapSnapshot = (gameSessionId: string) =>
   rpc<GameBootstrapSnapshot>("getGameBootstrapSnapshot", gameSessionId);
+
+export const getGameResultSnapshot = (gameSessionId: string) =>
+  rpc<GameResultSnapshot>("getGameResultSnapshot", gameSessionId);
 
 export const getPlayerScores = (gameSessionId: string) => rpc<PlayerScore[]>("getPlayerScores", gameSessionId);
 

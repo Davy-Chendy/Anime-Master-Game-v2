@@ -16,6 +16,7 @@ import type {
   GameSession,
   GameMode,
   GameBootstrapSnapshot,
+  GameResultSnapshot,
   LeaderboardEntry,
   Player,
   PlayerRole,
@@ -2787,6 +2788,28 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
       ...entry,
       rank: index + 1,
     }));
+}
+
+export async function getGameResultSnapshot(gameSessionId: string): Promise<GameResultSnapshot> {
+  assertD1Env();
+
+  const gameSession = await getGameSessionById(gameSessionId);
+  if (!gameSession) {
+    throw new Error("加载结算快照失败：游戏不存在。");
+  }
+
+  const [leaderboard, questionSet, questionResults] = await Promise.all([
+    getLeaderboardForGameSession(gameSession.id),
+    getQuestionSetById(gameSession.questionSetId),
+    getQuestionResultsForGameSession(gameSession.id),
+  ]);
+
+  return {
+    gameSession,
+    leaderboard,
+    questionSet,
+    questionResults,
+  };
 }
 
 export async function publishQuestionSetToCommunity(params: {

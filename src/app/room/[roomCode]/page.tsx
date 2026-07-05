@@ -14,11 +14,8 @@ import {
   cancelCurrentRound,
   cancelPresenterSetup,
   dissolveRoom,
-  getGameSessionById,
-  getLeaderboardForGameSession,
+  getGameResultSnapshot,
   getRoomWithPlayers,
-  getQuestionSetById,
-  getQuestionResultsForGameSession,
   getQuestionSetRatingProgress,
   joinRoom,
   kickPlayerFromRoom,
@@ -941,18 +938,13 @@ function GameResultPanel({
 
       setIsLoadingLeaderboard(true);
       try {
-        const [nextLeaderboard, loadedGameSession] = await Promise.all([
-          getLeaderboardForGameSession(currentGameId),
-          getGameSessionById(currentGameId),
-        ]);
-        const loadedQuestionSet = loadedGameSession ? await getQuestionSetById(loadedGameSession.questionSetId) : null;
-        const loadedQuestionResults = loadedGameSession ? await getQuestionResultsForGameSession(loadedGameSession.id) : [];
+        const snapshot = await getGameResultSnapshot(currentGameId);
 
         if (isMounted) {
-          setLeaderboard(nextLeaderboard);
-          setGameSession(loadedGameSession);
-          setQuestionSet(loadedQuestionSet);
-          setQuestionResults(loadedQuestionResults);
+          setLeaderboard(snapshot.leaderboard);
+          setGameSession(snapshot.gameSession);
+          setQuestionSet(snapshot.questionSet);
+          setQuestionResults(snapshot.questionResults);
         }
       } catch (caughtError) {
         if (isMounted) {
@@ -1141,6 +1133,63 @@ function GameResultPanel({
 
   return (
     <div className="space-y-5">
+      <div className="grid gap-5 lg:grid-cols-2">
+        <Panel title="题库评分">
+          {canRate ? (
+            <>
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p className="text-3xl font-bold text-slate-950">{Number(questionSet?.ratingAvg ?? 0).toFixed(1)}</p>
+                  <p className="mt-1 text-sm text-[var(--muted)]">{questionSet?.ratingCount ?? 0} 人评分</p>
+                </div>
+                <p className="text-sm font-semibold text-slate-950">
+                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? playerIds.length} 已完成
+                </p>
+              </div>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${ratingPercent}%` }} />
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <select
+                  className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
+                  value={ratingValue}
+                  onChange={(event) => setRatingValue(Number(event.target.value))}
+                >
+                  {[1, 2, 3, 4, 5].map((rating) => (
+                    <option key={rating} value={rating}>
+                      {rating} 星
+                    </option>
+                  ))}
+                </select>
+                <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
+                  {isRating ? "提交中…" : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm leading-6 text-[var(--muted)]">
+              {questionSet?.isPublic ? "观战者不参与本局题库评分" : "本局题库未发布到社区，暂不开放评分"}
+            </p>
+          )}
+        </Panel>
+
+        <Panel title="操作">
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+            <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
+            </p>
+          </div>
+          {isHost ? (
+            <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
+              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
+            </Button>
+          ) : (
+            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
+          )}
+        </Panel>
+      </div>
+
       <Panel
         title="本局排行榜"
         action={<span className="text-sm font-medium text-[var(--muted)]">出题人：{presenterName}</span>}
@@ -1295,63 +1344,6 @@ function GameResultPanel({
           </div>
         )}
       </Panel>
-
-      <div className="grid gap-5 lg:grid-cols-2">
-        <Panel title="题库评分">
-          {canRate ? (
-            <>
-              <div className="flex flex-wrap items-end justify-between gap-3">
-                <div>
-                  <p className="text-3xl font-bold text-slate-950">{Number(questionSet?.ratingAvg ?? 0).toFixed(1)}</p>
-                  <p className="mt-1 text-sm text-[var(--muted)]">{questionSet?.ratingCount ?? 0} 人评分</p>
-                </div>
-                <p className="text-sm font-semibold text-slate-950">
-                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? playerIds.length} 已完成
-                </p>
-              </div>
-              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${ratingPercent}%` }} />
-              </div>
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                <select
-                  className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
-                  value={ratingValue}
-                  onChange={(event) => setRatingValue(Number(event.target.value))}
-                >
-                  {[1, 2, 3, 4, 5].map((rating) => (
-                    <option key={rating} value={rating}>
-                      {rating} 星
-                    </option>
-                  ))}
-                </select>
-                <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
-                  {isRating ? "提交中…" : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
-                </Button>
-              </div>
-            </>
-          ) : (
-            <p className="text-sm leading-6 text-[var(--muted)]">
-              {questionSet?.isPublic ? "观战者不参与本局题库评分" : "本局题库未发布到社区，暂不开放评分"}
-            </p>
-          )}
-        </Panel>
-
-        <Panel title="操作">
-          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-            <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
-            <p className="mt-1 text-sm text-[var(--muted)]">
-              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
-            </p>
-          </div>
-          {isHost ? (
-            <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
-            </Button>
-          ) : (
-            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
-          )}
-        </Panel>
-      </div>
     </div>
   );
 }
@@ -1512,6 +1504,18 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         return;
       }
 
+      const pushedUpdatedAtMs = pushedRoom.updatedAt ? new Date(pushedRoom.updatedAt).getTime() : null;
+      const activeUpdatedAtMs = activeRoom.updatedAt ? new Date(activeRoom.updatedAt).getTime() : null;
+      if (
+        pushedUpdatedAtMs != null &&
+        activeUpdatedAtMs != null &&
+        Number.isFinite(pushedUpdatedAtMs) &&
+        Number.isFinite(activeUpdatedAtMs) &&
+        pushedUpdatedAtMs < activeUpdatedAtMs
+      ) {
+        return;
+      }
+
       const wasRoomMember = activeRoom.players.some((player) => player.id === playerId);
       if (wasRoomMember && pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
         markPlayerRemoved();
@@ -1529,7 +1533,20 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       );
     }
 
+    let refreshPromise: Promise<void> | null = null;
+
     async function refreshLatestRoom() {
+      if (refreshPromise) {
+        return refreshPromise;
+      }
+
+      refreshPromise = doRefreshLatestRoom().finally(() => {
+        refreshPromise = null;
+      });
+      return refreshPromise;
+    }
+
+    async function doRefreshLatestRoom() {
       try {
         const latestRoom = await getRoomWithPlayers(roomCode);
 
@@ -1547,6 +1564,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         // Realtime remains the primary path; this catch-up read is best effort.
       }
     }
+
+    let hasOpenedRealtime = false;
 
     const unsubscribe = subscribeRealtimeTopic(
       `room:${room.id}`,
@@ -1566,19 +1585,18 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       },
       {
         onOpen: () => {
+          if (!hasOpenedRealtime) {
+            hasOpenedRealtime = true;
+            return;
+          }
+
           void refreshLatestRoom();
         },
       },
     );
 
-    void refreshLatestRoom();
-    const catchUpTimer = window.setTimeout(() => {
-      void refreshLatestRoom();
-    }, 750);
-
     return () => {
       isActive = false;
-      window.clearTimeout(catchUpTimer);
       unsubscribe();
     };
   }, [playerId, room?.id, roomCode]);

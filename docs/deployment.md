@@ -22,6 +22,7 @@ https://game.example.com/api/*  -> Worker API 和 WebSocket
 
 - [本地开发](#本地开发)
 - [Cloudflare 部署](#cloudflare-部署)
+- [Requests 与实时通信](#requests-与实时通信)
 - [更新部署](#更新部署)
 - [常见问题](#常见问题)
 
@@ -385,6 +386,27 @@ wss://game.example.com/api/realtime/room%3A.../ws
 ```
 
 如果仍然看到 `https://anime-master-game-api.<your-name>.workers.dev` 或 `wss://anime-master-game-api.<your-name>.workers.dev`，说明 Pages 还在使用旧的 `NEXT_PUBLIC_API_BASE_URL`，需要删除该环境变量并重新部署 Pages。
+
+## Requests 与实时通信
+
+Cloudflare 的 HTTP `Requests` 是这个项目需要重点控制的指标。游戏进行中不要把“刷新一下状态”当成免费操作；频繁的 `/api/rpc` 会很快累积请求数。
+
+开发新功能时遵循这些规则：
+
+- 游戏中已经知道 `roomId` 或 `gameSessionId` 的读写操作，优先复用 WebSocket action 通道。
+- 新增 mutation 时，确认是否应该加入 `src/lib/cloudflareClient.ts` 的 `MUTATION_NAMES`。
+- 新增游戏中读请求时，确认是否应该加入 `WS_QUERY_NAMES`，让它在已有实时连接上执行。
+- 保留 HTTP `/api/rpc` 用于进入房间前的 bootstrap、按房间号查询、加入房间、图片上传/导入等不适合绑定到现有 room topic 的流程。
+- mutation 不能静默 HTTP 重试，避免重复提交；read-only query 只有 WebSocket transport 失败时才允许 HTTP fallback。
+- 不要引入轮询。断线重连后如需补偿同步，优先做一次 snapshot catch-up，而不是定时拉取。
+- 上线后用 Workers Observability 里的结构化 `game_rpc` 日志检查 `transport` 和 `name`，确认高频 action 是否走了 WebSocket。
+
+排查 request 增长时，先按这个顺序看来源：
+
+1. `/api/rpc` 的 action 分布，特别是 `getRoundSnapshot`、`getRoomWithPlayers` 这类状态读取。
+2. WebSocket 建连次数，确认是否有异常重连。
+3. R2 图片请求。图片通常不是主要来源，但如果一局题量变大或图片没有缓存，也需要单独看。
+4. Durable Object alarms 和 WebSocket message 属于 Observability event/DO 用量口径，不要和 HTTP `Requests` 混在一起分析。
 
 ## 更新部署
 

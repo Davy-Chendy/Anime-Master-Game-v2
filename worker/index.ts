@@ -67,6 +67,14 @@ type AutoForfeitScheduleMessage = {
   roundSnapshot: RoundSnapshot | null;
 };
 
+type TeamBattleVoteAlarmState = {
+  key: string;
+  gameSessionId: string;
+  topic: string;
+  runAtMs: number;
+  attempts?: number;
+};
+
 const ACTION_RESULT_TTL_MS = 10_000;
 const ROUND_SNAPSHOT_CACHE_TTL_MS = 1_000;
 const RPC_BODY_MAX_BYTES = 64 * 1024;
@@ -77,6 +85,10 @@ const AUTO_FORFEIT_ALARM_STORAGE_KEY = "auto-forfeit-alarm";
 const AUTO_FORFEIT_COMPLETED_KEY_STORAGE_KEY = "auto-forfeit-completed-key";
 const AUTO_FORFEIT_ALARM_RETRY_DELAY_MS = 1000;
 const AUTO_FORFEIT_ALARM_MAX_ATTEMPTS = 3;
+const TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY = "team-battle-vote-alarm";
+const TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY = "team-battle-vote-completed-key";
+const TEAM_BATTLE_VOTE_ALARM_RETRY_DELAY_MS = 1000;
+const TEAM_BATTLE_VOTE_ALARM_MAX_ATTEMPTS = 3;
 const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
 const R2_LIST_PAGE_LIMIT = 1000;
@@ -148,6 +160,7 @@ const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "cancelForfeitAnswer",
   "judgeBuzzerAnswer",
   "settleBuzzerRound",
+  "finalizeTeamBattleVote",
   "judgeTeamBattleGuess",
   "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance",
@@ -496,6 +509,37 @@ function getAutoForfeitRunAtMs(gameSession: GameSession) {
   return roundStartedAtMs + gameSession.roundSeconds * 1000 + ROUND_DEADLINE_GRACE_MS;
 }
 
+function getTeamBattleVoteAlarmKey(gameSession: GameSession) {
+  const state = gameSession.teamBattleState;
+  if (
+    gameSession.status !== "PLAYING" ||
+    gameSession.gameMode !== "TEAM_BATTLE" ||
+    !state?.voteDeadlineAt ||
+    (state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE")
+  ) {
+    return null;
+  }
+
+  return [
+    gameSession.id,
+    gameSession.currentQuestionIndex,
+    gameSession.currentRevealRound,
+    state.turnNumber,
+    state.phase,
+    state.voteDeadlineAt,
+  ].join(":");
+}
+
+function getTeamBattleVoteRunAtMs(gameSession: GameSession) {
+  const deadlineAt = gameSession.teamBattleState?.voteDeadlineAt;
+  if (!deadlineAt) {
+    return null;
+  }
+
+  const runAtMs = new Date(deadlineAt).getTime();
+  return Number.isFinite(runAtMs) ? runAtMs : null;
+}
+
 function getTimeMs(value: string | null | undefined) {
   if (!value) {
     return null;
@@ -569,6 +613,52 @@ function isStaleAutoForfeitSchedule(gameSession: GameSession, currentAlarm: Auto
   }
 
   return compareRoundPosition(gameSession, currentPosition) < 0;
+}
+
+function getTeamBattleVoteAlarmPosition(alarm: TeamBattleVoteAlarmState) {
+  const parts = alarm.key.split(":");
+  const questionIndex = Number(parts[1]);
+  const revealRound = Number(parts[2]);
+  const turnNumber = Number(parts[3]);
+  const deadlineAt = parts.slice(5).join(":");
+  if (!Number.isFinite(questionIndex) || !Number.isFinite(revealRound) || !Number.isFinite(turnNumber) || !deadlineAt) {
+    return null;
+  }
+
+  return {
+    questionIndex,
+    revealRound,
+    turnNumber,
+    deadlineAt,
+  };
+}
+
+function isStaleTeamBattleVoteSchedule(gameSession: GameSession, currentAlarm: TeamBattleVoteAlarmState | undefined) {
+  if (!currentAlarm || currentAlarm.gameSessionId !== gameSession.id) {
+    return false;
+  }
+
+  const currentPosition = getTeamBattleVoteAlarmPosition(currentAlarm);
+  const state = gameSession.teamBattleState;
+  if (!currentPosition || !state) {
+    return false;
+  }
+
+  if (gameSession.currentQuestionIndex !== currentPosition.questionIndex) {
+    return gameSession.currentQuestionIndex < currentPosition.questionIndex;
+  }
+
+  if (gameSession.currentRevealRound !== currentPosition.revealRound) {
+    return gameSession.currentRevealRound < currentPosition.revealRound;
+  }
+
+  if (state.turnNumber !== currentPosition.turnNumber) {
+    return state.turnNumber < currentPosition.turnNumber;
+  }
+
+  const nextDeadlineMs = getTimeMs(state.voteDeadlineAt);
+  const currentDeadlineMs = getTimeMs(currentPosition.deadlineAt);
+  return nextDeadlineMs != null && currentDeadlineMs != null && nextDeadlineMs < currentDeadlineMs;
 }
 
 function getResultQuestionSet(result: unknown) {
@@ -1602,6 +1692,7 @@ async function handleR2ImagesList(request: Request, env: Env) {
 export class RoomDurableObject {
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
   private readonly roundSnapshotCache = new Map<string, { expiresAt: number; snapshot: RoundSnapshot }>();
+  private readonly roundSnapshotReadInflight = new Map<string, Promise<RoundSnapshot>>();
   private actionQueue: Promise<void> = Promise.resolve();
   private r2UploadQueue: Promise<void> = Promise.resolve();
   private nextActionCacheCleanupAt: number | null = null;
@@ -1720,12 +1811,153 @@ export class RoomDurableObject {
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const receivedAtMs = Date.now();
+    if (this.tryHandleWebSocketFastPath(socket, message)) {
+      return;
+    }
+    if (this.tryHandleWebSocketRoundSnapshotRead(socket, message)) {
+      return;
+    }
+
     const task = this.actionQueue.then(
       () => this.handleWebSocketAction(socket, message, receivedAtMs),
       () => this.handleWebSocketAction(socket, message, receivedAtMs),
     );
     this.actionQueue = task.catch(() => undefined);
     await task;
+  }
+
+  private tryHandleWebSocketFastPath(socket: WebSocket, message: string | ArrayBuffer) {
+    let payload: {
+      type?: string;
+      name?: string;
+      args?: unknown[];
+      clientActionId?: string;
+    };
+
+    try {
+      payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as typeof payload;
+    } catch {
+      return false;
+    }
+
+    if (payload.type === "ping") {
+      socket.send(JSON.stringify({ type: "pong" }));
+      return true;
+    }
+
+    const requestedSnapshotGameSessionId =
+      payload.type === "action" && payload.name === "getRoundSnapshot" && typeof payload.args?.[0] === "string"
+        ? payload.args[0]
+        : null;
+    if (!requestedSnapshotGameSessionId) {
+      return false;
+    }
+
+    const cachedRoundSnapshot = this.getCachedRoundSnapshot(requestedSnapshotGameSessionId);
+    if (!cachedRoundSnapshot) {
+      return false;
+    }
+
+    const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+    console.info(
+      JSON.stringify({
+        event: "round_snapshot_cache_fast_hit",
+        gameSessionId: requestedSnapshotGameSessionId,
+        topic: socketAttachment?.topic ?? null,
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: "action_result",
+        clientActionId: payload.clientActionId,
+        data: cachedRoundSnapshot,
+      }),
+    );
+    return true;
+  }
+
+  private tryHandleWebSocketRoundSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
+    let payload: {
+      type?: string;
+      name?: string;
+      args?: unknown[];
+      clientActionId?: string;
+    };
+
+    try {
+      payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as typeof payload;
+    } catch {
+      return false;
+    }
+
+    const gameSessionId =
+      payload.type === "action" && payload.name === "getRoundSnapshot" && typeof payload.args?.[0] === "string"
+        ? payload.args[0]
+        : null;
+    if (!gameSessionId) {
+      return false;
+    }
+
+    void this.handleRoundSnapshotRead(socket, gameSessionId, payload.clientActionId);
+    return true;
+  }
+
+  private async handleRoundSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
+    try {
+      const cachedRoundSnapshot = this.getCachedRoundSnapshot(gameSessionId);
+      if (cachedRoundSnapshot) {
+        socket.send(JSON.stringify({ type: "action_result", clientActionId, data: cachedRoundSnapshot }));
+        return;
+      }
+
+      let snapshotPromise = this.roundSnapshotReadInflight.get(gameSessionId);
+      if (!snapshotPromise) {
+        const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        snapshotPromise = this.actionQueue.then(
+          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
+          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
+        );
+        this.actionQueue = snapshotPromise.then(
+          () => undefined,
+          () => undefined,
+        );
+        this.roundSnapshotReadInflight.set(gameSessionId, snapshotPromise);
+        void snapshotPromise.then(
+          () => {
+            if (this.roundSnapshotReadInflight.get(gameSessionId) === snapshotPromise) {
+              this.roundSnapshotReadInflight.delete(gameSessionId);
+            }
+          },
+          () => {
+            if (this.roundSnapshotReadInflight.get(gameSessionId) === snapshotPromise) {
+              this.roundSnapshotReadInflight.delete(gameSessionId);
+            }
+          },
+        );
+      }
+
+      const snapshot = await snapshotPromise;
+      socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
+    } catch (error) {
+      socket.send(
+        JSON.stringify({
+          type: "action_result",
+          clientActionId,
+          error: toUserErrorMessage(error),
+        }),
+      );
+    }
+  }
+
+  private async loadRoundSnapshotForRead(gameSessionId: string, topic: string | null) {
+    const cachedRoundSnapshot = this.getCachedRoundSnapshot(gameSessionId);
+    if (cachedRoundSnapshot) {
+      return cachedRoundSnapshot;
+    }
+
+    const snapshot = await runWithGameDatabase(this.env, () => gameService.getRoundSnapshot(gameSessionId));
+    await this.tryUpdateAutoForfeitSchedule(snapshot, snapshot, topic, "round_snapshot_read");
+    return snapshot;
   }
 
   private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer, receivedAtMs = Date.now()): Promise<void> {
@@ -1859,6 +2091,7 @@ export class RoomDurableObject {
     this.nextActionCacheCleanupAt = this.cleanupRecentActions();
     this.nextRoundSnapshotCacheCleanupAt = this.cleanupRoundSnapshotCache();
     await this.runDueAutoForfeit();
+    await this.runDueTeamBattleVote();
     await this.scheduleNextAlarm();
   }
 
@@ -1939,11 +2172,19 @@ export class RoomDurableObject {
     return await this.state.storage.get<AutoForfeitAlarmState>(AUTO_FORFEIT_ALARM_STORAGE_KEY);
   }
 
+  private async getTeamBattleVoteAlarmState() {
+    return await this.state.storage.get<TeamBattleVoteAlarmState>(TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY);
+  }
+
   private async scheduleNextAlarm() {
     const autoForfeitAlarm = await this.getAutoForfeitAlarmState();
-    const nextTimes = [this.nextActionCacheCleanupAt, this.nextRoundSnapshotCacheCleanupAt, autoForfeitAlarm?.runAtMs ?? null].filter(
-      (time): time is number => typeof time === "number" && Number.isFinite(time),
-    );
+    const teamBattleVoteAlarm = await this.getTeamBattleVoteAlarmState();
+    const nextTimes = [
+      this.nextActionCacheCleanupAt,
+      this.nextRoundSnapshotCacheCleanupAt,
+      autoForfeitAlarm?.runAtMs ?? null,
+      teamBattleVoteAlarm?.runAtMs ?? null,
+    ].filter((time): time is number => typeof time === "number" && Number.isFinite(time));
 
     if (nextTimes.length === 0) {
       await this.state.storage.deleteAlarm();
@@ -1975,6 +2216,8 @@ export class RoomDurableObject {
     if (!gameSession) {
       return;
     }
+
+    await this.updateTeamBattleVoteSchedule(gameSession, topic);
 
     const key = getAutoForfeitKey(gameSession);
     const runAtMs = getAutoForfeitRunAtMs(gameSession);
@@ -2041,6 +2284,63 @@ export class RoomDurableObject {
     );
   }
 
+  private async updateTeamBattleVoteSchedule(gameSession: GameSession, topic: string | null) {
+    const key = getTeamBattleVoteAlarmKey(gameSession);
+    const runAtMs = getTeamBattleVoteRunAtMs(gameSession);
+    const completedKey = await this.state.storage.get<string>(TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY);
+
+    if (!key || !runAtMs || !topic || completedKey === key) {
+      const current = await this.getTeamBattleVoteAlarmState();
+      if (key != null && current?.key === key) {
+        await this.state.storage.delete(TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY);
+        await this.scheduleNextAlarm();
+        console.info(
+          JSON.stringify({
+            event: "team_battle_vote_alarm_cleared",
+            gameSessionId: gameSession.id,
+            key,
+            completed: completedKey === key,
+          }),
+        );
+      }
+      return;
+    }
+
+    const current = await this.getTeamBattleVoteAlarmState();
+    if (isStaleTeamBattleVoteSchedule(gameSession, current)) {
+      console.info(
+        JSON.stringify({
+          event: "team_battle_vote_stale_schedule_ignored",
+          gameSessionId: gameSession.id,
+          key,
+          currentKey: current?.key ?? null,
+        }),
+      );
+      return;
+    }
+
+    if (current?.key === key && current.runAtMs === runAtMs && current.topic === topic) {
+      return;
+    }
+
+    await this.state.storage.put(TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY, {
+      key,
+      gameSessionId: gameSession.id,
+      topic,
+      runAtMs,
+    } satisfies TeamBattleVoteAlarmState);
+    await this.scheduleNextAlarm();
+    console.info(
+      JSON.stringify({
+        event: "team_battle_vote_alarm_scheduled",
+        gameSessionId: gameSession.id,
+        key,
+        runAtMs,
+        delayMs: Math.max(0, runAtMs - Date.now()),
+      }),
+    );
+  }
+
   private async runDueAutoForfeit() {
     const alarm = await this.getAutoForfeitAlarmState();
     if (!alarm || Date.now() < alarm.runAtMs) {
@@ -2093,6 +2393,67 @@ export class RoomDurableObject {
       console.error(
         JSON.stringify({
           event: "auto_forfeit_alarm_failed",
+          gameSessionId: alarm.gameSessionId,
+          key: alarm.key,
+          attempts: (alarm.attempts ?? 0) + 1,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  }
+
+  private async runDueTeamBattleVote() {
+    const alarm = await this.getTeamBattleVoteAlarmState();
+    if (!alarm || Date.now() < alarm.runAtMs) {
+      return;
+    }
+
+    await this.state.storage.delete(TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY);
+
+    try {
+      const { responseResult, roundSnapshot, deltas } = await runWithGameDatabase(this.env, async () => {
+        const args = [{ gameSessionId: alarm.gameSessionId }];
+        logRpcInvocation({ transport: "websocket", name: "finalizeTeamBattleVote", isMutation: true, localTopic: alarm.topic });
+        const result = await callGameFunction("finalizeTeamBattleVote", args, Date.now());
+        const nextRoundSnapshot = await getRoundSnapshotForMutation("finalizeTeamBattleVote", result);
+        const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
+        const nextDeltas = buildRealtimeDeltas("finalizeTeamBattleVote", args, nextResponseResult, nextRoundSnapshot);
+
+        return {
+          responseResult: nextResponseResult,
+          roundSnapshot: nextRoundSnapshot,
+          deltas: nextDeltas,
+        };
+      });
+
+      await this.state.storage.put(TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY, alarm.key);
+      await this.tryUpdateAutoForfeitSchedule(responseResult, roundSnapshot, alarm.topic, "team_battle_vote_alarm");
+
+      if (deltas.length > 0) {
+        this.broadcast(
+          JSON.stringify({
+            type: "change",
+            name: "finalizeTeamBattleVote",
+            result: stripRoundSnapshotFromBroadcastResult(responseResult),
+            args: [{ gameSessionId: alarm.gameSessionId }],
+            topic: alarm.topic,
+            delta: deltas[0],
+            deltas,
+          } satisfies BroadcastMessage),
+        );
+      }
+    } catch (error) {
+      if ((alarm.attempts ?? 0) + 1 < TEAM_BATTLE_VOTE_ALARM_MAX_ATTEMPTS) {
+        await this.state.storage.put(TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY, {
+          ...alarm,
+          attempts: (alarm.attempts ?? 0) + 1,
+          runAtMs: Date.now() + TEAM_BATTLE_VOTE_ALARM_RETRY_DELAY_MS,
+        } satisfies TeamBattleVoteAlarmState);
+      }
+
+      console.error(
+        JSON.stringify({
+          event: "team_battle_vote_alarm_failed",
           gameSessionId: alarm.gameSessionId,
           key: alarm.key,
           attempts: (alarm.attempts ?? 0) + 1,

@@ -96,6 +96,7 @@ const WS_QUERY_NAMES = new Set([
   "getBuzzerAnswersForQuestion",
   "getBuzzerAnswersForQuestionRound",
   "getGameBootstrapSnapshot",
+  "getGameResultSnapshot",
   "getGameSessionById",
   "getLeaderboardForGameSession",
   "getPlayerScores",
@@ -107,6 +108,7 @@ const WS_QUERY_NAMES = new Set([
 const ROOM_ID_STRING_ARG_NAMES = new Set(["getPlayersByRoomId"]);
 const GAME_SESSION_ID_STRING_ARG_NAMES = new Set([
   "getGameBootstrapSnapshot",
+  "getGameResultSnapshot",
   "getGameSessionById",
   "getLeaderboardForGameSession",
   "getPlayerScores",
@@ -509,4 +511,12 @@ export function bindGameSessionRealtimeTopic(gameSessionId: string | null | unde
       gameSessionTopics.delete(gameSessionId);
     }
   };
+}
+
+export function ensureRealtimeTopic(topic: string | null | undefined) {
+  if (!topic) {
+    return;
+  }
+
+  ensureSocket(topic);
 }

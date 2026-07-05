@@ -214,6 +214,13 @@ export type GameBootstrapSnapshot = {
   roundSnapshot: RoundSnapshot;
 };
 
+export type GameResultSnapshot = {
+  gameSession: GameSession;
+  leaderboard: LeaderboardEntry[];
+  questionSet: QuestionSet | null;
+  questionResults: QuestionResult[];
+};
+
 export type RealtimeDelta =
   | {
       scope: "room";
