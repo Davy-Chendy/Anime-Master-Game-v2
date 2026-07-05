@@ -6,6 +6,7 @@ import { Button } from "@/components/Button";
 import { bindGameSessionRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
+  autoForfeitExpiredRound,
   cancelForfeitAnswer,
   confirmRevealBlocks,
   finalizeTeamBattleVote,
@@ -411,6 +412,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
+  const autoForfeitExpiredRoundKeyRef = useRef<string | null>(null);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
     playerImageCanvasRef.current = canvas;
@@ -1287,6 +1289,50 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     isPresenter && isTeamBattleMode && Boolean(teamBattleState) && Boolean(currentQuestion) && !isQuestionReviewing && !imageLoadFailed;
   const canPreviewSpectatorOriginal = isSpectator && Boolean(currentQuestion) && !imageLoadFailed;
   const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal || canPreviewSpectatorOriginal;
+
+  useEffect(() => {
+    if (
+      !gameSession ||
+      isTeamBattleMode ||
+      !gameSession.roundStartedAt ||
+      remainingSeconds > 0 ||
+      allActiveGuessersUsedRoundChance ||
+      hasFirstCorrectAnswer ||
+      areAllGuessersCorrect
+    ) {
+      return;
+    }
+
+    const autoForfeitKey = [
+      gameSession.id,
+      gameSession.currentQuestionIndex,
+      gameSession.currentRevealRound,
+      gameSession.roundStartedAt,
+    ].join(":");
+
+    if (autoForfeitExpiredRoundKeyRef.current === autoForfeitKey) {
+      return;
+    }
+
+    autoForfeitExpiredRoundKeyRef.current = autoForfeitKey;
+    autoForfeitExpiredRound({ gameSessionId: gameSession.id })
+      .then((result) => {
+        applyRoundSnapshotFromResult(result) || applyGameSession(result.gameSession);
+      })
+      .catch((error) => {
+        autoForfeitExpiredRoundKeyRef.current = null;
+        onError(error instanceof Error ? error.message : "自动放弃失败");
+      });
+  }, [
+    allActiveGuessersUsedRoundChance,
+    applyRoundSnapshotFromResult,
+    areAllGuessersCorrect,
+    gameSession,
+    hasFirstCorrectAnswer,
+    isTeamBattleMode,
+    onError,
+    remainingSeconds,
+  ]);
 
   useEffect(() => {
     if (!canTypeAnswer || !gameSession?.roundStartedAt) {
