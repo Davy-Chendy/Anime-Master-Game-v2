@@ -934,6 +934,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
+
+  useEffect(() => {
+    if (!isTeamBattleMode) {
+      return;
+    }
+
+    setTeamSelectedBlocks((currentBlocks) => {
+      const nextBlocks =
+        teamBattleState?.phase === "REVEAL_VOTE"
+          ? currentBlocks.filter((blockIndex) => !revealedBlockSet.has(blockIndex))
+          : [];
+
+      if (nextBlocks.length === currentBlocks.length && nextBlocks.every((blockIndex, index) => blockIndex === currentBlocks[index])) {
+        return currentBlocks;
+      }
+
+      return nextBlocks;
+    });
+  }, [isTeamBattleMode, revealedBlockSet, teamBattleState?.phase]);
+
   const gamePlayers = room.players.filter((player) => player.role !== "SPECTATOR");
   const activePlayerById = new Map(gamePlayers.map((player) => [player.id, player]));
   const fallbackGuesserIds = room.players
@@ -2297,7 +2317,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           >
             {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
               const isRevealed = revealedBlockSet.has(blockIndex);
-              const isSelected = teamSelectedBlocks.includes(blockIndex);
+              const isSelected =
+                teamBattleState?.phase === "REVEAL_VOTE" && !isRevealed && teamSelectedBlocks.includes(blockIndex);
               const voteCount = canSeeTeamBattleVotes ? teamBattleRevealVoteCounts[blockIndex] ?? 0 : 0;
               const canPickBlock =
                 teamBattleCanAct &&

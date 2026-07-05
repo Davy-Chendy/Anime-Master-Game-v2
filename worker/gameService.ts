@@ -351,7 +351,12 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
   };
 }
 
-async function resetTeamBattleStateForQuestion(state: TeamBattleState, roomId: string, presenterPlayerId: string): Promise<TeamBattleState> {
+async function resetTeamBattleStateForQuestion(
+  state: TeamBattleState,
+  roomId: string,
+  presenterPlayerId: string,
+  questionIndex: number,
+): Promise<TeamBattleState> {
   const players = await getDbPlayersByRoomId(roomId);
   const activeGuessers = players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId);
   const activeGuesserById = new Map(activeGuessers.map((player) => [player.id, player]));
@@ -383,11 +388,13 @@ async function resetTeamBattleStateForQuestion(state: TeamBattleState, roomId: s
       activeGuesserById.get(playerId)?.nickname.trim() || state.teamMemberNames?.[playerId] || "已离开玩家",
     ]),
   );
+  const activeTeam = getAvailableTeamBattleStartingTeam(teams, questionIndex);
+  const activeTeamName = getTeamName(activeTeam);
 
   return {
     teams,
     teamMemberNames,
-    activeTeam: "red",
+    activeTeam,
     phase: "REVEAL_VOTE",
     revealLimit: 1,
     turnNumber: state.turnNumber + 1,
@@ -397,13 +404,23 @@ async function resetTeamBattleStateForQuestion(state: TeamBattleState, roomId: s
     pendingGuess: null,
     teamScores: state.teamScores,
     message: newGuessers.length > 0
-      ? "进入下一张图，新加入玩家已分配队伍，红队先手选择要打开的方块。"
-      : "进入下一张图，红队先手选择要打开的方块。",
+      ? `进入下一张图，新加入玩家已分配队伍，${activeTeamName}先手选择要打开的方块。`
+      : `进入下一张图，${activeTeamName}先手选择要打开的方块。`,
   };
 }
 
 function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
   return team === "red" ? "blue" : "red";
+}
+
+function getTeamBattleStartingTeamForQuestion(questionIndex: number): TeamBattleTeam {
+  return questionIndex % 2 === 0 ? "red" : "blue";
+}
+
+function getAvailableTeamBattleStartingTeam(teams: Record<TeamBattleTeam, string[]>, questionIndex: number): TeamBattleTeam {
+  const preferredTeam = getTeamBattleStartingTeamForQuestion(questionIndex);
+
+  return teams[preferredTeam].length > 0 ? preferredTeam : getOpposingTeam(preferredTeam);
 }
 
 function getTeamName(team: TeamBattleTeam) {
@@ -4446,6 +4463,7 @@ export async function advanceReviewedQuestion(params: {
           currentSession.teamBattleState,
           currentGameSession.room_id,
           currentGameSession.presenter_player_id,
+          nextQuestionIndex,
         )
       : null;
 
@@ -4692,6 +4710,7 @@ export async function skipCurrentQuestion(params: {
           currentSession.teamBattleState,
           currentGameSession.room_id,
           currentGameSession.presenter_player_id,
+          nextQuestionIndex,
         )
       : null;
 
