@@ -33,6 +33,16 @@ type TopicState = {
   lastPongAt: number;
 };
 
+class WsActionError extends Error {
+  constructor(
+    public readonly kind: "server" | "transport",
+    message: string,
+  ) {
+    super(message);
+    this.name = "WsActionError";
+  }
+}
+
 const ACTION_TIMEOUT_MS = 4000;
 const LONG_ACTION_TIMEOUT_MS = 30000;
 const RECONNECT_BASE_DELAY_MS = 500;
@@ -78,6 +88,31 @@ const MUTATION_NAMES = new Set([
 
 const LONG_ACTION_NAMES = new Set(["createUploadedQuestionSet", "createQuestionSetFromUrlText"]);
 const HTTP_ONLY_ACTION_NAMES = new Set(["createQuestionSetFromUrlText"]);
+const WS_QUERY_NAMES = new Set([
+  "getAnswerForPlayerRound",
+  "getAnswersForQuestion",
+  "getAnswersForQuestionRound",
+  "getBuzzerAnswerForPlayerRound",
+  "getBuzzerAnswersForQuestion",
+  "getBuzzerAnswersForQuestionRound",
+  "getGameBootstrapSnapshot",
+  "getGameSessionById",
+  "getLeaderboardForGameSession",
+  "getPlayerScores",
+  "getPlayersByRoomId",
+  "getQuestionResultsForGameSession",
+  "getQuestionResultsForQuestion",
+  "getRoundSnapshot",
+]);
+const ROOM_ID_STRING_ARG_NAMES = new Set(["getPlayersByRoomId"]);
+const GAME_SESSION_ID_STRING_ARG_NAMES = new Set([
+  "getGameBootstrapSnapshot",
+  "getGameSessionById",
+  "getLeaderboardForGameSession",
+  "getPlayerScores",
+  "getQuestionResultsForGameSession",
+  "getRoundSnapshot",
+]);
 const topicStates = new Map<string, TopicState>();
 const gameSessionTopics = new Map<string, string>();
 
@@ -103,9 +138,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function inferActionTopic(name: string, args: unknown[]) {
   const first = args[0];
 
-  if (typeof first === "string" && (name.includes("Room") || name.includes("Presenter") || name.includes("Round"))) {
+  if (
+    typeof first === "string" &&
+    (name.includes("Room") || name.includes("Presenter") || name.includes("Round") || ROOM_ID_STRING_ARG_NAMES.has(name))
+  ) {
     const roomTopic = `${ROOM_TOPIC_PREFIX}${first}`;
     if (topicStates.has(roomTopic)) {
+      return roomTopic;
+    }
+  }
+
+  if (typeof first === "string" && GAME_SESSION_ID_STRING_ARG_NAMES.has(name)) {
+    const roomTopic = gameSessionTopics.get(first);
+    if (roomTopic && topicStates.has(roomTopic)) {
       return roomTopic;
     }
   }
@@ -159,6 +204,27 @@ function clearHeartbeat(state: TopicState) {
   if (state.heartbeatTimer !== null) {
     window.clearInterval(state.heartbeatTimer);
     state.heartbeatTimer = null;
+  }
+}
+
+function cleanupTopicStateIfIdle(topic: string, state: TopicState) {
+  if (state.listeners.size > 0 || state.pending.size > 0 || state.connectListeners.size > 0) {
+    return;
+  }
+
+  if (state.reconnectTimer !== null) {
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+  clearHeartbeat(state);
+  state.socket?.close(1000, "No listeners.");
+  state.socket = null;
+  topicStates.delete(topic);
+
+  for (const [gameSessionId, mappedTopic] of gameSessionTopics.entries()) {
+    if (mappedTopic === topic) {
+      gameSessionTopics.delete(gameSessionId);
+    }
   }
 }
 
@@ -263,8 +329,9 @@ function ensureSocket(topic: string) {
       if (pending) {
         window.clearTimeout(pending.timer);
         state.pending.delete(result.clientActionId ?? "");
+        cleanupTopicStateIfIdle(topic, state);
         if (result.error) {
-          pending.reject(new Error(result.error));
+          pending.reject(new WsActionError("server", result.error));
         } else {
           pending.resolve(result.data);
         }
@@ -286,11 +353,12 @@ function ensureSocket(topic: string) {
     clearHeartbeat(state);
     for (const pending of state.pending.values()) {
       window.clearTimeout(pending.timer);
-      pending.reject(new Error("实时连接已断开，本次操作没有完成。请重试。"));
+      pending.reject(new WsActionError("transport", "实时连接已断开，本次操作没有完成。请重试。"));
     }
     state.pending.clear();
     state.socket = null;
     state.reconnectAttempts += 1;
+    cleanupTopicStateIfIdle(topic, state);
     scheduleReconnect(topic, state);
   };
 
@@ -303,14 +371,14 @@ function waitForSocketOpen(topic: string, socket: WebSocket) {
   }
 
   if (socket.readyState !== WebSocket.CONNECTING) {
-    return Promise.reject(new Error("实时连接不可用，请稍后重试。"));
+    return Promise.reject(new WsActionError("transport", "实时连接不可用，请稍后重试。"));
   }
 
   return new Promise<WebSocket>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       socket.removeEventListener("open", handleOpen);
       socket.removeEventListener("close", handleClose);
-      reject(new Error("实时连接未就绪，请稍后重试。"));
+      reject(new WsActionError("transport", "实时连接未就绪，请稍后重试。"));
     }, ACTION_TIMEOUT_MS);
 
     function handleOpen() {
@@ -322,7 +390,7 @@ function waitForSocketOpen(topic: string, socket: WebSocket) {
     function handleClose() {
       window.clearTimeout(timer);
       socket.removeEventListener("open", handleOpen);
-      reject(new Error("实时连接已断开，请重试。"));
+      reject(new WsActionError("transport", "实时连接已断开，请重试。"));
     }
 
     socket.addEventListener("open", handleOpen, { once: true });
@@ -357,7 +425,8 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
   const promise = new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       state.pending.delete(clientActionId);
-      reject(new Error("实时操作响应超时，请检查网络后重试。"));
+      cleanupTopicStateIfIdle(topic, state);
+      reject(new WsActionError("transport", "实时操作响应超时，请检查网络后重试。"));
     }, timeoutMs);
 
     state.pending.set(clientActionId, {
@@ -374,18 +443,25 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
     if (pending) {
       window.clearTimeout(pending.timer);
       state.pending.delete(clientActionId);
+      cleanupTopicStateIfIdle(topic, state);
     }
-    throw new Error("实时操作发送失败，请检查网络后重试。");
+    throw new WsActionError("transport", "实时操作发送失败，请检查网络后重试。");
   }
 
   return promise;
 }
 
 export async function callGameRpc<T>(name: string, args: unknown[] = []) {
-  if (MUTATION_NAMES.has(name) && !HTTP_ONLY_ACTION_NAMES.has(name)) {
+  if ((MUTATION_NAMES.has(name) || WS_QUERY_NAMES.has(name)) && !HTTP_ONLY_ACTION_NAMES.has(name)) {
     const topic = inferActionTopic(name, args);
     if (topic) {
-      return await wsAction<T>(topic, name, args);
+      try {
+        return await wsAction<T>(topic, name, args);
+      } catch (error) {
+        if (MUTATION_NAMES.has(name) || !(error instanceof WsActionError) || error.kind === "server") {
+          throw error;
+        }
+      }
     }
   }
 
@@ -417,22 +493,7 @@ export function subscribeRealtimeTopic(
     if (onOpen) {
       state.connectListeners.delete(onOpen);
     }
-    if (state.listeners.size === 0 && state.pending.size === 0 && state.connectListeners.size === 0) {
-      if (state.reconnectTimer !== null) {
-        window.clearTimeout(state.reconnectTimer);
-        state.reconnectTimer = null;
-      }
-      clearHeartbeat(state);
-      state.socket?.close(1000, "No listeners.");
-      state.socket = null;
-      topicStates.delete(topic);
-
-      for (const [gameSessionId, mappedTopic] of gameSessionTopics.entries()) {
-        if (mappedTopic === topic) {
-          gameSessionTopics.delete(gameSessionId);
-        }
-      }
-    }
+    cleanupTopicStateIfIdle(topic, state);
   };
 }
 

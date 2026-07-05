@@ -461,6 +461,18 @@ function getRoomIdArgTopic(args: unknown[]) {
   return roomId ? `room:${roomId}` : null;
 }
 
+function logRpcInvocation(params: { transport: "http" | "websocket"; name: string; isMutation: boolean; localTopic?: string | null }) {
+  console.info(
+    JSON.stringify({
+      event: "game_rpc",
+      transport: params.transport,
+      name: params.name,
+      isMutation: params.isMutation,
+      hasLocalTopic: Boolean(params.localTopic),
+    }),
+  );
+}
+
 async function handleRpc(
   request: Request,
   env: Env,
@@ -469,6 +481,7 @@ async function handleRpc(
   const body = (await request.json()) as RpcBody;
   const name = body.name ?? "";
   const args = body.args ?? [];
+  logRpcInvocation({ transport: "http", name, isMutation: MUTATION_NAMES.has(name), localTopic: options.localTopic });
 
   return await runWithGameDatabase(env, async () => {
     const result = await callGameFunctionWithEnv(name, args, request, env);
@@ -1438,7 +1451,11 @@ export class RoomDurableObject {
         return;
       }
 
-      const actionKey = payload.clientActionId ? `${payload.name}:${payload.clientActionId}` : "";
+      const isMutation = MUTATION_NAMES.has(payload.name);
+      const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+      logRpcInvocation({ transport: "websocket", name: payload.name, isMutation, localTopic: socketAttachment?.topic });
+
+      const actionKey = isMutation && payload.clientActionId ? `${payload.name}:${payload.clientActionId}` : "";
       const cached = actionKey ? this.recentActions.get(actionKey) : null;
       if (cached && cached.expiresAt > Date.now()) {
         socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: cached.result }));
@@ -1449,11 +1466,11 @@ export class RoomDurableObject {
         const result = await callGameFunction(payload.name ?? "", payload.args ?? []);
         const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
-        const nextTopic = MUTATION_NAMES.has(payload.name ?? "")
+        const nextTopic = isMutation
           ? await getRoomTopicForBroadcast(payload.name ?? "", payload.args ?? [], nextResponseResult)
           : null;
         const nextDeltas =
-          MUTATION_NAMES.has(payload.name ?? "") && nextTopic
+          isMutation && nextTopic
             ? buildRealtimeDeltas(payload.name ?? "", payload.args ?? [], nextResponseResult, nextRoundSnapshot)
             : [];
 
@@ -1469,7 +1486,7 @@ export class RoomDurableObject {
         await this.scheduleActionCacheCleanup();
       }
 
-      if (MUTATION_NAMES.has(payload.name)) {
+      if (isMutation) {
         if (topic && deltas.length > 0) {
           const changeMessage = {
             type: "change",
@@ -1481,9 +1498,7 @@ export class RoomDurableObject {
             delta: deltas[0],
             deltas,
           } satisfies BroadcastMessage;
-          const attachment = socket.deserializeAttachment() as { topic?: string } | undefined;
-
-          if (attachment?.topic === topic) {
+          if (socketAttachment?.topic === topic) {
             this.broadcast(JSON.stringify(changeMessage));
           } else {
             await broadcast(this.env, changeMessage);
