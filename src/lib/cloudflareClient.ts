@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import type { RoundSnapshot } from "@/types/game";
+import type { GameResultSnapshot, RoundSnapshot } from "@/types/game";
 import type { RealtimeDelta } from "@/types/game";
 
 type ChangeMessage = {
@@ -13,6 +13,7 @@ type ChangeMessage = {
   delta?: RealtimeDelta;
   deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
+  gameResultSnapshot?: GameResultSnapshot;
 };
 
 type ActionResultMessage = {

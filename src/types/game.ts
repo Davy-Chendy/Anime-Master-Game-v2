@@ -244,6 +244,11 @@ export type RealtimeDelta =
     }
   | {
       scope: "game";
+      type: "game_result_snapshot";
+      snapshot: GameResultSnapshot;
+    }
+  | {
+      scope: "game";
       type: "answer_submitted";
       answer: Answer;
     }

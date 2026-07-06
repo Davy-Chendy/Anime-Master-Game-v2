@@ -8,7 +8,7 @@ import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
-import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
+import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import {
   cancelCurrentRound,
@@ -28,6 +28,7 @@ import {
 } from "@/lib/cloudflareRooms";
 import type {
   GameMode,
+  GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
   Player,
@@ -47,6 +48,7 @@ const statusText: Record<RoomStatus, string> = {
   GAME_RESULT: "本局结算",
 };
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const gameResultSnapshotCache = new Map<string, GameResultSnapshot>();
 
 type GameSettings = {
   gameMode: GameMode;
@@ -65,6 +67,16 @@ function isRoom(value: unknown): value is Room {
 
 function isQuestionSet(value: unknown): value is QuestionSet {
   return isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && "imageCount" in value;
+}
+
+function isGameResultSnapshot(value: unknown): value is GameResultSnapshot {
+  return (
+    isRecord(value) &&
+    isRecord(value.gameSession) &&
+    Array.isArray(value.leaderboard) &&
+    ("questionSet" in value) &&
+    Array.isArray(value.questionResults)
+  );
 }
 
 function getBroadcastRoom(result: unknown) {
@@ -89,6 +101,54 @@ function getBroadcastQuestionSet(result: unknown) {
   }
 
   return null;
+}
+
+function getBroadcastGameResultSnapshot(message: {
+  result: unknown;
+  delta?: RealtimeDelta;
+  deltas?: RealtimeDelta[];
+  gameResultSnapshot?: GameResultSnapshot;
+}) {
+  if (isGameResultSnapshot(message.gameResultSnapshot)) {
+    return message.gameResultSnapshot;
+  }
+
+  for (const delta of message.deltas ?? []) {
+    if (delta.scope === "game" && delta.type === "game_result_snapshot") {
+      return delta.snapshot;
+    }
+  }
+
+  if (message.delta?.scope === "game" && message.delta.type === "game_result_snapshot") {
+    return message.delta.snapshot;
+  }
+
+  if (isRecord(message.result) && isGameResultSnapshot(message.result.gameResultSnapshot)) {
+    return message.result.gameResultSnapshot;
+  }
+
+  return null;
+}
+
+function cacheGameResultSnapshot(snapshot: GameResultSnapshot | null) {
+  if (snapshot?.gameSession.id) {
+    gameResultSnapshotCache.set(snapshot.gameSession.id, snapshot);
+  }
+}
+
+function applyCachedGameResultSnapshot(
+  snapshot: GameResultSnapshot,
+  setters: {
+    setLeaderboard: (leaderboard: LeaderboardEntry[]) => void;
+    setGameSession: (gameSession: GameSession) => void;
+    setQuestionSet: (questionSet: QuestionSet | null) => void;
+    setQuestionResults: (questionResults: QuestionResult[]) => void;
+  },
+) {
+  setters.setLeaderboard(snapshot.leaderboard);
+  setters.setGameSession(snapshot.gameSession);
+  setters.setQuestionSet(snapshot.questionSet);
+  setters.setQuestionResults(snapshot.questionResults);
 }
 
 type GameModeCopy = {
@@ -924,6 +984,40 @@ function GameResultPanel({
   const canRateQuestionSet = room.players.find((player) => player.id === playerId)?.role === "PLAYER";
 
   useEffect(() => {
+    if (!room.id || !currentGameId) {
+      return;
+    }
+
+    const unbindGameSessionTopic = bindGameSessionRealtimeTopic(currentGameId, `room:${room.id}`);
+    ensureRealtimeTopic(`room:${room.id}`);
+
+    return () => {
+      unbindGameSessionTopic();
+    };
+  }, [currentGameId, room.id]);
+
+  useEffect(() => {
+    if (!room.id || !currentGameId) {
+      return;
+    }
+
+    return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
+      const snapshot = getBroadcastGameResultSnapshot(message);
+      if (snapshot?.gameSession.id !== currentGameId) {
+        return;
+      }
+
+      cacheGameResultSnapshot(snapshot);
+      applyCachedGameResultSnapshot(snapshot, {
+        setLeaderboard,
+        setGameSession,
+        setQuestionSet,
+        setQuestionResults,
+      });
+    });
+  }, [currentGameId, room.id]);
+
+  useEffect(() => {
     let isMounted = true;
 
     async function loadLeaderboard() {
@@ -936,15 +1030,29 @@ function GameResultPanel({
         return;
       }
 
+      const cachedSnapshot = gameResultSnapshotCache.get(currentGameId);
+      if (cachedSnapshot) {
+        applyCachedGameResultSnapshot(cachedSnapshot, {
+          setLeaderboard,
+          setGameSession,
+          setQuestionSet,
+          setQuestionResults,
+        });
+        return;
+      }
+
       setIsLoadingLeaderboard(true);
       try {
         const snapshot = await getGameResultSnapshot(currentGameId);
 
         if (isMounted) {
-          setLeaderboard(snapshot.leaderboard);
-          setGameSession(snapshot.gameSession);
-          setQuestionSet(snapshot.questionSet);
-          setQuestionResults(snapshot.questionResults);
+          cacheGameResultSnapshot(snapshot);
+          applyCachedGameResultSnapshot(snapshot, {
+            setLeaderboard,
+            setGameSession,
+            setQuestionSet,
+            setQuestionResults,
+          });
         }
       } catch (caughtError) {
         if (isMounted) {
@@ -1013,6 +1121,15 @@ function GameResultPanel({
       const pushedQuestionSet = questionSetDelta?.questionSet ?? getBroadcastQuestionSet(message.result);
       if (pushedQuestionSet?.id === questionSet.id) {
         setQuestionSet(pushedQuestionSet);
+        if (currentGameId) {
+          const cachedSnapshot = gameResultSnapshotCache.get(currentGameId);
+          if (cachedSnapshot) {
+            gameResultSnapshotCache.set(currentGameId, {
+              ...cachedSnapshot,
+              questionSet: pushedQuestionSet,
+            });
+          }
+        }
 
         if (questionSetDelta?.ratedPlayerId) {
           setRatingProgress((currentProgress) => {
@@ -1038,7 +1155,7 @@ function GameResultPanel({
         return;
       }
     });
-  }, [playerId, questionSet?.id, room.id]);
+  }, [currentGameId, playerId, questionSet?.id, room.id]);
 
   async function handleRateQuestionSet() {
     if (!questionSet || !room.id) {
@@ -1577,6 +1694,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
 
         const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
+        cacheGameResultSnapshot(getBroadcastGameResultSnapshot(message));
         const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
         if (pushedRoom && pushedRoom.id === room.id) {
           applyRoomUpdate(pushedRoom);

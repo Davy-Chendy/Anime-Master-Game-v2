@@ -132,6 +132,24 @@ function sqlIdentifier(value: string) {
   return `"${value}"`;
 }
 
+function parseSelectedColumns(columns: string) {
+  const trimmed = columns.trim();
+  if (!trimmed || trimmed === "*") {
+    return null;
+  }
+
+  return trimmed
+    .split(",")
+    .map((column) => column.trim())
+    .filter(Boolean)
+    .map((column) => {
+      if (column === "*") {
+        throw new Error("字段选择不能混用 * 和具体字段。");
+      }
+      return column;
+    });
+}
+
 function uniqueError(error: unknown): QueryError {
   const message = error instanceof Error ? error.message : String(error);
   return {
@@ -145,16 +163,18 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private filters: Filter[] = [];
   private orderBys: OrderBy[] = [];
   private maxRows: number | null = null;
+  private selectedColumns: string[] | null = null;
   private payload: Record<string, unknown> | Record<string, unknown>[] | null = null;
   private conflictColumns: string[] = [];
   private singleMode: "none" | "single" | "maybeSingle" = "none";
 
   constructor(private readonly db: D1Database | null, private readonly table: string) {}
 
-  select(_columns = "*") {
+  select(columns = "*") {
     if (this.operation === "select") {
       this.operation = "select";
     }
+    this.selectedColumns = parseSelectedColumns(columns);
     return this;
   }
 
@@ -300,9 +320,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
 
   private async executeSelect(): Promise<QueryResult<T>> {
     const params: unknown[] = [];
-    const sql = `SELECT * FROM ${sqlIdentifier(this.table)}${this.whereSql(params)}${this.orderSql()}${this.limitSql()}`;
+    const selectedColumns = this.selectedSql();
+    const sql = `SELECT ${selectedColumns} FROM ${sqlIdentifier(this.table)}${this.whereSql(params)}${this.orderSql()}${this.limitSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
     return this.shapeRows(result.results ?? []);
+  }
+
+  private selectedSql() {
+    return this.selectedColumns?.length ? this.selectedColumns.map(sqlIdentifier).join(", ") : "*";
   }
 
   private async executeInsert(): Promise<QueryResult<T>> {
@@ -330,7 +355,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
           : "";
       const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
         .map(sqlIdentifier)
-        .join(", ")}) VALUES (${placeholders})${conflict} RETURNING *`;
+        .join(", ")}) VALUES (${placeholders})${conflict} RETURNING ${this.selectedSql()}`;
       const result = await this.db!.prepare(sql).bind(...values).first<Record<string, unknown>>();
       if (result) {
         rows.push(result);
@@ -352,14 +377,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     const params = Object.entries(record).map(([, value]) => value);
     const sql = `UPDATE ${sqlIdentifier(this.table)} SET ${Object.keys(record)
       .map((column) => `${sqlIdentifier(column)} = ?`)
-      .join(", ")}${this.whereSql(params)} RETURNING *`;
+      .join(", ")}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
     return this.shapeRows(result.results ?? []);
   }
 
   private async executeDelete(): Promise<QueryResult<T>> {
     const params: unknown[] = [];
-    const sql = `DELETE FROM ${sqlIdentifier(this.table)}${this.whereSql(params)} RETURNING *`;
+    const sql = `DELETE FROM ${sqlIdentifier(this.table)}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
     return this.shapeRows(result.results ?? []);
   }

@@ -4,6 +4,8 @@ import type {
   Answer,
   BuzzerAnswer,
   FailedQuestionUrlImport,
+  GameBootstrapSnapshot,
+  GameResultSnapshot,
   GameSession,
   PreparedQuestionUrlImport,
   Question,
@@ -48,6 +50,7 @@ type BroadcastMessage = {
   delta?: RealtimeDelta;
   deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
+  gameResultSnapshot?: GameResultSnapshot;
 };
 
 type AutoForfeitAlarmState = {
@@ -77,6 +80,8 @@ type TeamBattleVoteAlarmState = {
 
 const ACTION_RESULT_TTL_MS = 10_000;
 const ROUND_SNAPSHOT_CACHE_TTL_MS = 1_000;
+const BOOTSTRAP_SNAPSHOT_CACHE_TTL_MS = 2_000;
+const GAME_RESULT_SNAPSHOT_CACHE_TTL_MS = 5_000;
 const RPC_BODY_MAX_BYTES = 64 * 1024;
 const LOCAL_ROOM_OBJECT_TOPIC_HEADER = "x-local-room-object-topic";
 const ACTION_CACHE_MIN_ALARM_DELAY_MS = 100;
@@ -375,6 +380,24 @@ async function getRoundSnapshotForMutation(name: string, result: unknown) {
   return null;
 }
 
+async function getGameResultSnapshotForMutation(name: string, result: unknown) {
+  if (name === "returnRoomToLobby") {
+    return null;
+  }
+
+  const gameSession = getResultGameSession(result);
+  if (gameSession?.status === "GAME_RESULT") {
+    return await gameService.getGameResultSnapshot(gameSession.id);
+  }
+
+  const room = getResultRoom(result);
+  if (room?.status === "GAME_RESULT" && room.currentGameId) {
+    return await gameService.getGameResultSnapshot(room.currentGameId);
+  }
+
+  return null;
+}
+
 function attachRoundSnapshot(result: unknown, roundSnapshot: RoundSnapshot | null) {
   if (!roundSnapshot || !isRecord(result)) {
     return result;
@@ -464,6 +487,16 @@ function asRoundSnapshot(value: unknown): RoundSnapshot | null {
     : null;
 }
 
+function asGameResultSnapshot(value: unknown): GameResultSnapshot | null {
+  return isRecord(value) &&
+    asGameSession(value.gameSession) &&
+    Array.isArray(value.leaderboard) &&
+    "questionSet" in value &&
+    Array.isArray(value.questionResults)
+    ? (value as GameResultSnapshot)
+    : null;
+}
+
 function getBroadcastRoundSnapshot(message: BroadcastMessage) {
   const directSnapshot = asRoundSnapshot(message.roundSnapshot);
   if (directSnapshot) {
@@ -478,6 +511,29 @@ function getBroadcastRoundSnapshot(message: BroadcastMessage) {
 
   if (message.delta?.scope === "game" && message.delta.type === "round_snapshot") {
     return message.delta.snapshot;
+  }
+
+  return null;
+}
+
+function getBroadcastGameResultSnapshot(message: BroadcastMessage) {
+  const directSnapshot = asGameResultSnapshot(message.gameResultSnapshot);
+  if (directSnapshot) {
+    return directSnapshot;
+  }
+
+  for (const delta of message.deltas ?? []) {
+    if (delta.scope === "game" && delta.type === "game_result_snapshot") {
+      return delta.snapshot;
+    }
+  }
+
+  if (message.delta?.scope === "game" && message.delta.type === "game_result_snapshot") {
+    return message.delta.snapshot;
+  }
+
+  if (isRecord(message.result)) {
+    return asGameResultSnapshot(message.result.gameResultSnapshot);
   }
 
   return null;
@@ -672,7 +728,13 @@ function getArgRecord(args: unknown[]) {
   return isRecord(args[0]) ? args[0] : null;
 }
 
-function buildRealtimeDeltas(name: string, args: unknown[], result: unknown, roundSnapshot: RoundSnapshot | null): RealtimeDelta[] {
+function buildRealtimeDeltas(
+  name: string,
+  args: unknown[],
+  result: unknown,
+  roundSnapshot: RoundSnapshot | null,
+  gameResultSnapshot: GameResultSnapshot | null = null,
+): RealtimeDelta[] {
   const deltas: RealtimeDelta[] = [];
   const room = getResultRoom(result);
   const gameSession = getResultGameSession(result);
@@ -724,6 +786,8 @@ function buildRealtimeDeltas(name: string, args: unknown[], result: unknown, rou
 
   if (roundSnapshot) {
     deltas.push({ scope: "game", type: "round_snapshot", snapshot: roundSnapshot });
+  } else if (gameResultSnapshot) {
+    deltas.push({ scope: "game", type: "game_result_snapshot", snapshot: gameResultSnapshot });
   } else if (gameSession && name !== "cancelForfeitAnswer") {
     deltas.push({ scope: "game", type: "game_session_updated", gameSession });
   }
@@ -823,6 +887,7 @@ async function handleRpc(
   options: {
     localTopic?: string | null;
     localBroadcast?: (message: string) => void;
+    localCacheGameResult?: (snapshot: GameResultSnapshot) => Promise<void>;
     localScheduleAutoForfeit?: (message: AutoForfeitScheduleMessage) => Promise<void>;
     receivedAtMs?: number;
     body?: RpcBody;
@@ -836,6 +901,7 @@ async function handleRpc(
   return await runWithGameDatabase(env, async () => {
     const result = await callGameFunctionWithEnv(name, args, request, env, options.receivedAtMs);
     const roundSnapshot = await getRoundSnapshotForMutation(name, result);
+    const gameResultSnapshot = await getGameResultSnapshotForMutation(name, result);
     const responseResult = attachRoundSnapshot(result, roundSnapshot);
     const scheduleRoundSnapshot = asRoundSnapshot(responseResult) ?? roundSnapshot;
     const topic = options.localTopic ?? await getRoomTopicForBroadcast(name, args, responseResult);
@@ -854,7 +920,7 @@ async function handleRpc(
     }
 
     if (MUTATION_NAMES.has(name)) {
-      const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
+      const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot, gameResultSnapshot);
       if (topic && deltas.length > 0) {
         const message = {
           type: "change",
@@ -865,7 +931,12 @@ async function handleRpc(
           clientActionId: body.clientActionId,
           delta: deltas[0],
           deltas,
+          gameResultSnapshot: gameResultSnapshot ?? undefined,
         } satisfies BroadcastMessage;
+
+        if (options.localTopic === topic && options.localCacheGameResult && gameResultSnapshot) {
+          await options.localCacheGameResult(gameResultSnapshot);
+        }
 
         if (options.localTopic === topic && options.localBroadcast) {
           options.localBroadcast(JSON.stringify(message));
@@ -1692,7 +1763,11 @@ async function handleR2ImagesList(request: Request, env: Env) {
 export class RoomDurableObject {
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
   private readonly roundSnapshotCache = new Map<string, { expiresAt: number; snapshot: RoundSnapshot }>();
+  private readonly bootstrapSnapshotCache = new Map<string, { expiresAt: number; snapshot: GameBootstrapSnapshot }>();
+  private readonly gameResultSnapshotCache = new Map<string, { expiresAt: number; snapshot: GameResultSnapshot }>();
   private readonly roundSnapshotReadInflight = new Map<string, Promise<RoundSnapshot>>();
+  private readonly bootstrapSnapshotReadInflight = new Map<string, Promise<GameBootstrapSnapshot>>();
+  private readonly gameResultSnapshotReadInflight = new Map<string, Promise<GameResultSnapshot>>();
   private actionQueue: Promise<void> = Promise.resolve();
   private r2UploadQueue: Promise<void> = Promise.resolve();
   private nextActionCacheCleanupAt: number | null = null;
@@ -1727,6 +1802,10 @@ export class RoomDurableObject {
       const message = await request.text();
       try {
         const parsedMessage = JSON.parse(message) as BroadcastMessage;
+        const gameResultSnapshot = getBroadcastGameResultSnapshot(parsedMessage);
+        if (gameResultSnapshot) {
+          await this.cacheGameResultSnapshot(gameResultSnapshot);
+        }
         await this.tryUpdateAutoForfeitSchedule(
           parsedMessage.result,
           getBroadcastRoundSnapshot(parsedMessage),
@@ -1801,6 +1880,7 @@ export class RoomDurableObject {
       return await handleRpc(request, this.env, {
         localTopic,
         localBroadcast: (message) => this.broadcast(message),
+        localCacheGameResult: (snapshot) => this.cacheGameResultSnapshot(snapshot),
         localScheduleAutoForfeit: (message) => this.updateAutoForfeitSchedule(message.result, message.roundSnapshot, message.topic),
         receivedAtMs,
       });
@@ -1815,6 +1895,12 @@ export class RoomDurableObject {
       return;
     }
     if (this.tryHandleWebSocketRoundSnapshotRead(socket, message)) {
+      return;
+    }
+    if (this.tryHandleWebSocketBootstrapSnapshotRead(socket, message)) {
+      return;
+    }
+    if (this.tryHandleWebSocketGameResultSnapshotRead(socket, message)) {
       return;
     }
 
@@ -1845,23 +1931,28 @@ export class RoomDurableObject {
       return true;
     }
 
-    const requestedSnapshotGameSessionId =
-      payload.type === "action" && payload.name === "getRoundSnapshot" && typeof payload.args?.[0] === "string"
-        ? payload.args[0]
-        : null;
-    if (!requestedSnapshotGameSessionId) {
+    const requestedSnapshotGameSessionId = payload.type === "action" && typeof payload.args?.[0] === "string" ? payload.args[0] : null;
+    if (!requestedSnapshotGameSessionId || !payload.name) {
       return false;
     }
 
-    const cachedRoundSnapshot = this.getCachedRoundSnapshot(requestedSnapshotGameSessionId);
-    if (!cachedRoundSnapshot) {
+    const cachedSnapshot =
+      payload.name === "getRoundSnapshot"
+        ? this.getCachedRoundSnapshot(requestedSnapshotGameSessionId)
+        : payload.name === "getGameBootstrapSnapshot"
+          ? this.getCachedBootstrapSnapshot(requestedSnapshotGameSessionId)
+          : payload.name === "getGameResultSnapshot"
+            ? this.getCachedGameResultSnapshot(requestedSnapshotGameSessionId)
+            : null;
+    if (!cachedSnapshot) {
       return false;
     }
 
     const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
     console.info(
       JSON.stringify({
-        event: "round_snapshot_cache_fast_hit",
+        event: "snapshot_cache_fast_hit",
+        name: payload.name,
         gameSessionId: requestedSnapshotGameSessionId,
         topic: socketAttachment?.topic ?? null,
       }),
@@ -1870,7 +1961,7 @@ export class RoomDurableObject {
       JSON.stringify({
         type: "action_result",
         clientActionId: payload.clientActionId,
-        data: cachedRoundSnapshot,
+        data: cachedSnapshot,
       }),
     );
     return true;
@@ -1960,6 +2051,162 @@ export class RoomDurableObject {
     return snapshot;
   }
 
+  private tryHandleWebSocketBootstrapSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
+    let payload: {
+      type?: string;
+      name?: string;
+      args?: unknown[];
+      clientActionId?: string;
+    };
+
+    try {
+      payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as typeof payload;
+    } catch {
+      return false;
+    }
+
+    const gameSessionId =
+      payload.type === "action" && payload.name === "getGameBootstrapSnapshot" && typeof payload.args?.[0] === "string"
+        ? payload.args[0]
+        : null;
+    if (!gameSessionId) {
+      return false;
+    }
+
+    void this.handleBootstrapSnapshotRead(socket, gameSessionId, payload.clientActionId);
+    return true;
+  }
+
+  private async handleBootstrapSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
+    try {
+      const cachedSnapshot = this.getCachedBootstrapSnapshot(gameSessionId);
+      if (cachedSnapshot) {
+        socket.send(JSON.stringify({ type: "action_result", clientActionId, data: cachedSnapshot }));
+        return;
+      }
+
+      let snapshotPromise = this.bootstrapSnapshotReadInflight.get(gameSessionId);
+      if (!snapshotPromise) {
+        const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        snapshotPromise = this.actionQueue.then(
+          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
+          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
+        );
+        this.actionQueue = snapshotPromise.then(
+          () => undefined,
+          () => undefined,
+        );
+        this.bootstrapSnapshotReadInflight.set(gameSessionId, snapshotPromise);
+        void snapshotPromise.then(
+          () => {
+            if (this.bootstrapSnapshotReadInflight.get(gameSessionId) === snapshotPromise) {
+              this.bootstrapSnapshotReadInflight.delete(gameSessionId);
+            }
+          },
+          () => {
+            if (this.bootstrapSnapshotReadInflight.get(gameSessionId) === snapshotPromise) {
+              this.bootstrapSnapshotReadInflight.delete(gameSessionId);
+            }
+          },
+        );
+      }
+
+      const snapshot = await snapshotPromise;
+      socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
+    } catch (error) {
+      socket.send(JSON.stringify({ type: "action_result", clientActionId, error: toUserErrorMessage(error) }));
+    }
+  }
+
+  private async loadBootstrapSnapshotForRead(gameSessionId: string, topic: string | null) {
+    const cachedSnapshot = this.getCachedBootstrapSnapshot(gameSessionId);
+    if (cachedSnapshot) {
+      return cachedSnapshot;
+    }
+
+    const snapshot = await runWithGameDatabase(this.env, () => gameService.getGameBootstrapSnapshot(gameSessionId));
+    await this.tryUpdateAutoForfeitSchedule(snapshot, snapshot.roundSnapshot, topic, "bootstrap_snapshot_read");
+    await this.cacheBootstrapSnapshot(snapshot);
+    return snapshot;
+  }
+
+  private tryHandleWebSocketGameResultSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
+    let payload: {
+      type?: string;
+      name?: string;
+      args?: unknown[];
+      clientActionId?: string;
+    };
+
+    try {
+      payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as typeof payload;
+    } catch {
+      return false;
+    }
+
+    const gameSessionId =
+      payload.type === "action" && payload.name === "getGameResultSnapshot" && typeof payload.args?.[0] === "string"
+        ? payload.args[0]
+        : null;
+    if (!gameSessionId) {
+      return false;
+    }
+
+    void this.handleGameResultSnapshotRead(socket, gameSessionId, payload.clientActionId);
+    return true;
+  }
+
+  private async handleGameResultSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
+    try {
+      const cachedSnapshot = this.getCachedGameResultSnapshot(gameSessionId);
+      if (cachedSnapshot) {
+        socket.send(JSON.stringify({ type: "action_result", clientActionId, data: cachedSnapshot }));
+        return;
+      }
+
+      let snapshotPromise = this.gameResultSnapshotReadInflight.get(gameSessionId);
+      if (!snapshotPromise) {
+        snapshotPromise = this.actionQueue.then(
+          () => this.loadGameResultSnapshotForRead(gameSessionId),
+          () => this.loadGameResultSnapshotForRead(gameSessionId),
+        );
+        this.actionQueue = snapshotPromise.then(
+          () => undefined,
+          () => undefined,
+        );
+        this.gameResultSnapshotReadInflight.set(gameSessionId, snapshotPromise);
+        void snapshotPromise.then(
+          () => {
+            if (this.gameResultSnapshotReadInflight.get(gameSessionId) === snapshotPromise) {
+              this.gameResultSnapshotReadInflight.delete(gameSessionId);
+            }
+          },
+          () => {
+            if (this.gameResultSnapshotReadInflight.get(gameSessionId) === snapshotPromise) {
+              this.gameResultSnapshotReadInflight.delete(gameSessionId);
+            }
+          },
+        );
+      }
+
+      const snapshot = await snapshotPromise;
+      socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
+    } catch (error) {
+      socket.send(JSON.stringify({ type: "action_result", clientActionId, error: toUserErrorMessage(error) }));
+    }
+  }
+
+  private async loadGameResultSnapshotForRead(gameSessionId: string) {
+    const cachedSnapshot = this.getCachedGameResultSnapshot(gameSessionId);
+    if (cachedSnapshot) {
+      return cachedSnapshot;
+    }
+
+    const snapshot = await runWithGameDatabase(this.env, () => gameService.getGameResultSnapshot(gameSessionId));
+    await this.cacheGameResultSnapshot(snapshot);
+    return snapshot;
+  }
+
   private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer, receivedAtMs = Date.now()): Promise<void> {
     let clientActionId: string | undefined;
     try {
@@ -2015,25 +2262,30 @@ export class RoomDurableObject {
         }
       }
 
-      const { deltas, roundSnapshot, responseResult, topic } = await runWithGameDatabase(this.env, async () => {
+      const { deltas, gameResultSnapshot, roundSnapshot, responseResult, topic } = await runWithGameDatabase(this.env, async () => {
         const result = await callGameFunction(payload.name ?? "", payload.args ?? [], receivedAtMs);
         const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
+        const nextGameResultSnapshot = await getGameResultSnapshotForMutation(payload.name ?? "", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
         const nextTopic = isMutation
           ? await getRoomTopicForBroadcast(payload.name ?? "", payload.args ?? [], nextResponseResult)
           : null;
         const nextDeltas =
           isMutation && nextTopic
-            ? buildRealtimeDeltas(payload.name ?? "", payload.args ?? [], nextResponseResult, nextRoundSnapshot)
+            ? buildRealtimeDeltas(payload.name ?? "", payload.args ?? [], nextResponseResult, nextRoundSnapshot, nextGameResultSnapshot)
             : [];
 
         return {
           deltas: nextDeltas,
+          gameResultSnapshot: nextGameResultSnapshot,
           roundSnapshot: nextRoundSnapshot,
           responseResult: nextResponseResult,
           topic: nextTopic,
         };
       });
+      if (gameResultSnapshot) {
+        await this.cacheGameResultSnapshot(gameResultSnapshot);
+      }
       const scheduleRoundSnapshot = asRoundSnapshot(responseResult) ?? roundSnapshot;
       await this.tryUpdateAutoForfeitSchedule(
         responseResult,
@@ -2057,6 +2309,7 @@ export class RoomDurableObject {
             clientActionId: payload.clientActionId,
             delta: deltas[0],
             deltas,
+            gameResultSnapshot: gameResultSnapshot ?? undefined,
           } satisfies BroadcastMessage;
           if (socketAttachment?.topic === topic) {
             this.broadcast(JSON.stringify(changeMessage));
@@ -2120,6 +2373,22 @@ export class RoomDurableObject {
       }
     }
 
+    for (const [key, entry] of this.bootstrapSnapshotCache.entries()) {
+      if (entry.expiresAt <= now) {
+        this.bootstrapSnapshotCache.delete(key);
+      } else {
+        nextExpiresAt = nextExpiresAt == null ? entry.expiresAt : Math.min(nextExpiresAt, entry.expiresAt);
+      }
+    }
+
+    for (const [key, entry] of this.gameResultSnapshotCache.entries()) {
+      if (entry.expiresAt <= now) {
+        this.gameResultSnapshotCache.delete(key);
+      } else {
+        nextExpiresAt = nextExpiresAt == null ? entry.expiresAt : Math.min(nextExpiresAt, entry.expiresAt);
+      }
+    }
+
     return nextExpiresAt;
   }
 
@@ -2157,7 +2426,59 @@ export class RoomDurableObject {
     }
 
     const expiresAt = now + ROUND_SNAPSHOT_CACHE_TTL_MS;
+    this.bootstrapSnapshotCache.delete(snapshot.gameSession.id);
     this.roundSnapshotCache.set(snapshot.gameSession.id, { expiresAt, snapshot });
+    this.nextRoundSnapshotCacheCleanupAt =
+      this.nextRoundSnapshotCacheCleanupAt == null ? expiresAt : Math.min(this.nextRoundSnapshotCacheCleanupAt, expiresAt);
+    await this.scheduleNextAlarm();
+  }
+
+  private getCachedBootstrapSnapshot(gameSessionId: string) {
+    const cached = this.bootstrapSnapshotCache.get(gameSessionId);
+    if (!cached) {
+      return null;
+    }
+
+    if (cached.expiresAt <= Date.now()) {
+      this.bootstrapSnapshotCache.delete(gameSessionId);
+      this.nextRoundSnapshotCacheCleanupAt = this.cleanupRoundSnapshotCache();
+      return null;
+    }
+
+    return cached.snapshot;
+  }
+
+  private async cacheBootstrapSnapshot(snapshot: GameBootstrapSnapshot) {
+    const now = Date.now();
+    this.cleanupRoundSnapshotCache(now);
+    await this.cacheRoundSnapshot(snapshot.roundSnapshot);
+    const expiresAt = now + BOOTSTRAP_SNAPSHOT_CACHE_TTL_MS;
+    this.bootstrapSnapshotCache.set(snapshot.gameSession.id, { expiresAt, snapshot });
+    this.nextRoundSnapshotCacheCleanupAt =
+      this.nextRoundSnapshotCacheCleanupAt == null ? expiresAt : Math.min(this.nextRoundSnapshotCacheCleanupAt, expiresAt);
+    await this.scheduleNextAlarm();
+  }
+
+  private getCachedGameResultSnapshot(gameSessionId: string) {
+    const cached = this.gameResultSnapshotCache.get(gameSessionId);
+    if (!cached) {
+      return null;
+    }
+
+    if (cached.expiresAt <= Date.now()) {
+      this.gameResultSnapshotCache.delete(gameSessionId);
+      this.nextRoundSnapshotCacheCleanupAt = this.cleanupRoundSnapshotCache();
+      return null;
+    }
+
+    return cached.snapshot;
+  }
+
+  private async cacheGameResultSnapshot(snapshot: GameResultSnapshot) {
+    const now = Date.now();
+    this.cleanupRoundSnapshotCache(now);
+    const expiresAt = now + GAME_RESULT_SNAPSHOT_CACHE_TTL_MS;
+    this.gameResultSnapshotCache.set(snapshot.gameSession.id, { expiresAt, snapshot });
     this.nextRoundSnapshotCacheCleanupAt =
       this.nextRoundSnapshotCacheCleanupAt == null ? expiresAt : Math.min(this.nextRoundSnapshotCacheCleanupAt, expiresAt);
     await this.scheduleNextAlarm();
@@ -2350,22 +2671,33 @@ export class RoomDurableObject {
     await this.state.storage.delete(AUTO_FORFEIT_ALARM_STORAGE_KEY);
 
     try {
-      const { responseResult, roundSnapshot, deltas } = await runWithGameDatabase(this.env, async () => {
+      const { responseResult, gameResultSnapshot, roundSnapshot, deltas } = await runWithGameDatabase(this.env, async () => {
         const args = [{ gameSessionId: alarm.gameSessionId }];
         logRpcInvocation({ transport: "websocket", name: "autoForfeitExpiredRound", isMutation: true, localTopic: alarm.topic });
         const result = await callGameFunction("autoForfeitExpiredRound", args, Date.now());
         const nextRoundSnapshot = await getRoundSnapshotForMutation("autoForfeitExpiredRound", result);
+        const nextGameResultSnapshot = await getGameResultSnapshotForMutation("autoForfeitExpiredRound", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
-        const nextDeltas = buildRealtimeDeltas("autoForfeitExpiredRound", args, nextResponseResult, nextRoundSnapshot);
+        const nextDeltas = buildRealtimeDeltas(
+          "autoForfeitExpiredRound",
+          args,
+          nextResponseResult,
+          nextRoundSnapshot,
+          nextGameResultSnapshot,
+        );
 
         return {
           responseResult: nextResponseResult,
+          gameResultSnapshot: nextGameResultSnapshot,
           roundSnapshot: nextRoundSnapshot,
           deltas: nextDeltas,
         };
       });
 
       await this.state.storage.put(AUTO_FORFEIT_COMPLETED_KEY_STORAGE_KEY, alarm.key);
+      if (gameResultSnapshot) {
+        await this.cacheGameResultSnapshot(gameResultSnapshot);
+      }
       await this.tryUpdateAutoForfeitSchedule(responseResult, roundSnapshot, alarm.topic, "auto_forfeit_alarm");
 
       if (deltas.length > 0) {
@@ -2378,6 +2710,7 @@ export class RoomDurableObject {
             topic: alarm.topic,
             delta: deltas[0],
             deltas,
+            gameResultSnapshot: gameResultSnapshot ?? undefined,
           } satisfies BroadcastMessage),
         );
       }
@@ -2411,22 +2744,33 @@ export class RoomDurableObject {
     await this.state.storage.delete(TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY);
 
     try {
-      const { responseResult, roundSnapshot, deltas } = await runWithGameDatabase(this.env, async () => {
+      const { responseResult, gameResultSnapshot, roundSnapshot, deltas } = await runWithGameDatabase(this.env, async () => {
         const args = [{ gameSessionId: alarm.gameSessionId }];
         logRpcInvocation({ transport: "websocket", name: "finalizeTeamBattleVote", isMutation: true, localTopic: alarm.topic });
         const result = await callGameFunction("finalizeTeamBattleVote", args, Date.now());
         const nextRoundSnapshot = await getRoundSnapshotForMutation("finalizeTeamBattleVote", result);
+        const nextGameResultSnapshot = await getGameResultSnapshotForMutation("finalizeTeamBattleVote", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
-        const nextDeltas = buildRealtimeDeltas("finalizeTeamBattleVote", args, nextResponseResult, nextRoundSnapshot);
+        const nextDeltas = buildRealtimeDeltas(
+          "finalizeTeamBattleVote",
+          args,
+          nextResponseResult,
+          nextRoundSnapshot,
+          nextGameResultSnapshot,
+        );
 
         return {
           responseResult: nextResponseResult,
+          gameResultSnapshot: nextGameResultSnapshot,
           roundSnapshot: nextRoundSnapshot,
           deltas: nextDeltas,
         };
       });
 
       await this.state.storage.put(TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY, alarm.key);
+      if (gameResultSnapshot) {
+        await this.cacheGameResultSnapshot(gameResultSnapshot);
+      }
       await this.tryUpdateAutoForfeitSchedule(responseResult, roundSnapshot, alarm.topic, "team_battle_vote_alarm");
 
       if (deltas.length > 0) {
@@ -2439,6 +2783,7 @@ export class RoomDurableObject {
             topic: alarm.topic,
             delta: deltas[0],
             deltas,
+            gameResultSnapshot: gameResultSnapshot ?? undefined,
           } satisfies BroadcastMessage),
         );
       }
