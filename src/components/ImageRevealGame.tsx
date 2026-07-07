@@ -162,6 +162,22 @@ function sortBySubmittedAt<T extends { id: string; submittedAt: string }>(items:
   );
 }
 
+function toLabelAnswerFromBuzzerAnswer(answer: BuzzerAnswer): Answer {
+  return {
+    id: answer.id,
+    gameSessionId: answer.gameSessionId,
+    questionIndex: answer.questionIndex,
+    revealRound: answer.revealRound,
+    playerId: answer.playerId,
+    answerText: answer.answerText,
+    submittedAt: answer.submittedAt,
+  };
+}
+
+function getCorrectLabelAnswersFromBuzzerAnswers(answers: BuzzerAnswer[]) {
+  return sortBySubmittedAt(answers.filter((answer) => answer.status === "correct").map(toLabelAnswerFromBuzzerAnswer));
+}
+
 function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt">, nowMs: number) {
   return nowMs - new Date(answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
@@ -591,17 +607,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       setAnswers(sortBySubmittedAt(snapshot.answers));
       setBuzzerAnswers(sortBySubmittedAt(snapshot.buzzerAnswers));
       setLabelAnswers(
-        sortBySubmittedAt(
-          snapshot.labelBuzzerAnswers.map((answer) => ({
-            id: answer.id,
-            gameSessionId: answer.gameSessionId,
-            questionIndex: answer.questionIndex,
-            revealRound: answer.revealRound,
-            playerId: answer.playerId,
-            answerText: answer.answerText,
-            submittedAt: answer.submittedAt,
-          })),
-        ),
+        getCorrectLabelAnswersFromBuzzerAnswers(snapshot.labelBuzzerAnswers),
       );
       setMyAnswer(isPresenter ? null : snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
       setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
@@ -793,6 +799,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             applyGameSessionDelta(delta.gameSession);
             setAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
             setLabelAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
+            if (delta.canceledPlayerId === playerId) {
+              setMyAnswer((currentAnswer) => (currentAnswer?.id === delta.canceledAnswerId ? null : currentAnswer));
+              setAnswerText("");
+            }
             handled = true;
             continue;
           }
@@ -803,6 +813,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               delta.answer.revealRound === currentGameSession.currentRevealRound
             ) {
               setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
+              const submittedBuzzerAnswer = delta.buzzerAnswer;
+              if (submittedBuzzerAnswer) {
+                setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submittedBuzzerAnswer));
+              }
               if (isPresenter && !isForfeitAnswer(delta.answer)) {
                 setLabelAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
                 showAnswerBubble(delta.answer);
@@ -822,6 +836,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               }
               if (delta.answer.playerId === playerId) {
                 setMyAnswer(delta.answer);
+                if (submittedBuzzerAnswer) {
+                  setMyBuzzerAnswer(submittedBuzzerAnswer);
+                }
                 if (isForfeitAnswer(delta.answer)) {
                   setMyBuzzerAnswer(null);
                 }
@@ -851,9 +868,29 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
           if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
             applyGameSessionDelta(delta.gameSession);
-            setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
-            if (delta.buzzerAnswer.playerId === playerId) {
-              setMyBuzzerAnswer(delta.buzzerAnswer);
+            if (delta.scores) {
+              setScores(delta.scores);
+            }
+            const judgedQuestionResults = delta.questionResults;
+            if (judgedQuestionResults) {
+              setQuestionResults((currentResults) =>
+                judgedQuestionResults.reduce((nextResults, questionResult) => upsertById(nextResults, questionResult), currentResults),
+              );
+            }
+            if (delta.buzzerAnswers) {
+              setBuzzerAnswers(sortBySubmittedAt(delta.buzzerAnswers));
+              const updatedOwnBuzzerAnswer = delta.buzzerAnswers.find((answer) => answer.playerId === playerId);
+              if (updatedOwnBuzzerAnswer) {
+                setMyBuzzerAnswer(updatedOwnBuzzerAnswer);
+              }
+              if (delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
+                setLabelAnswers(getCorrectLabelAnswersFromBuzzerAnswers(delta.buzzerAnswers));
+              }
+            } else {
+              setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
+              if (delta.buzzerAnswer.playerId === playerId) {
+                setMyBuzzerAnswer(delta.buzzerAnswer);
+              }
             }
             handled = true;
           }
@@ -1853,6 +1890,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         return;
       }
       setMyAnswer(submitted);
+      const submittedBuzzerAnswer = submitted.buzzerAnswer;
+      if (submittedBuzzerAnswer) {
+        setMyBuzzerAnswer(submittedBuzzerAnswer);
+        setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submittedBuzzerAnswer));
+      }
       setAnswerText(submitted.answerText);
       setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
     } catch (error) {
@@ -1973,7 +2015,23 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         isCorrect,
       });
       applyRoundSnapshotFromResult(judged) || applyGameSession(judged.gameSession);
-      setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, judged.judgedAnswer));
+      if (judged.scores) {
+        setScores(judged.scores);
+      }
+      const judgedQuestionResults = judged.questionResults;
+      if (judgedQuestionResults) {
+        setQuestionResults((currentResults) =>
+          judgedQuestionResults.reduce((nextResults, questionResult) => upsertById(nextResults, questionResult), currentResults),
+        );
+      }
+      if (judged.buzzerAnswers) {
+        setBuzzerAnswers(sortBySubmittedAt(judged.buzzerAnswers));
+        if (judged.gameSession.gameMode !== "ROUND_REVEAL" && !judged.gameSession.roundStartedAt) {
+          setLabelAnswers(getCorrectLabelAnswersFromBuzzerAnswers(judged.buzzerAnswers));
+        }
+      } else {
+        setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, judged.judgedAnswer));
+      }
     } catch (error) {
       onError(error instanceof Error ? error.message : "判定答案失败");
     } finally {

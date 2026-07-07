@@ -3171,6 +3171,8 @@ async function updatePendingBuzzerAnswer(params: {
   if (!data) {
     throw new Error("更新答案失败：该答案已经被判定，不能再修改。");
   }
+
+  return toBuzzerAnswer(data);
 }
 
 async function writePendingRoundRevealBuzzerAnswer(params: {
@@ -3184,28 +3186,31 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
       throw new Error("该抢答已经被判定，不能再修改。");
     }
 
-    await updatePendingBuzzerAnswer({
+    return await updatePendingBuzzerAnswer({
       id: params.existingBuzzerAnswer.id,
       answerText: params.answerText,
     });
-    return;
   }
 
-  const { error } = await d1.from("buzzer_answers").insert({
-    game_session_id: params.gameSession.id,
-    question_index: params.gameSession.currentQuestionIndex,
-    reveal_round: params.gameSession.currentRevealRound,
-    player_id: params.playerId,
-    answer_text: params.answerText,
-    status: "pending",
-    score_awarded: 0,
-    submitted_at: new Date().toISOString(),
-    judged_at: null,
-    judged_by_player_id: null,
-  });
+  const { data, error } = await d1
+    .from("buzzer_answers")
+    .insert({
+      game_session_id: params.gameSession.id,
+      question_index: params.gameSession.currentQuestionIndex,
+      reveal_round: params.gameSession.currentRevealRound,
+      player_id: params.playerId,
+      answer_text: params.answerText,
+      status: "pending",
+      score_awarded: 0,
+      submitted_at: new Date().toISOString(),
+      judged_at: null,
+      judged_by_player_id: null,
+    })
+    .select()
+    .single<DbBuzzerAnswer>();
 
   if (!error) {
-    return;
+    return toBuzzerAnswer(data);
   }
 
   if (!isUniqueViolation(error)) {
@@ -3229,7 +3234,7 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
     throw new Error("提交失败：该抢答已经被判定，不能再修改。");
   }
 
-  await updatePendingBuzzerAnswer({
+  return await updatePendingBuzzerAnswer({
     id: currentBuzzerAnswer.id,
     answerText: params.answerText,
   });
@@ -3474,7 +3479,7 @@ export async function submitAnswer(params: {
     throw new Error(buzzerLoadError.message);
   }
 
-  await writePendingRoundRevealBuzzerAnswer({
+  const buzzerAnswer = await writePendingRoundRevealBuzzerAnswer({
     gameSession,
     playerId: params.playerId,
     answerText,
@@ -3504,7 +3509,10 @@ export async function submitAnswer(params: {
     throw new Error(error.message);
   }
 
-  return toAnswer(data);
+  return {
+    ...toAnswer(data),
+    buzzerAnswer,
+  };
 }
 
 export async function submitForfeitAnswer(params: {
@@ -3955,6 +3963,20 @@ export async function judgeBuzzerAnswer(params: {
     params.isCorrect && currentSession.gameMode === "BUZZER_FIRST_CORRECT"
       ? await revealQuestionForReview(currentGameSession.id)
       : currentSession;
+  const scoringDelta = params.isCorrect
+    ? await Promise.all([
+        getPlayerScores(currentGameSession.id),
+        getQuestionResultsForQuestion({
+          gameSessionId: currentGameSession.id,
+          questionIndex: currentGameSession.current_question_index,
+        }),
+        getBuzzerAnswersForQuestionRound({
+          gameSessionId: currentGameSession.id,
+          questionIndex: currentGameSession.current_question_index,
+          revealRound: currentGameSession.current_reveal_round,
+        }),
+      ])
+    : null;
 
   return {
     gameSession: nextGameSession,
@@ -3965,6 +3987,13 @@ export async function judgeBuzzerAnswer(params: {
       judgedAt,
       judgedByPlayerId: params.presenterPlayerId,
     },
+    ...(scoringDelta
+      ? {
+          scores: scoringDelta[0],
+          questionResults: scoringDelta[1],
+          buzzerAnswers: scoringDelta[2],
+        }
+      : {}),
   };
 }
 

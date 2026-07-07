@@ -8,7 +8,9 @@ import type {
   GameResultSnapshot,
   GameSession,
   PreparedQuestionUrlImport,
+  PlayerScore,
   Question,
+  QuestionResult,
   QuestionSet,
   QuestionSetUrlImportResult,
   QuestionUrlImportInput,
@@ -159,11 +161,7 @@ const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
   "kickPlayerFromRoom",
   "confirmRevealBlocks",
-  "submitAnswer",
-  "submitForfeitAnswer",
   "autoForfeitExpiredRound",
-  "cancelForfeitAnswer",
-  "judgeBuzzerAnswer",
   "settleBuzzerRound",
   "finalizeTeamBattleVote",
   "judgeTeamBattleGuess",
@@ -178,6 +176,16 @@ const GAME_RESULT_SNAPSHOT_MUTATION_NAMES = new Set([
   "advanceReviewedQuestion",
   "skipCurrentQuestion",
   "endCurrentGameEarly",
+]);
+
+const DELTA_ONLY_ROUND_CACHE_INVALIDATION_MUTATION_NAMES = new Set([
+  "submitAnswer",
+  "submitForfeitAnswer",
+  "cancelForfeitAnswer",
+  "submitBuzzerAnswer",
+  "judgeBuzzerAnswer",
+  "submitTeamBattleRevealVote",
+  "submitTeamBattleGuessVote",
 ]);
 
 function corsHeaders(request: Request, env: Env) {
@@ -368,6 +376,10 @@ function getResultGameSessionId(result: unknown) {
   return null;
 }
 
+function getDeltaOnlyRoundCacheInvalidationGameSessionId(name: string, result: unknown) {
+  return DELTA_ONLY_ROUND_CACHE_INVALIDATION_MUTATION_NAMES.has(name) ? getResultGameSessionId(result) : null;
+}
+
 async function getRoundSnapshotForMutation(name: string, result: unknown) {
   if (!COMPACT_SNAPSHOT_MUTATION_NAMES.has(name)) {
     return null;
@@ -448,6 +460,10 @@ function asBuzzerAnswer(value: unknown): BuzzerAnswer | null {
     "scoreAwarded" in value
     ? (value as BuzzerAnswer)
     : null;
+}
+
+function asArray<T>(value: unknown): T[] | undefined {
+  return Array.isArray(value) ? (value as T[]) : undefined;
 }
 
 function asQuestion(value: unknown): Question | null {
@@ -778,14 +794,34 @@ function buildRealtimeDeltas(
       type: "answer_canceled",
       gameSession,
       canceledAnswerId: result.canceledAnswerId,
+      canceledPlayerId: typeof argRecord?.playerId === "string" ? argRecord.playerId : undefined,
     });
   } else if (answer) {
-    deltas.push({ scope: "game", type: "answer_submitted", answer });
+    const submittedBuzzerAnswer = isRecord(result) ? asBuzzerAnswer(result.buzzerAnswer) : null;
+    deltas.push({
+      scope: "game",
+      type: "answer_submitted",
+      answer,
+      ...(submittedBuzzerAnswer ? { buzzerAnswer: submittedBuzzerAnswer } : {}),
+    });
   }
 
   const judgedBuzzerAnswer = isRecord(result) ? asBuzzerAnswer(result.judgedAnswer) : null;
   if (judgedBuzzerAnswer && gameSession) {
-    deltas.push({ scope: "game", type: "buzzer_answer_judged", gameSession, buzzerAnswer: judgedBuzzerAnswer });
+    const scoreState = isRecord(result)
+      ? {
+          scores: asArray<PlayerScore>(result.scores),
+          questionResults: asArray<QuestionResult>(result.questionResults),
+          buzzerAnswers: asArray<BuzzerAnswer>(result.buzzerAnswers),
+        }
+      : {};
+    deltas.push({
+      scope: "game",
+      type: "buzzer_answer_judged",
+      gameSession,
+      buzzerAnswer: judgedBuzzerAnswer,
+      ...scoreState,
+    });
   } else if (buzzerAnswer) {
     deltas.push({ scope: "game", type: "buzzer_answer_submitted", buzzerAnswer });
   }
@@ -896,6 +932,7 @@ async function handleRpc(
     localTopic?: string | null;
     localBroadcast?: (message: string) => void;
     localCacheGameResult?: (snapshot: GameResultSnapshot) => Promise<void>;
+    localInvalidateRoundSnapshots?: (gameSessionId: string) => void;
     localScheduleAutoForfeit?: (message: AutoForfeitScheduleMessage) => Promise<void>;
     receivedAtMs?: number;
     body?: RpcBody;
@@ -913,6 +950,11 @@ async function handleRpc(
     const responseResult = attachRoundSnapshot(result, roundSnapshot);
     const scheduleRoundSnapshot = asRoundSnapshot(responseResult) ?? roundSnapshot;
     const topic = options.localTopic ?? await getRoomTopicForBroadcast(name, args, responseResult);
+    const invalidatedGameSessionId = getDeltaOnlyRoundCacheInvalidationGameSessionId(name, responseResult);
+
+    if (invalidatedGameSessionId && options.localTopic && options.localInvalidateRoundSnapshots) {
+      options.localInvalidateRoundSnapshots(invalidatedGameSessionId);
+    }
 
     if (topic) {
       const scheduleMessage = { topic, result: responseResult, roundSnapshot: scheduleRoundSnapshot } satisfies AutoForfeitScheduleMessage;
@@ -1775,6 +1817,7 @@ export class RoomDurableObject {
   private readonly roundSnapshotReadInflight = new Map<string, Promise<RoundSnapshot>>();
   private readonly bootstrapSnapshotReadInflight = new Map<string, Promise<GameBootstrapSnapshot>>();
   private readonly gameResultSnapshotReadInflight = new Map<string, Promise<GameResultSnapshot>>();
+  private readonly roundSnapshotCacheGeneration = new Map<string, number>();
   private actionQueue: Promise<void> = Promise.resolve();
   private r2UploadQueue: Promise<void> = Promise.resolve();
   private nextActionCacheCleanupAt: number | null = null;
@@ -1809,6 +1852,7 @@ export class RoomDurableObject {
       const message = await request.text();
       try {
         const parsedMessage = JSON.parse(message) as BroadcastMessage;
+        this.invalidateRoundSnapshotCachesForMutation(parsedMessage.name, parsedMessage.result);
         const gameResultSnapshot = getBroadcastGameResultSnapshot(parsedMessage);
         if (gameResultSnapshot) {
           await this.cacheGameResultSnapshot(gameResultSnapshot);
@@ -1888,6 +1932,7 @@ export class RoomDurableObject {
         localTopic,
         localBroadcast: (message) => this.broadcast(message),
         localCacheGameResult: (snapshot) => this.cacheGameResultSnapshot(snapshot),
+        localInvalidateRoundSnapshots: (gameSessionId) => this.invalidateRoundSnapshotCaches(gameSessionId),
         localScheduleAutoForfeit: (message) => this.updateAutoForfeitSchedule(message.result, message.roundSnapshot, message.topic),
         receivedAtMs,
       });
@@ -2011,9 +2056,10 @@ export class RoomDurableObject {
       let snapshotPromise = this.roundSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        const cacheGeneration = this.getRoundSnapshotCacheGeneration(gameSessionId);
         snapshotPromise = this.actionQueue.then(
-          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
-          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
+          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
+          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
         );
         this.actionQueue = snapshotPromise.then(
           () => undefined,
@@ -2047,14 +2093,14 @@ export class RoomDurableObject {
     }
   }
 
-  private async loadRoundSnapshotForRead(gameSessionId: string, topic: string | null) {
+  private async loadRoundSnapshotForRead(gameSessionId: string, topic: string | null, cacheGeneration: number) {
     const cachedRoundSnapshot = this.getCachedRoundSnapshot(gameSessionId);
     if (cachedRoundSnapshot) {
       return cachedRoundSnapshot;
     }
 
     const snapshot = await runWithGameDatabase(this.env, () => gameService.getRoundSnapshot(gameSessionId));
-    await this.tryUpdateAutoForfeitSchedule(snapshot, snapshot, topic, "round_snapshot_read");
+    await this.tryUpdateAutoForfeitSchedule(snapshot, snapshot, topic, "round_snapshot_read", cacheGeneration);
     return snapshot;
   }
 
@@ -2095,9 +2141,10 @@ export class RoomDurableObject {
       let snapshotPromise = this.bootstrapSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        const cacheGeneration = this.getRoundSnapshotCacheGeneration(gameSessionId);
         snapshotPromise = this.actionQueue.then(
-          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
-          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null),
+          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
+          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
         );
         this.actionQueue = snapshotPromise.then(
           () => undefined,
@@ -2125,15 +2172,15 @@ export class RoomDurableObject {
     }
   }
 
-  private async loadBootstrapSnapshotForRead(gameSessionId: string, topic: string | null) {
+  private async loadBootstrapSnapshotForRead(gameSessionId: string, topic: string | null, cacheGeneration: number) {
     const cachedSnapshot = this.getCachedBootstrapSnapshot(gameSessionId);
     if (cachedSnapshot) {
       return cachedSnapshot;
     }
 
     const snapshot = await runWithGameDatabase(this.env, () => gameService.getGameBootstrapSnapshot(gameSessionId));
-    await this.tryUpdateAutoForfeitSchedule(snapshot, snapshot.roundSnapshot, topic, "bootstrap_snapshot_read");
-    await this.cacheBootstrapSnapshot(snapshot);
+    await this.tryUpdateAutoForfeitSchedule(snapshot, snapshot.roundSnapshot, topic, "bootstrap_snapshot_read", cacheGeneration);
+    await this.cacheBootstrapSnapshot(snapshot, cacheGeneration);
     return snapshot;
   }
 
@@ -2290,6 +2337,7 @@ export class RoomDurableObject {
           topic: nextTopic,
         };
       });
+      this.invalidateRoundSnapshotCachesForMutation(payload.name ?? "", responseResult);
       if (gameResultSnapshot) {
         await this.cacheGameResultSnapshot(gameResultSnapshot);
       }
@@ -2398,6 +2446,32 @@ export class RoomDurableObject {
     return nextExpiresAt;
   }
 
+  private invalidateRoundSnapshotCachesForMutation(name: string, result: unknown) {
+    const gameSessionId = getDeltaOnlyRoundCacheInvalidationGameSessionId(name, result);
+    if (!gameSessionId) {
+      return;
+    }
+
+    this.invalidateRoundSnapshotCaches(gameSessionId);
+  }
+
+  private getRoundSnapshotCacheGeneration(gameSessionId: string) {
+    return this.roundSnapshotCacheGeneration.get(gameSessionId) ?? 0;
+  }
+
+  private isRoundSnapshotCacheGenerationCurrent(gameSessionId: string, generation: number | undefined) {
+    return generation == null || this.getRoundSnapshotCacheGeneration(gameSessionId) === generation;
+  }
+
+  private invalidateRoundSnapshotCaches(gameSessionId: string) {
+    this.roundSnapshotCacheGeneration.set(gameSessionId, this.getRoundSnapshotCacheGeneration(gameSessionId) + 1);
+    this.roundSnapshotCache.delete(gameSessionId);
+    this.bootstrapSnapshotCache.delete(gameSessionId);
+    this.roundSnapshotReadInflight.delete(gameSessionId);
+    this.bootstrapSnapshotReadInflight.delete(gameSessionId);
+    this.nextRoundSnapshotCacheCleanupAt = this.cleanupRoundSnapshotCache();
+  }
+
   private getCachedRoundSnapshot(gameSessionId: string) {
     const cached = this.roundSnapshotCache.get(gameSessionId);
     if (!cached) {
@@ -2413,9 +2487,17 @@ export class RoomDurableObject {
     return cached.snapshot;
   }
 
-  private async cacheRoundSnapshot(snapshot: RoundSnapshot) {
+  private async cacheRoundSnapshot(snapshot: RoundSnapshot, cacheGeneration?: number) {
+    if (!this.isRoundSnapshotCacheGenerationCurrent(snapshot.gameSession.id, cacheGeneration)) {
+      return;
+    }
+
     const now = Date.now();
     this.cleanupRoundSnapshotCache(now);
+    if (!this.isRoundSnapshotCacheGenerationCurrent(snapshot.gameSession.id, cacheGeneration)) {
+      return;
+    }
+
     const current = this.roundSnapshotCache.get(snapshot.gameSession.id);
     if (current && current.expiresAt > now && isStaleRoundSnapshot(snapshot, current.snapshot)) {
       console.info(
@@ -2454,10 +2536,18 @@ export class RoomDurableObject {
     return cached.snapshot;
   }
 
-  private async cacheBootstrapSnapshot(snapshot: GameBootstrapSnapshot) {
+  private async cacheBootstrapSnapshot(snapshot: GameBootstrapSnapshot, cacheGeneration?: number) {
+    if (!this.isRoundSnapshotCacheGenerationCurrent(snapshot.gameSession.id, cacheGeneration)) {
+      return;
+    }
+
     const now = Date.now();
     this.cleanupRoundSnapshotCache(now);
-    await this.cacheRoundSnapshot(snapshot.roundSnapshot);
+    await this.cacheRoundSnapshot(snapshot.roundSnapshot, cacheGeneration);
+    if (!this.isRoundSnapshotCacheGenerationCurrent(snapshot.gameSession.id, cacheGeneration)) {
+      return;
+    }
+
     const expiresAt = now + BOOTSTRAP_SNAPSHOT_CACHE_TTL_MS;
     this.bootstrapSnapshotCache.set(snapshot.gameSession.id, { expiresAt, snapshot });
     this.nextRoundSnapshotCacheCleanupAt =
@@ -2526,17 +2616,23 @@ export class RoomDurableObject {
     roundSnapshot: RoundSnapshot | null,
     topic: string | null,
     source: string,
+    cacheGeneration?: number,
   ) {
     try {
-      await this.updateAutoForfeitSchedule(result, roundSnapshot, topic);
+      await this.updateAutoForfeitSchedule(result, roundSnapshot, topic, cacheGeneration);
     } catch (error) {
       logAuxiliaryFailure("auto_forfeit_schedule_failed", error, { topic, source });
     }
   }
 
-  private async updateAutoForfeitSchedule(result: unknown, roundSnapshot: RoundSnapshot | null, topic: string | null) {
+  private async updateAutoForfeitSchedule(
+    result: unknown,
+    roundSnapshot: RoundSnapshot | null,
+    topic: string | null,
+    cacheGeneration?: number,
+  ) {
     if (roundSnapshot) {
-      await this.cacheRoundSnapshot(roundSnapshot);
+      await this.cacheRoundSnapshot(roundSnapshot, cacheGeneration);
     }
 
     const gameSession = getAutoForfeitGameSession(result, roundSnapshot);

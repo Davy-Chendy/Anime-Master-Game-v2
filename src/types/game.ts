@@ -251,12 +251,14 @@ export type RealtimeDelta =
       scope: "game";
       type: "answer_submitted";
       answer: Answer;
+      buzzerAnswer?: BuzzerAnswer;
     }
   | {
       scope: "game";
       type: "answer_canceled";
       gameSession: GameSession;
       canceledAnswerId: string;
+      canceledPlayerId?: string;
     }
   | {
       scope: "game";
@@ -268,6 +270,9 @@ export type RealtimeDelta =
       type: "buzzer_answer_judged";
       gameSession: GameSession;
       buzzerAnswer: BuzzerAnswer;
+      scores?: PlayerScore[];
+      questionResults?: QuestionResult[];
+      buzzerAnswers?: BuzzerAnswer[];
     }
   | {
       scope: "game";
