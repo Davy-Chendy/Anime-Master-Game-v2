@@ -48,6 +48,7 @@ type BroadcastMessage = {
   result: unknown;
   args: unknown[];
   topic: string;
+  version?: number;
   clientActionId?: string;
   delta?: RealtimeDelta;
   deltas?: RealtimeDelta[];
@@ -92,6 +93,7 @@ const AUTO_FORFEIT_ALARM_STORAGE_KEY = "auto-forfeit-alarm";
 const AUTO_FORFEIT_COMPLETED_KEY_STORAGE_KEY = "auto-forfeit-completed-key";
 const AUTO_FORFEIT_ALARM_RETRY_DELAY_MS = 1000;
 const AUTO_FORFEIT_ALARM_MAX_ATTEMPTS = 3;
+const REALTIME_VERSION_STORAGE_PREFIX = "realtime-version:";
 const TEAM_BATTLE_VOTE_ALARM_STORAGE_KEY = "team-battle-vote-alarm";
 const TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY = "team-battle-vote-completed-key";
 const TEAM_BATTLE_VOTE_ALARM_RETRY_DELAY_MS = 1000;
@@ -110,6 +112,10 @@ const DEFAULT_REMOTE_IMAGE_PROXY_CANDIDATES = [
   "https://api.allorigins.win/raw?url=",
   "https://api.codetabs.com/v1/proxy?quest=",
 ];
+
+function getRealtimeVersionFloor() {
+  return Date.now() * 1000;
+}
 
 const SERVER_RECEIVED_AT_ACTION_NAMES = new Set([
   "submitAnswer",
@@ -930,7 +936,7 @@ async function handleRpc(
   env: Env,
   options: {
     localTopic?: string | null;
-    localBroadcast?: (message: string) => void;
+    localBroadcast?: (message: BroadcastMessage) => Promise<void>;
     localCacheGameResult?: (snapshot: GameResultSnapshot) => Promise<void>;
     localInvalidateRoundSnapshots?: (gameSessionId: string) => void;
     localScheduleAutoForfeit?: (message: AutoForfeitScheduleMessage) => Promise<void>;
@@ -988,7 +994,7 @@ async function handleRpc(
         }
 
         if (options.localTopic === topic && options.localBroadcast) {
-          options.localBroadcast(JSON.stringify(message));
+          await options.localBroadcast(message);
         } else {
           await broadcast(env, message);
         }
@@ -1820,6 +1826,9 @@ export class RoomDurableObject {
   private readonly roundSnapshotCacheGeneration = new Map<string, number>();
   private actionQueue: Promise<void> = Promise.resolve();
   private r2UploadQueue: Promise<void> = Promise.resolve();
+  private realtimeVersionQueue: Promise<void> = Promise.resolve();
+  private realtimeVersionPersistQueue: Promise<void> = Promise.resolve();
+  private readonly realtimeVersions = new Map<string, number>();
   private nextActionCacheCleanupAt: number | null = null;
   private nextRoundSnapshotCacheCleanupAt: number | null = null;
 
@@ -1850,8 +1859,15 @@ export class RoomDurableObject {
 
     if (url.pathname === "/broadcast" && request.method === "POST") {
       const message = await request.text();
+      let parsedMessage: BroadcastMessage;
       try {
-        const parsedMessage = JSON.parse(message) as BroadcastMessage;
+        parsedMessage = JSON.parse(message) as BroadcastMessage;
+      } catch (error) {
+        logAuxiliaryFailure("broadcast_parse_failed", error);
+        return new Response("无效的广播消息。", { status: 400 });
+      }
+
+      try {
         this.invalidateRoundSnapshotCachesForMutation(parsedMessage.name, parsedMessage.result);
         const gameResultSnapshot = getBroadcastGameResultSnapshot(parsedMessage);
         if (gameResultSnapshot) {
@@ -1866,7 +1882,8 @@ export class RoomDurableObject {
       } catch (error) {
         logAuxiliaryFailure("broadcast_auxiliary_parse_failed", error);
       }
-      this.broadcast(message);
+
+      await this.broadcastChangeMessage(parsedMessage);
       return new Response(null, { status: 204 });
     }
 
@@ -1930,7 +1947,7 @@ export class RoomDurableObject {
       const localTopic = request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER);
       return await handleRpc(request, this.env, {
         localTopic,
-        localBroadcast: (message) => this.broadcast(message),
+        localBroadcast: (message) => this.broadcastChangeMessage(message),
         localCacheGameResult: (snapshot) => this.cacheGameResultSnapshot(snapshot),
         localInvalidateRoundSnapshots: (gameSessionId) => this.invalidateRoundSnapshotCaches(gameSessionId),
         localScheduleAutoForfeit: (message) => this.updateAutoForfeitSchedule(message.result, message.roundSnapshot, message.topic),
@@ -2366,7 +2383,7 @@ export class RoomDurableObject {
             deltas,
           } satisfies BroadcastMessage;
           if (socketAttachment?.topic === topic) {
-            this.broadcast(JSON.stringify(changeMessage));
+            await this.broadcastChangeMessage(changeMessage);
           } else {
             await broadcast(this.env, changeMessage);
           }
@@ -2803,17 +2820,15 @@ export class RoomDurableObject {
       await this.tryUpdateAutoForfeitSchedule(responseResult, roundSnapshot, alarm.topic, "auto_forfeit_alarm");
 
       if (deltas.length > 0) {
-        this.broadcast(
-          JSON.stringify({
-            type: "change",
-            name: "autoForfeitExpiredRound",
-            result: stripRoundSnapshotFromBroadcastResult(responseResult),
-            args: [{ gameSessionId: alarm.gameSessionId }],
-            topic: alarm.topic,
-            delta: deltas[0],
-            deltas,
-          } satisfies BroadcastMessage),
-        );
+        await this.broadcastChangeMessage({
+          type: "change",
+          name: "autoForfeitExpiredRound",
+          result: stripRoundSnapshotFromBroadcastResult(responseResult),
+          args: [{ gameSessionId: alarm.gameSessionId }],
+          topic: alarm.topic,
+          delta: deltas[0],
+          deltas,
+        } satisfies BroadcastMessage);
       }
     } catch (error) {
       if ((alarm.attempts ?? 0) + 1 < AUTO_FORFEIT_ALARM_MAX_ATTEMPTS) {
@@ -2875,17 +2890,15 @@ export class RoomDurableObject {
       await this.tryUpdateAutoForfeitSchedule(responseResult, roundSnapshot, alarm.topic, "team_battle_vote_alarm");
 
       if (deltas.length > 0) {
-        this.broadcast(
-          JSON.stringify({
-            type: "change",
-            name: "finalizeTeamBattleVote",
-            result: stripRoundSnapshotFromBroadcastResult(responseResult),
-            args: [{ gameSessionId: alarm.gameSessionId }],
-            topic: alarm.topic,
-            delta: deltas[0],
-            deltas,
-          } satisfies BroadcastMessage),
-        );
+        await this.broadcastChangeMessage({
+          type: "change",
+          name: "finalizeTeamBattleVote",
+          result: stripRoundSnapshotFromBroadcastResult(responseResult),
+          args: [{ gameSessionId: alarm.gameSessionId }],
+          topic: alarm.topic,
+          delta: deltas[0],
+          deltas,
+        } satisfies BroadcastMessage);
       }
     } catch (error) {
       if ((alarm.attempts ?? 0) + 1 < TEAM_BATTLE_VOTE_ALARM_MAX_ATTEMPTS) {
@@ -2906,6 +2919,56 @@ export class RoomDurableObject {
         }),
       );
     }
+  }
+
+  private async nextRealtimeVersion(topic: string) {
+    const task = this.realtimeVersionQueue.then(
+      () => this.allocateRealtimeVersion(topic),
+      () => this.allocateRealtimeVersion(topic),
+    );
+    this.realtimeVersionQueue = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await task;
+  }
+
+  private async allocateRealtimeVersion(topic: string) {
+    const key = `${REALTIME_VERSION_STORAGE_PREFIX}${topic}`;
+    let currentVersion = this.realtimeVersions.get(topic);
+    if (currentVersion == null) {
+      const versionFloor = getRealtimeVersionFloor();
+      try {
+        const storedVersion = await this.state.storage.get<number>(key);
+        currentVersion = Math.max(
+          typeof storedVersion === "number" && Number.isFinite(storedVersion) ? storedVersion : 0,
+          versionFloor,
+        );
+      } catch (error) {
+        logAuxiliaryFailure("realtime_version_read_failed", error, { topic });
+        currentVersion = versionFloor;
+      }
+    }
+
+    const nextVersion = currentVersion + 1;
+    this.realtimeVersions.set(topic, nextVersion);
+    this.persistRealtimeVersion(key, nextVersion, topic);
+    return nextVersion;
+  }
+
+  private persistRealtimeVersion(key: string, version: number, topic: string) {
+    const persistTask = this.realtimeVersionPersistQueue.then(
+      () => this.state.storage.put(key, version),
+      () => this.state.storage.put(key, version),
+    );
+    this.realtimeVersionPersistQueue = persistTask.catch((error) => {
+      logAuxiliaryFailure("realtime_version_write_failed", error, { topic, version });
+    });
+  }
+
+  private async broadcastChangeMessage(message: BroadcastMessage) {
+    const version = await this.nextRealtimeVersion(message.topic);
+    this.broadcast(JSON.stringify({ ...message, version } satisfies BroadcastMessage));
   }
 
   private broadcast(message: string) {

@@ -9,6 +9,7 @@ type ChangeMessage = {
   result: unknown;
   args: unknown[];
   topic: string;
+  version?: number;
   clientActionId?: string;
   delta?: RealtimeDelta;
   deltas?: RealtimeDelta[];

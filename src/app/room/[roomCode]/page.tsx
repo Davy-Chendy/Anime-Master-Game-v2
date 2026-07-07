@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "@/lib/router";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
@@ -225,6 +225,10 @@ function getTeamStyles(team: TeamBattleTeam) {
 
 function getRealtimeDeltas(message: { delta?: RealtimeDelta; deltas?: RealtimeDelta[] }) {
   return message.deltas ?? (message.delta ? [message.delta] : []);
+}
+
+function getRealtimeVersion(message: { version?: number }) {
+  return typeof message.version === "number" && Number.isFinite(message.version) ? message.version : null;
 }
 
 function isQuestionSetUpdatedDelta(
@@ -1486,6 +1490,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
   const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
+  const lastRoomRealtimeVersionRef = useRef<number | null>(null);
+  const missedRoomRealtimeVersionRef = useRef(false);
+  const roomCatchUpTargetVersionRef = useRef<number | null>(null);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     gameMode: "ROUND_REVEAL",
     maxRevealRounds: 3,
@@ -1651,34 +1658,70 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
 
     let refreshPromise: Promise<void> | null = null;
+    lastRoomRealtimeVersionRef.current = null;
+    missedRoomRealtimeVersionRef.current = false;
+    roomCatchUpTargetVersionRef.current = null;
+
+    function shouldContinueRoomCatchUp(coveredTargetVersion: number | null) {
+      const latestTargetVersion = roomCatchUpTargetVersionRef.current;
+      return (
+        latestTargetVersion != null &&
+        (coveredTargetVersion == null || latestTargetVersion > coveredTargetVersion)
+      );
+    }
 
     async function refreshLatestRoom() {
       if (refreshPromise) {
         return refreshPromise;
       }
 
-      refreshPromise = doRefreshLatestRoom().finally(() => {
+      const startTargetVersion = roomCatchUpTargetVersionRef.current;
+      const runPromise = doRefreshLatestRoom(startTargetVersion);
+      refreshPromise = runPromise.then(() => undefined).finally(() => {
         refreshPromise = null;
+      });
+      void runPromise.then((didRefresh) => {
+        if (didRefresh && isActive && shouldContinueRoomCatchUp(startTargetVersion)) {
+          window.setTimeout(() => {
+            if (isActive) {
+              void refreshLatestRoom();
+            }
+          }, 0);
+        }
       });
       return refreshPromise;
     }
 
-    async function doRefreshLatestRoom() {
+    async function doRefreshLatestRoom(coveredTargetVersion: number | null) {
       try {
         const latestRoom = await getRoomWithPlayers(roomCode);
 
         if (!isActive) {
-          return;
+          return false;
         }
 
         if (!latestRoom) {
           markRoomDissolved();
-          return;
+          return true;
         }
 
         applyRoomUpdate(latestRoom);
+        if (coveredTargetVersion != null) {
+          lastRoomRealtimeVersionRef.current = Math.max(
+            lastRoomRealtimeVersionRef.current ?? 0,
+            coveredTargetVersion,
+          );
+        }
+        if (shouldContinueRoomCatchUp(coveredTargetVersion)) {
+          missedRoomRealtimeVersionRef.current = true;
+        } else {
+          roomCatchUpTargetVersionRef.current = null;
+          missedRoomRealtimeVersionRef.current = false;
+        }
+        return true;
       } catch {
         // Realtime remains the primary path; this catch-up read is best effort.
+        return false;
       }
     }
 
@@ -1687,6 +1730,34 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     const unsubscribe = subscribeRealtimeTopic(
       `room:${room.id}`,
       (message) => {
+        const messageVersion = getRealtimeVersion(message);
+        if (messageVersion != null) {
+          const lastVersion = lastRoomRealtimeVersionRef.current;
+          if (lastVersion != null && messageVersion <= lastVersion) {
+            return;
+          }
+
+          if (missedRoomRealtimeVersionRef.current) {
+            roomCatchUpTargetVersionRef.current = Math.max(roomCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            void refreshLatestRoom();
+            return;
+          }
+
+          if (lastVersion != null && messageVersion > lastVersion + 1) {
+            missedRoomRealtimeVersionRef.current = true;
+            roomCatchUpTargetVersionRef.current = Math.max(roomCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            void refreshLatestRoom();
+            return;
+          }
+
+          lastRoomRealtimeVersionRef.current = messageVersion;
+        }
+
+        if (missedRoomRealtimeVersionRef.current) {
+          void refreshLatestRoom();
+          return;
+        }
+
         const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
         if (dissolvedDelta?.roomId === room.id) {
           markRoomDissolved();

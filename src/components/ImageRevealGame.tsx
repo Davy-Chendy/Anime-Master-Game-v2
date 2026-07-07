@@ -316,6 +316,10 @@ function getRealtimeDeltas(message: { delta?: RealtimeDelta; deltas?: RealtimeDe
   return message.deltas ?? (message.delta ? [message.delta] : []);
 }
 
+function getRealtimeVersion(message: { version?: number }) {
+  return typeof message.version === "number" && Number.isFinite(message.version) ? message.version : null;
+}
+
 function getRoundSnapshotFromValue(value: unknown) {
   return isRecord(value) && isRoundSnapshot(value.roundSnapshot) ? value.roundSnapshot : null;
 }
@@ -425,8 +429,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
-  const roundSnapshotFetchRef = useRef<{ gameSessionId: string; promise: Promise<RoundSnapshot> } | null>(null);
+  const roundSnapshotFetchRef = useRef<{
+    gameSessionId: string;
+    promise: Promise<RoundSnapshot>;
+    targetVersion: number | null;
+  } | null>(null);
   const isBootstrapLoadingRef = useRef(false);
+  const lastGameRealtimeVersionRef = useRef<number | null>(null);
+  const missedGameRealtimeVersionRef = useRef(false);
+  const gameCatchUpTargetVersionRef = useRef<number | null>(null);
+  const onRoomUpdatedRef = useRef(onRoomUpdated);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
     playerImageCanvasRef.current = canvas;
@@ -629,20 +641,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     }
 
     const currentFetch = roundSnapshotFetchRef.current;
-    const snapshotPromise =
-      currentFetch?.gameSessionId === room.currentGameId
-        ? currentFetch.promise
-        : getRoundSnapshot(room.currentGameId).finally(() => {
-            if (roundSnapshotFetchRef.current?.gameSessionId === room.currentGameId) {
-              roundSnapshotFetchRef.current = null;
-            }
-          });
-
-    if (!currentFetch || currentFetch.gameSessionId !== room.currentGameId) {
-      roundSnapshotFetchRef.current = { gameSessionId: room.currentGameId, promise: snapshotPromise };
+    let snapshotFetch = currentFetch?.gameSessionId === room.currentGameId ? currentFetch : null;
+    if (!snapshotFetch) {
+      const targetVersion = gameCatchUpTargetVersionRef.current;
+      const snapshotPromise = getRoundSnapshot(room.currentGameId).finally(() => {
+        if (roundSnapshotFetchRef.current?.promise === snapshotPromise) {
+          roundSnapshotFetchRef.current = null;
+        }
+      });
+      snapshotFetch = { gameSessionId: room.currentGameId, promise: snapshotPromise, targetVersion };
+      roundSnapshotFetchRef.current = snapshotFetch;
     }
 
-    snapshotPromise
+    snapshotFetch.promise
       .then((snapshot) => {
         if (snapshot.gameSession.id !== room.currentGameId) {
           return;
@@ -650,6 +661,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
         applyRoundSnapshot(snapshot);
         setImageLoadFailed(false);
+        const coveredTargetVersion = snapshotFetch.targetVersion;
+        if (coveredTargetVersion != null) {
+          lastGameRealtimeVersionRef.current = Math.max(
+            lastGameRealtimeVersionRef.current ?? 0,
+            coveredTargetVersion,
+          );
+        }
+
+        const latestTargetVersion = gameCatchUpTargetVersionRef.current;
+        if (
+          latestTargetVersion != null &&
+          (coveredTargetVersion == null || latestTargetVersion > coveredTargetVersion)
+        ) {
+          missedGameRealtimeVersionRef.current = true;
+          catchUpRoundSnapshot();
+          return;
+        } else {
+          gameCatchUpTargetVersionRef.current = null;
+          missedGameRealtimeVersionRef.current = false;
+        }
       })
       .catch((error) => {
         onError(error instanceof Error ? error.message : "同步游戏快照失败");
@@ -710,6 +741,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   }, [gameSession]);
 
   useEffect(() => {
+    onRoomUpdatedRef.current = onRoomUpdated;
+  }, [onRoomUpdated]);
+
+  useEffect(() => {
+    lastGameRealtimeVersionRef.current = null;
+    missedGameRealtimeVersionRef.current = false;
+    gameCatchUpTargetVersionRef.current = null;
+  }, [room.currentGameId, room.id]);
+
+  useEffect(() => {
     let isMounted = true;
     let unbindGameSessionTopic: () => void = () => undefined;
 
@@ -730,6 +771,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           setQuestions(bootstrapSnapshot.questions);
           setImageLoadFailed(false);
           applyRoundSnapshot(bootstrapSnapshot.roundSnapshot);
+          missedGameRealtimeVersionRef.current = false;
         }
       } catch (error) {
         if (isMounted) {
@@ -761,12 +803,40 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     return subscribeRealtimeTopic(
       `room:${room.id}`,
       (message) => {
+        const messageVersion = getRealtimeVersion(message);
+        if (messageVersion != null) {
+          const lastVersion = lastGameRealtimeVersionRef.current;
+          if (lastVersion != null && messageVersion <= lastVersion) {
+            return;
+          }
+
+          if (missedGameRealtimeVersionRef.current) {
+            gameCatchUpTargetVersionRef.current = Math.max(gameCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            catchUpRoundSnapshot();
+            return;
+          }
+
+          if (lastVersion != null && messageVersion > lastVersion + 1) {
+            missedGameRealtimeVersionRef.current = true;
+            gameCatchUpTargetVersionRef.current = Math.max(gameCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            catchUpRoundSnapshot();
+            return;
+          }
+
+          lastGameRealtimeVersionRef.current = messageVersion;
+        }
+
+        if (missedGameRealtimeVersionRef.current) {
+          catchUpRoundSnapshot();
+          return;
+        }
+
         const currentGameSession = gameSessionRef.current;
         let handled = false;
 
         for (const delta of getRealtimeDeltas(message)) {
           if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
-            onRoomUpdated?.(delta.room);
+            onRoomUpdatedRef.current?.(delta.room);
             handled = true;
             continue;
           }
@@ -931,7 +1001,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     catchUpRoundSnapshot,
     isPresenter,
     onError,
-    onRoomUpdated,
     playerId,
     refreshRoundData,
     room.currentGameId,
@@ -2072,7 +2141,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     setSelectedBlocks([]);
 
     if (skipped.room) {
-      onRoomUpdated?.(skipped.room);
+      onRoomUpdatedRef.current?.(skipped.room);
     }
 
   }
@@ -2138,7 +2207,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     setSelectedBlocks([]);
 
     if (advanced.room) {
-      onRoomUpdated?.(advanced.room);
+      onRoomUpdatedRef.current?.(advanced.room);
     }
 
   }
