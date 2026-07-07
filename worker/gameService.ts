@@ -3062,6 +3062,86 @@ async function addScoreToPlayer(params: {
   });
 }
 
+async function insertQuestionResultsForPlayers(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  playerIds: string[];
+  scoredRound: number;
+  scoreAwarded: number;
+  judgedByPlayerId: string;
+}) {
+  const uniquePlayerIds = Array.from(new Set(params.playerIds)).filter(Boolean);
+  if (uniquePlayerIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await d1
+    .from("question_results")
+    .insert(
+      uniquePlayerIds.map((playerId) => ({
+        game_session_id: params.gameSessionId,
+        question_index: params.questionIndex,
+        player_id: playerId,
+        scored_round: params.scoredRound,
+        score_awarded: params.scoreAwarded,
+        judged_by_player_id: params.judgedByPlayerId,
+      })),
+      {
+        onConflict: "game_session_id,question_index,player_id",
+        ignoreDuplicates: true,
+      },
+    )
+    .select("player_id")
+    .returns<{ player_id: string }[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((result) => result.player_id);
+}
+
+async function bulkAddScoresToPlayers(params: {
+  gameSessionId: string;
+  playerIds: string[];
+  scoreAwarded: number;
+}) {
+  const uniquePlayerIds = Array.from(new Set(params.playerIds)).filter(Boolean);
+  if (uniquePlayerIds.length === 0) {
+    return;
+  }
+
+  const { data: sessionScores, error: scoreLoadError } = await d1
+    .from("player_scores")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .returns<DbPlayerScore[]>();
+
+  if (scoreLoadError) {
+    throw new Error(scoreLoadError.message);
+  }
+
+  const scoreByPlayerId = new Map((sessionScores ?? []).map((score) => [score.player_id, score]));
+  const upsertRows = uniquePlayerIds.map((playerId) => {
+    const existingScore = scoreByPlayerId.get(playerId);
+
+    return {
+      game_session_id: params.gameSessionId,
+      player_id: playerId,
+      score: (existingScore?.score ?? 0) + params.scoreAwarded,
+      correct_count: (existingScore?.correct_count ?? 0) + 1,
+    };
+  });
+
+  const { error: scoreError } = await d1.from("player_scores").upsert(upsertRows, {
+    onConflict: "game_session_id,player_id",
+  });
+
+  if (scoreError) {
+    throw new Error(scoreError.message);
+  }
+}
+
 async function recalculateRankedBuzzerScores(params: {
   gameSession: DbGameSession;
 }) {
@@ -4400,28 +4480,19 @@ export async function judgeTeamBattleGuess(params: {
     [winningTeam]: state.teamScores[winningTeam] + 1,
   };
 
-  for (const scoredPlayerId of winningMembers) {
-    const { error: resultError } = await d1.from("question_results").insert({
-      game_session_id: currentGameSession.id,
-      question_index: currentGameSession.current_question_index,
-      player_id: scoredPlayerId,
-      scored_round: currentGameSession.current_reveal_round,
-      score_awarded: 1,
-      judged_by_player_id: params.presenterPlayerId,
-    });
-
-    if (resultError && !isUniqueViolation(resultError)) {
-      throw new Error(resultError.message);
-    }
-
-    if (!resultError) {
-      await addScoreToPlayer({
-        gameSessionId: currentGameSession.id,
-        playerId: scoredPlayerId,
-        scoreAwarded: 1,
-      });
-    }
-  }
+  const newlyScoredPlayerIds = await insertQuestionResultsForPlayers({
+    gameSessionId: currentGameSession.id,
+    questionIndex: currentGameSession.current_question_index,
+    playerIds: winningMembers,
+    scoredRound: currentGameSession.current_reveal_round,
+    scoreAwarded: 1,
+    judgedByPlayerId: params.presenterPlayerId,
+  });
+  await bulkAddScoresToPlayers({
+    gameSessionId: currentGameSession.id,
+    playerIds: newlyScoredPlayerIds,
+    scoreAwarded: 1,
+  });
 
   const nextState: TeamBattleState = {
     ...state,
@@ -4531,58 +4602,19 @@ export async function gradeAnswersAndAdvance(params: {
   const uniqueCorrectPlayerIds = Array.from(new Set(params.correctPlayerIds)).filter(
     (playerId) => playerId && playerId !== params.presenterPlayerId && eligiblePlayerSet.has(playerId),
   );
-  const newlyScoredPlayerIds: string[] = [];
-
-  for (const correctPlayerId of uniqueCorrectPlayerIds) {
-    const { error } = await d1.from("question_results").insert({
-      game_session_id: currentGameSession.id,
-      question_index: questionIndex,
-      player_id: correctPlayerId,
-      scored_round: currentRound,
-      score_awarded: roundScore,
-      judged_by_player_id: params.presenterPlayerId,
-    });
-
-    if (error) {
-      if (isUniqueViolation(error)) {
-        continue;
-      }
-
-      throw new Error(error.message);
-    }
-
-    newlyScoredPlayerIds.push(correctPlayerId);
-  }
-
-  for (const scoredPlayerId of newlyScoredPlayerIds) {
-    const { data: existingScore, error: scoreLoadError } = await d1
-      .from("player_scores")
-      .select("*")
-      .eq("game_session_id", currentGameSession.id)
-      .eq("player_id", scoredPlayerId)
-      .maybeSingle<DbPlayerScore>();
-
-    if (scoreLoadError) {
-      throw new Error(scoreLoadError.message);
-    }
-
-    const { error: scoreError } = await d1.from("player_scores").upsert(
-      {
-        id: existingScore?.id,
-        game_session_id: currentGameSession.id,
-        player_id: scoredPlayerId,
-        score: (existingScore?.score ?? 0) + roundScore,
-        correct_count: (existingScore?.correct_count ?? 0) + 1,
-      },
-      {
-        onConflict: "game_session_id,player_id",
-      },
-    );
-
-    if (scoreError) {
-      throw new Error(scoreError.message);
-    }
-  }
+  const newlyScoredPlayerIds = await insertQuestionResultsForPlayers({
+    gameSessionId: currentGameSession.id,
+    questionIndex,
+    playerIds: uniqueCorrectPlayerIds,
+    scoredRound: currentRound,
+    scoreAwarded: roundScore,
+    judgedByPlayerId: params.presenterPlayerId,
+  });
+  await bulkAddScoresToPlayers({
+    gameSessionId: currentGameSession.id,
+    playerIds: newlyScoredPlayerIds,
+    scoreAwarded: roundScore,
+  });
 
   const { data: questionResults, error: questionResultsError } = await d1
     .from("question_results")
