@@ -2074,13 +2074,10 @@ export class RoomDurableObject {
       if (!snapshotPromise) {
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
         const cacheGeneration = this.getRoundSnapshotCacheGeneration(gameSessionId);
-        snapshotPromise = this.actionQueue.then(
-          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
-          () => this.loadRoundSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
-        );
-        this.actionQueue = snapshotPromise.then(
-          () => undefined,
-          () => undefined,
+        snapshotPromise = this.loadRoundSnapshotForRead(
+          gameSessionId,
+          socketAttachment?.topic ?? null,
+          cacheGeneration,
         );
         this.roundSnapshotReadInflight.set(gameSessionId, snapshotPromise);
         void snapshotPromise.then(
@@ -2159,13 +2156,10 @@ export class RoomDurableObject {
       if (!snapshotPromise) {
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
         const cacheGeneration = this.getRoundSnapshotCacheGeneration(gameSessionId);
-        snapshotPromise = this.actionQueue.then(
-          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
-          () => this.loadBootstrapSnapshotForRead(gameSessionId, socketAttachment?.topic ?? null, cacheGeneration),
-        );
-        this.actionQueue = snapshotPromise.then(
-          () => undefined,
-          () => undefined,
+        snapshotPromise = this.loadBootstrapSnapshotForRead(
+          gameSessionId,
+          socketAttachment?.topic ?? null,
+          cacheGeneration,
         );
         this.bootstrapSnapshotReadInflight.set(gameSessionId, snapshotPromise);
         void snapshotPromise.then(
@@ -2237,14 +2231,7 @@ export class RoomDurableObject {
 
       let snapshotPromise = this.gameResultSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
-        snapshotPromise = this.actionQueue.then(
-          () => this.loadGameResultSnapshotForRead(gameSessionId),
-          () => this.loadGameResultSnapshotForRead(gameSessionId),
-        );
-        this.actionQueue = snapshotPromise.then(
-          () => undefined,
-          () => undefined,
-        );
+        snapshotPromise = this.loadGameResultSnapshotForRead(gameSessionId);
         this.gameResultSnapshotReadInflight.set(gameSessionId, snapshotPromise);
         void snapshotPromise.then(
           () => {
