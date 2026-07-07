@@ -3264,25 +3264,27 @@ async function forfeitMissingRoundActions(
     (guesserId) => !resolvedRoundActionState.hasPlayerActed(guesserId),
   );
 
-  for (const guesserId of missingGuesserIds) {
-    const { error } = await d1.from("answers").insert(
-      {
-        game_session_id: currentGameSession.id,
-        question_index: currentGameSession.current_question_index,
-        reveal_round: currentGameSession.current_reveal_round,
-        player_id: guesserId,
-        answer_text: FORFEIT_ANSWER_TEXT,
-        submitted_at: now,
-      },
-    );
+  if (missingGuesserIds.length === 0) {
+    return 0;
+  }
 
-    if (error) {
-      if (isUniqueViolation(error)) {
-        continue;
-      }
+  const { error } = await d1.from("answers").insert(
+    missingGuesserIds.map((guesserId) => ({
+      game_session_id: currentGameSession.id,
+      question_index: currentGameSession.current_question_index,
+      reveal_round: currentGameSession.current_reveal_round,
+      player_id: guesserId,
+      answer_text: FORFEIT_ANSWER_TEXT,
+      submitted_at: now,
+    })),
+    {
+      onConflict: "game_session_id,question_index,reveal_round,player_id",
+      ignoreDuplicates: true,
+    },
+  );
 
-      throw new Error(error.message);
-    }
+  if (error) {
+    throw new Error(error.message);
   }
 
   return missingGuesserIds.length;

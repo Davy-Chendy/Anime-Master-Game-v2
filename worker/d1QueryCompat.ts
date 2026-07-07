@@ -166,6 +166,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private selectedColumns: string[] | null = null;
   private payload: Record<string, unknown> | Record<string, unknown>[] | null = null;
   private conflictColumns: string[] = [];
+  private ignoreDuplicates = false;
   private singleMode: "none" | "single" | "maybeSingle" = "none";
 
   constructor(private readonly db: D1Database | null, private readonly table: string) {}
@@ -178,9 +179,15 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     return this;
   }
 
-  insert(payload: Record<string, unknown> | Record<string, unknown>[]) {
+  insert(payload: Record<string, unknown> | Record<string, unknown>[], options?: { onConflict?: string; ignoreDuplicates?: boolean }) {
     this.operation = "insert";
     this.payload = payload;
+    this.conflictColumns =
+      options?.onConflict
+        ?.split(",")
+        .map((column) => column.trim())
+        .filter(Boolean) ?? [];
+    this.ignoreDuplicates = options?.ignoreDuplicates ?? false;
     return this;
   }
 
@@ -198,6 +205,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
         ?.split(",")
         .map((column) => column.trim())
         .filter(Boolean) ?? [];
+    this.ignoreDuplicates = false;
     return this;
   }
 
@@ -332,28 +340,69 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
 
   private async executeInsert(): Promise<QueryResult<T>> {
     const records = Array.isArray(this.payload) ? this.payload : [this.payload ?? {}];
-    const rows: Record<string, unknown>[] = [];
+    const cleanedRecords = records.map((record) => cleanRecord(this.table, record));
+    if (cleanedRecords.length === 0) {
+      return this.shapeRows([]);
+    }
 
-    for (const rawRecord of records) {
-      const updateGeneratedId = hasExplicitPrimaryKey(this.table, rawRecord);
-      const record = cleanRecord(this.table, rawRecord);
-      const columns = Object.keys(record);
-      const values = columns.map((column) => record[column]);
-      const placeholders = columns.map(() => "?").join(", ");
+    const rows: Record<string, unknown>[] = [];
+    const columns = Object.keys(cleanedRecords[0]);
+    const explicitPrimaryKeyByIndex = records.map((record) => hasExplicitPrimaryKey(this.table, record));
+    const canUseBulkInsert = cleanedRecords.every((record, index) => {
+      const recordColumns = Object.keys(record);
+      return (
+        explicitPrimaryKeyByIndex[index] === explicitPrimaryKeyByIndex[0] &&
+        recordColumns.length === columns.length &&
+        columns.every((column) => Object.prototype.hasOwnProperty.call(record, column))
+      );
+    });
+
+    if (canUseBulkInsert && cleanedRecords.length > 1) {
+      const values = cleanedRecords.flatMap((record) => columns.map((column) => record[column]));
+      const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
+      const placeholders = cleanedRecords.map(() => rowPlaceholder).join(", ");
+      const updateGeneratedId = explicitPrimaryKeyByIndex[0];
       const updateColumns = columns.filter(
         (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
       );
       const conflict =
         this.conflictColumns.length > 0
           ? ` ON CONFLICT (${this.conflictColumns.map(sqlIdentifier).join(", ")}) ${
-              updateColumns.length > 0
-                ? `DO UPDATE SET ${updateColumns
+              this.ignoreDuplicates || updateColumns.length === 0
+                ? "DO NOTHING"
+                : `DO UPDATE SET ${updateColumns
                     .map((column) => `${sqlIdentifier(column)} = excluded.${sqlIdentifier(column)}`)
                     .join(", ")}`
-                : "DO NOTHING"
             }`
           : "";
       const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
+        .map(sqlIdentifier)
+        .join(", ")}) VALUES ${placeholders}${conflict} RETURNING ${this.selectedSql()}`;
+      const result = await this.db!.prepare(sql).bind(...values).all<Record<string, unknown>>();
+      return this.shapeRows(result.results ?? []);
+    }
+
+    for (let index = 0; index < records.length; index += 1) {
+      const rawRecord = records[index];
+      const updateGeneratedId = hasExplicitPrimaryKey(this.table, rawRecord);
+      const record = cleanedRecords[index];
+      const recordColumns = Object.keys(record);
+      const values = recordColumns.map((column) => record[column]);
+      const placeholders = recordColumns.map(() => "?").join(", ");
+      const updateColumns = recordColumns.filter(
+        (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
+      );
+      const conflict =
+        this.conflictColumns.length > 0
+          ? ` ON CONFLICT (${this.conflictColumns.map(sqlIdentifier).join(", ")}) ${
+              this.ignoreDuplicates || updateColumns.length === 0
+                ? "DO NOTHING"
+                : `DO UPDATE SET ${updateColumns
+                    .map((column) => `${sqlIdentifier(column)} = excluded.${sqlIdentifier(column)}`)
+                    .join(", ")}`
+            }`
+          : "";
+      const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${recordColumns
         .map(sqlIdentifier)
         .join(", ")}) VALUES (${placeholders})${conflict} RETURNING ${this.selectedSql()}`;
       const result = await this.db!.prepare(sql).bind(...values).first<Record<string, unknown>>();

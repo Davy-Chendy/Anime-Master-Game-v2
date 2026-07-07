@@ -174,6 +174,12 @@ const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "endCurrentGameEarly",
 ]);
 
+const GAME_RESULT_SNAPSHOT_MUTATION_NAMES = new Set([
+  "advanceReviewedQuestion",
+  "skipCurrentQuestion",
+  "endCurrentGameEarly",
+]);
+
 function corsHeaders(request: Request, env: Env) {
   const origin = request.headers.get("origin") ?? "";
   const allowedOrigins = (env.ALLOWED_ORIGIN ?? "*")
@@ -381,7 +387,7 @@ async function getRoundSnapshotForMutation(name: string, result: unknown) {
 }
 
 async function getGameResultSnapshotForMutation(name: string, result: unknown) {
-  if (name === "returnRoomToLobby") {
+  if (!GAME_RESULT_SNAPSHOT_MUTATION_NAMES.has(name)) {
     return null;
   }
 
@@ -786,9 +792,11 @@ function buildRealtimeDeltas(
 
   if (roundSnapshot) {
     deltas.push({ scope: "game", type: "round_snapshot", snapshot: roundSnapshot });
-  } else if (gameResultSnapshot) {
+  }
+
+  if (gameResultSnapshot) {
     deltas.push({ scope: "game", type: "game_result_snapshot", snapshot: gameResultSnapshot });
-  } else if (gameSession && name !== "cancelForfeitAnswer") {
+  } else if (!roundSnapshot && gameSession && name !== "cancelForfeitAnswer") {
     deltas.push({ scope: "game", type: "game_session_updated", gameSession });
   }
 
@@ -931,7 +939,6 @@ async function handleRpc(
           clientActionId: body.clientActionId,
           delta: deltas[0],
           deltas,
-          gameResultSnapshot: gameResultSnapshot ?? undefined,
         } satisfies BroadcastMessage;
 
         if (options.localTopic === topic && options.localCacheGameResult && gameResultSnapshot) {
@@ -2309,7 +2316,6 @@ export class RoomDurableObject {
             clientActionId: payload.clientActionId,
             delta: deltas[0],
             deltas,
-            gameResultSnapshot: gameResultSnapshot ?? undefined,
           } satisfies BroadcastMessage;
           if (socketAttachment?.topic === topic) {
             this.broadcast(JSON.stringify(changeMessage));
@@ -2710,7 +2716,6 @@ export class RoomDurableObject {
             topic: alarm.topic,
             delta: deltas[0],
             deltas,
-            gameResultSnapshot: gameResultSnapshot ?? undefined,
           } satisfies BroadcastMessage),
         );
       }
@@ -2783,7 +2788,6 @@ export class RoomDurableObject {
             topic: alarm.topic,
             delta: deltas[0],
             deltas,
-            gameResultSnapshot: gameResultSnapshot ?? undefined,
           } satisfies BroadcastMessage),
         );
       }
