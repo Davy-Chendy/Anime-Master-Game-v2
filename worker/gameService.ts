@@ -56,6 +56,7 @@ type DbGameParticipant = {
 
 const d1Context = new AsyncLocalStorage<D1QueryClient>();
 const unboundD1 = createD1QueryClient(null);
+const DEFAULT_ROUND_SCORES = [5, 3, 1];
 const d1: D1QueryClient = {
   hasDatabase() {
     return getD1().hasDatabase();
@@ -137,7 +138,7 @@ function normalizeRoundScores(value: unknown, maxRevealRounds: number) {
   }
 
   return Array.from({ length: maxRevealRounds }, (_, index) => {
-    const score = source[index] ?? Math.max(1, maxRevealRounds - index);
+    const score = source[index] ?? DEFAULT_ROUND_SCORES[index] ?? Math.max(1, maxRevealRounds - index);
     return Math.max(0, Math.floor(typeof score === "number" && Number.isFinite(score) ? score : 0));
   });
 }
@@ -232,7 +233,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     : [];
   const roundScores = Array.isArray(gameSession.round_scores)
     ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
-    : [3, 2, 1];
+    : DEFAULT_ROUND_SCORES;
   const teamBattleState = parseTeamBattleState(gameSession.team_battle_state);
 
   return {

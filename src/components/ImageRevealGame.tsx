@@ -60,6 +60,7 @@ const LANDSCAPE_TOTAL_BLOCKS = 45;
 const PORTRAIT_TOTAL_BLOCKS = 35;
 const MAX_REVEAL_BLOCKS = LANDSCAPE_TOTAL_BLOCKS;
 const DEFAULT_ROUND_SECONDS = 60;
+const DEFAULT_ROUND_SCORES = [5, 3, 1];
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
@@ -196,7 +197,7 @@ function getHiddenRevealBlocks(blockCount: number) {
 function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
     ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
-    : [3, 2, 1];
+    : DEFAULT_ROUND_SCORES;
 
   return {
     id: gameSession.id,

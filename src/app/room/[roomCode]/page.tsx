@@ -62,7 +62,7 @@ const defaultGameSettings: GameSettings = {
   gameMode: "ROUND_REVEAL",
   maxRevealRounds: 3,
   roundSeconds: 60,
-  roundScores: [3, 2, 1],
+  roundScores: [5, 3, 1],
 };
 
 function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
@@ -215,7 +215,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
       "玩家在倒计时内提交答案",
-      "猜中得当前轮分数，默认 3/2/1 分",
+      "猜中得当前轮分数，默认 5/3/1 分",
     ],
   },
   BUZZER_FIRST_CORRECT: {
@@ -531,7 +531,7 @@ function PresenterPicker({
           >
             <span className="min-w-0">
               <span className="block truncate text-sm font-semibold text-slate-950">{player.nickname}</span>
-              <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主也可以出题" : "玩家"}</span>
+              <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主" : "玩家"}</span>
             </span>
             <span className="shrink-0 text-sm font-semibold text-[var(--primary)]">
               {pendingPresenterId === player.id ? "选择中…" : "选择"}
