@@ -583,7 +583,7 @@ const CompactScoreRow = memo(function CompactScoreRow({
 
   return (
     <div
-      className="grid h-8 grid-cols-[1.25rem_minmax(0,1fr)_1.75rem_2.25rem] items-center gap-1 rounded-md bg-slate-50 px-1.5 text-sm"
+      className="grid h-8 grid-cols-[1rem_minmax(0,1fr)_max-content_minmax(1.75rem,max-content)] items-center gap-x-0.5 rounded-md bg-slate-50 px-1 text-sm"
       ref={(element) => {
         onRowRef(playerId, element);
       }}
@@ -594,13 +594,13 @@ const CompactScoreRow = memo(function CompactScoreRow({
       </span>
       <span
         aria-label={status.label}
-        className={`grid h-5 min-w-0 place-items-center rounded px-0.5 text-[11px] font-bold leading-none ${status.className}`}
+        className={`grid h-5 min-w-5 justify-self-end place-items-center rounded px-0.5 text-[11px] font-bold leading-none ${status.className}`}
         title={status.label}
       >
         {status.content}
       </span>
       <span
-        className={`shrink-0 text-right font-bold leading-none tabular-nums text-[var(--primary)] ${getCompactScoreClass(score)}`}
+        className={`min-w-7 shrink-0 text-right font-bold leading-none tabular-nums text-[var(--primary)] ${getCompactScoreClass(score)}`}
         title={`${score} 分`}
       >
         {score}
