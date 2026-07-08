@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
@@ -497,6 +498,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
   const [playerImageCanvas, setPlayerImageCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [imageDisplayHeight, setImageDisplayHeight] = useState<number | null>(null);
+  const imageDisplayRef = useRef<HTMLDivElement | null>(null);
   const playerImageCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const playerLoadedImageRef = useRef<{ questionId: string; imageUrl: string; image: HTMLImageElement } | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -518,6 +521,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
     playerImageCanvasRef.current = canvas;
     setPlayerImageCanvas(canvas);
+  }, []);
+
+  const setImageDisplayRef = useCallback((element: HTMLDivElement | null) => {
+    imageDisplayRef.current = element;
   }, []);
 
   const getPlayerName = useCallback(
@@ -825,6 +832,32 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   useEffect(() => {
     setCanRenderPortal(true);
   }, []);
+
+  useLayoutEffect(() => {
+    const element = imageDisplayRef.current;
+
+    if (!element) {
+      setImageDisplayHeight(null);
+      return;
+    }
+
+    const updateImageDisplayHeight = () => {
+      const nextHeight = Math.round(element.getBoundingClientRect().height);
+      setImageDisplayHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
+    };
+
+    updateImageDisplayHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateImageDisplayHeight);
+      return () => window.removeEventListener("resize", updateImageDisplayHeight);
+    }
+
+    const resizeObserver = new ResizeObserver(updateImageDisplayHeight);
+    resizeObserver.observe(element);
+
+    return () => resizeObserver.disconnect();
+  }, [gameSession?.currentQuestionIndex, gameSession?.id, imageAspectRatio, isPortraitImage]);
 
   useEffect(() => {
     gameSessionRef.current = gameSession;
@@ -2488,9 +2521,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         ? "复盘"
         : `${getTeamName(teamBattleActiveTeam)} · ${teamBattlePhaseLabel}`
     : "";
+  const sidePanelHeightStyle = {
+    "--image-display-height": imageDisplayHeight ? `${imageDisplayHeight}px` : "78vh",
+  } as CSSProperties;
 
   const scorePanel = (
-    <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+    <div
+      className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
+      style={sidePanelHeightStyle}
+    >
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="text-sm font-semibold text-slate-900">实时积分榜</p>
         <span className="min-w-0 max-w-[60%] truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
@@ -2594,6 +2633,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     <div className="bg-white">
       <div
         className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
+        ref={setImageDisplayRef}
         style={{
           aspectRatio: imageAspectRatio,
           maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
@@ -2749,7 +2789,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   );
 
   const actionPanel = (
-    <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+    <div
+      className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
+      style={sidePanelHeightStyle}
+    >
       {isSpectator ? (
         <div className="space-y-4">
           <section className="rounded-md border border-slate-200 bg-white p-4">
