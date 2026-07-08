@@ -64,6 +64,59 @@ const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
 const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
+const ROUND_PROMPT_SOUND_STORAGE_KEY = "animeMaster.roundPromptSoundEnabled";
+
+function getInitialRoundPromptSoundEnabled() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(ROUND_PROMPT_SOUND_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveRoundPromptSoundEnabled(isEnabled: boolean) {
+  try {
+    window.localStorage.setItem(ROUND_PROMPT_SOUND_STORAGE_KEY, isEnabled ? "1" : "0");
+  } catch {
+    // Local storage can be unavailable in restricted browser modes; the in-memory toggle still works for this page.
+  }
+}
+
+function playRoundPromptSound() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const AudioContextConstructor =
+    window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextConstructor) {
+    return;
+  }
+
+  const audioContext = new AudioContextConstructor();
+  const startAt = audioContext.currentTime;
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(880, startAt);
+  oscillator.frequency.exponentialRampToValueAtTime(1320, startAt + 0.12);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(0.08, startAt + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
+
+  oscillator.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(startAt);
+  oscillator.stop(startAt + 0.22);
+  oscillator.addEventListener("ended", () => {
+    void audioContext.close();
+  });
+}
 
 function isForfeitAnswer(answer: Answer | null | undefined) {
   return answer?.answerText === FORFEIT_ANSWER_TEXT;
@@ -348,6 +401,15 @@ function IconCheck(props: SVGProps<SVGSVGElement>) {
   return (
     <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.2" {...props}>
       <path d="M5 10.5l3 3L15 6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconSpeaker(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M4 8.5h3l4-3.5v10l-4-3.5H4z" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14 7.5c.8.7 1.2 1.5 1.2 2.5s-.4 1.8-1.2 2.5" strokeLinecap="round" />
     </svg>
   );
 }
@@ -700,6 +762,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [isSpectatorLabelOpen, setIsSpectatorLabelOpen] = useState(false);
   const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
+  const [isRoundPromptSoundEnabled, setIsRoundPromptSoundEnabled] = useState(getInitialRoundPromptSoundEnabled);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
@@ -726,6 +789,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const lastGameRealtimeVersionRef = useRef<number | null>(null);
   const missedGameRealtimeVersionRef = useRef(false);
   const gameCatchUpTargetVersionRef = useRef<number | null>(null);
+  const lastRoundPromptPositionRef = useRef<string | null>(null);
+  const hasObservedRoundPromptPositionRef = useRef(false);
   const onRoomUpdatedRef = useRef(onRoomUpdated);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
@@ -1872,6 +1937,59 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     isPresenter && isTeamBattleMode && Boolean(teamBattleState) && Boolean(currentQuestion) && !isQuestionReviewing && !imageLoadFailed;
   const canPreviewSpectatorOriginal = isSpectator && Boolean(currentQuestion) && !imageLoadFailed;
   const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal || canPreviewSpectatorOriginal;
+  const canPlayRoundPromptSound =
+    !isPresenter &&
+    !isSpectator &&
+    !isTeamBattleMode &&
+    isCurrentPlayerEligibleForQuestion &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect;
+
+  function handleToggleRoundPromptSound() {
+    const nextEnabled = !isRoundPromptSoundEnabled;
+    setIsRoundPromptSoundEnabled(nextEnabled);
+    saveRoundPromptSoundEnabled(nextEnabled);
+
+    if (nextEnabled) {
+      playRoundPromptSound();
+    }
+  }
+
+  useEffect(() => {
+    if (!gameSession) {
+      lastRoundPromptPositionRef.current = null;
+      hasObservedRoundPromptPositionRef.current = false;
+      return;
+    }
+
+    const roundPosition = [
+      gameSession.id,
+      gameSession.currentQuestionIndex,
+      gameSession.currentRevealRound,
+      gameSession.roundStartedAt ?? "waiting",
+    ].join(":");
+    const previousRoundPosition = lastRoundPromptPositionRef.current;
+    const hasObservedRoundPosition = hasObservedRoundPromptPositionRef.current;
+
+    lastRoundPromptPositionRef.current = roundPosition;
+    hasObservedRoundPromptPositionRef.current = true;
+
+    if (
+      !hasObservedRoundPosition ||
+      previousRoundPosition === roundPosition ||
+      !gameSession.roundStartedAt ||
+      !isRoundPromptSoundEnabled ||
+      !canPlayRoundPromptSound
+    ) {
+      return;
+    }
+
+    playRoundPromptSound();
+  }, [
+    canPlayRoundPromptSound,
+    gameSession,
+    isRoundPromptSoundEnabled,
+  ]);
 
   useEffect(() => {
     if (!canTypeAnswer || !gameSession?.roundStartedAt) {
@@ -3393,117 +3511,138 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           </section>
         </div>
       ) : (
-        <div className="space-y-4">
-          <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
-            <div className="flex items-center justify-between gap-3">
-              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
-              <span
-                className={[
-                  "rounded px-2 py-1 text-xs font-bold",
-                  hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
-                ].join(" ")}
-              >
-                {hasRoundStarted ? `${displayedRemainingSeconds}s` : "未开始"}
-              </span>
-            </div>
-            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
-            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
-          </section>
-
-          {hasRoundStarted ? (
-            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
-                <span className="font-bold text-slate-950">
-                  {standardSubmittedCount}/{standardTotalCount}
+        <div className="flex min-h-full flex-col">
+          <div className="space-y-4">
+            <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
+              <div className="flex items-center justify-between gap-3">
+                <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
+                <span
+                  className={[
+                    "rounded px-2 py-1 text-xs font-bold",
+                    hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
+                  ].join(" ")}
+                >
+                  {hasRoundStarted ? `${displayedRemainingSeconds}s` : "未开始"}
                 </span>
               </div>
-              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div
-                  className="h-full rounded-full bg-slate-900"
-                  style={{ width: `${Math.min(100, standardProgress)}%` }}
-                />
-              </div>
+              <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
+              <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
             </section>
-          ) : null}
 
-          <section className="border-t border-[var(--line)] pt-4">
-            <p className="mb-3 text-sm font-semibold text-slate-950">操作</p>
-            {isCurrentPlayerCorrect ? (
-              <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
-                你已答对本题
-              </p>
-            ) : !hasRoundStarted ? (
-              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人打开图片</p>
-            ) : (
-              <div className="space-y-3">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
-                  <input
-                    ref={answerInputRef}
-                    className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                    disabled={
-                      !isRoundActive ||
-                      isRoundClosedForPlayerActions ||
-                      (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
-                      (isBuzzerMode && myHasForfeited) ||
-                      (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
-                    }
-                    maxLength={80}
-                    placeholder="输入动画名称"
-                    value={answerText}
-                    onChange={(event) => setAnswerText(event.target.value)}
-                    onKeyDown={handleAnswerInputKeyDown}
+            {hasRoundStarted ? (
+              <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
+                  <span className="font-bold text-slate-950">
+                    {standardSubmittedCount}/{standardTotalCount}
+                  </span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-slate-900"
+                    style={{ width: `${Math.min(100, standardProgress)}%` }}
                   />
-                </label>
-                <Button
-                  className="w-full"
-                  type="button"
-                  onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
-                  disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
-                >
-                  {isSubmittingAnswer
-                    ? "提交中…"
-                    : isBuzzerMode
-                      ? "提交抢答（回车）"
-                      : myHasForfeited
-                        ? "提交答案（回车）"
-                        : myAnswer
-                          ? "修改答案（回车）"
-                          : "提交答案（回车）"}
-                </Button>
-                {!isTeamBattleMode ? (
+                </div>
+              </section>
+            ) : null}
+
+            <section className="border-t border-[var(--line)] pt-4">
+              <p className="mb-3 text-sm font-semibold text-slate-950">操作</p>
+              {isCurrentPlayerCorrect ? (
+                <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                  你已答对本题
+                </p>
+              ) : !hasRoundStarted ? (
+                <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人打开图片</p>
+              ) : (
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
+                    <input
+                      ref={answerInputRef}
+                      className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                      disabled={
+                        !isRoundActive ||
+                        isRoundClosedForPlayerActions ||
+                        (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
+                        (isBuzzerMode && myHasForfeited) ||
+                        (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
+                      }
+                      maxLength={80}
+                      placeholder="输入动画名称"
+                      value={answerText}
+                      onChange={(event) => setAnswerText(event.target.value)}
+                      onKeyDown={handleAnswerInputKeyDown}
+                    />
+                  </label>
                   <Button
                     className="w-full"
                     type="button"
-                    variant="secondary"
-                    onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
-                    disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
+                    onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
+                    disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
                   >
-                    {isSubmittingAnswer ? "处理中…" : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                    {isSubmittingAnswer
+                      ? "提交中…"
+                      : isBuzzerMode
+                        ? "提交抢答（回车）"
+                        : myHasForfeited
+                          ? "提交答案（回车）"
+                          : myAnswer
+                            ? "修改答案（回车）"
+                            : "提交答案（回车）"}
                   </Button>
-                ) : null}
-                <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
-                  {isBuzzerMode
-                    ? myHasForfeited
-                      ? "本轮已放弃"
-                      : myBuzzerAnswer
-                      ? `本轮已抢答：${myBuzzerAnswer.answerText}`
-                      : isRoundEnded
-                      ? "本轮已自动放弃"
-                      : "本轮尚未抢答"
-                    : myBuzzerAnswer?.status === "wrong"
-                      ? `本轮已答错：${myBuzzerAnswer.answerText}`
-                    : isRoundEnded && !myAnswer
-                      ? "本轮已自动放弃"
-                    : myAnswer
-                      ? getAnswerDisplayText(myAnswer)
-                      : "本轮尚未提交答案"}
-                  {isRoundEnded ? "，本轮已结束" : ""}
-                </p>
-              </div>
-            )}
-          </section>
+                  {!isTeamBattleMode ? (
+                    <Button
+                      className="w-full"
+                      type="button"
+                      variant="secondary"
+                      onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
+                      disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
+                    >
+                      {isSubmittingAnswer ? "处理中…" : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                    </Button>
+                  ) : null}
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                    {isBuzzerMode
+                      ? myHasForfeited
+                        ? "本轮已放弃"
+                        : myBuzzerAnswer
+                        ? `本轮已抢答：${myBuzzerAnswer.answerText}`
+                        : isRoundEnded
+                        ? "本轮已自动放弃"
+                        : "本轮尚未抢答"
+                      : myBuzzerAnswer?.status === "wrong"
+                        ? `本轮已答错：${myBuzzerAnswer.answerText}`
+                      : isRoundEnded && !myAnswer
+                        ? "本轮已自动放弃"
+                      : myAnswer
+                        ? getAnswerDisplayText(myAnswer)
+                        : "本轮尚未提交答案"}
+                    {isRoundEnded ? "，本轮已结束" : ""}
+                  </p>
+                </div>
+              )}
+            </section>
+          </div>
+
+          <div className="mt-auto flex justify-end pt-4">
+            <button
+              aria-label={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
+              aria-pressed={isRoundPromptSoundEnabled}
+              className={[
+                "inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold transition focus:outline-none focus:ring-4 focus:ring-rose-100",
+                isRoundPromptSoundEnabled
+                  ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
+                  : "border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50",
+              ].join(" ")}
+              title={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
+              type="button"
+              onClick={handleToggleRoundPromptSound}
+            >
+              <IconSpeaker className="h-4 w-4" />
+              <span>提示音 {isRoundPromptSoundEnabled ? "开" : "关"}</span>
+            </button>
+          </div>
         </div>
       )}
     </div>
