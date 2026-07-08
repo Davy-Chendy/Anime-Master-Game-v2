@@ -1445,6 +1445,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         .sort((a, b) => b.score - a.score),
     [gamePlayers, room.currentPresenterPlayerId, scoreByPlayerId],
   );
+  const presenterName = useMemo(
+    () => room.players.find((player) => player.id === room.currentPresenterPlayerId)?.nickname ?? "未选择",
+    [room.currentPresenterPlayerId, room.players],
+  );
   const teamBattleScoreRows = useMemo(
     () =>
       teamBattleState
@@ -2487,6 +2491,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">实时积分榜</p>
+        <span className="min-w-0 max-w-[60%] truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
+          出题人：{presenterName}
+        </span>
+      </div>
       {isTeamBattleMode && teamBattleState ? (
         <>
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm">
@@ -2502,7 +2512,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               {isPresenter ? "裁判" : teamBattlePlayerTeam ? getTeamName(teamBattlePlayerTeam) : isSpectator ? "观战" : "待分队"}
             </span>
           </div>
-          <p className="mb-2 text-sm font-semibold text-slate-900">队伍</p>
+          <p className="mb-2 text-xs font-semibold text-[var(--muted)]">队伍</p>
           <div className="grid gap-2">
             {teamBattleScoreRows.map((row, index) => {
               const isActiveTeam = teamBattleState.activeTeam === row.team;
@@ -2548,7 +2558,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         </>
       ) : (
         <>
-          <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
             {scoreRows.map(({ player, score, correctCount }, index) => {
               const alreadyCorrect = correctPlayerSet.has(player.id);
