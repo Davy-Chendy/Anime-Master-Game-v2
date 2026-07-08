@@ -2862,6 +2862,9 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
 
   const scoreByPlayerId = new Map(scores.map((score) => [score.playerId, score]));
 
+  let previousScore: number | null = null;
+  let previousRank = 0;
+
   return participants
     .filter((participant) => participant.role !== "SPECTATOR" && participant.player_id !== gameSession.presenterPlayerId)
     .map((participant) => {
@@ -2876,10 +2879,16 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
       };
     })
     .sort((a, b) => b.score - a.score || b.correctCount - a.correctCount || a.nickname.localeCompare(b.nickname))
-    .map((entry, index) => ({
-      ...entry,
-      rank: index + 1,
-    }));
+    .map((entry, index) => {
+      const rank = entry.score === previousScore ? previousRank : index + 1;
+      previousScore = entry.score;
+      previousRank = rank;
+
+      return {
+        ...entry,
+        rank,
+      };
+    });
 }
 
 export async function getGameResultSnapshot(gameSessionId: string): Promise<GameResultSnapshot> {

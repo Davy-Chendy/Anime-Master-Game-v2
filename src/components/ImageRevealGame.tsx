@@ -68,9 +68,15 @@ const ROUND_PROMPT_SOUND_STORAGE_KEY = "animeMaster.roundPromptSoundEnabled";
 const ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY = "animeMaster.roundPromptSoundVolume";
 const ROUND_PROMPT_SOUND_URL = "/sounds/round-start.mp3";
 const DEFAULT_ROUND_PROMPT_SOUND_VOLUME = 80;
+// Temporarily disabled: browser audio is unreliable in background/minimized tabs, so the reminder feels inconsistent.
+const ROUND_PROMPT_SOUND_FEATURE_ENABLED = false;
 let roundPromptAudioElement: HTMLAudioElement | null = null;
 
 function getInitialRoundPromptSoundEnabled() {
+  if (!ROUND_PROMPT_SOUND_FEATURE_ENABLED) {
+    return false;
+  }
+
   if (typeof window === "undefined") {
     return false;
   }
@@ -460,6 +466,12 @@ function getCompactScoreClass(score: number) {
   }
 
   return "text-sm";
+}
+
+function getCompetitionRankByScore<T extends { score: number }>(rows: T[], index: number): number {
+  const previousRow = rows[index - 1];
+
+  return previousRow && previousRow.score === rows[index].score ? getCompetitionRankByScore(rows, index - 1) : index + 1;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1771,7 +1783,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             correctCount: playerScore?.correctCount ?? 0,
           };
         })
-        .sort((a, b) => b.score - a.score),
+        .sort((a, b) => b.score - a.score)
+        .map((row, index, rows) => ({
+          ...row,
+          rank: getCompetitionRankByScore(rows, index),
+        })),
     [gamePlayers, room.currentPresenterPlayerId, scoreByPlayerId],
   );
   const presenterName = useMemo(
@@ -1792,6 +1808,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               }),
             }))
             .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+            .map((row, index, rows) => ({
+              ...row,
+              rank: getCompetitionRankByScore(rows, index),
+            }))
         : [],
     [activePlayerById, teamBattleState],
   );
@@ -2963,7 +2983,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="text-xs font-semibold text-[var(--muted)]">#{index + 1}</p>
+                      <p className="text-xs font-semibold text-[var(--muted)]">#{row.rank}</p>
                       <p className={["font-bold", tone.text].join(" ")}>
                         {getTeamName(row.team)}
                         {isActiveTeam ? " · 行动中" : ""}
@@ -2993,7 +3013,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       ) : (
         <div className="min-h-0 overflow-y-auto pr-1">
           <div className={isScoreboardCompact ? "grid gap-1" : "grid gap-2 sm:grid-cols-2 lg:grid-cols-1"}>
-            {scoreRows.map(({ player, score, correctCount }, index) => {
+            {scoreRows.map(({ player, rank, score, correctCount }) => {
               const alreadyCorrect = correctPlayerSet.has(player.id);
               const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
               const hasForfeitedCurrentRound = currentRoundForfeitPlayerSet.has(player.id);
@@ -3015,7 +3035,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                   nickname={player.nickname}
                   onRowRef={registerScoreRow}
                   playerId={player.id}
-                  rank={index + 1}
+                  rank={rank}
                   score={score}
                 />
               );
@@ -3681,61 +3701,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             </section>
           </div>
 
-          <div className="mt-auto flex justify-end pt-4">
-            <div className="relative" ref={roundPromptSoundControlsRef}>
-              {isRoundPromptSoundEnabled && isRoundPromptSoundVolumeOpen ? (
-                <div className="absolute bottom-full right-0 z-10 mb-2 w-52 rounded-md border border-[var(--line)] bg-white p-3 text-xs font-semibold text-slate-600 shadow-lg">
-                  <label className="block">
-                    <span className="flex items-center justify-between gap-2">
-                      <span>提示音音量</span>
-                      <span>{roundPromptSoundVolume}%</span>
-                    </span>
-                    <input
-                      aria-label="提示音音量"
-                      className="mt-2 h-2 w-full accent-rose-500"
-                      max={100}
-                      min={0}
-                      step={5}
-                      type="range"
-                      value={roundPromptSoundVolume}
-                      onBlur={handleRoundPromptSoundVolumePreview}
-                      onChange={(event) => handleRoundPromptSoundVolumeChange(Number(event.target.value))}
-                      onKeyUp={handleRoundPromptSoundVolumePreview}
-                      onPointerUp={handleRoundPromptSoundVolumePreview}
-                    />
-                  </label>
-                </div>
-              ) : null}
-              <div className="inline-flex overflow-hidden rounded-md border border-[var(--line)] bg-white shadow-sm">
-                <button
-                  aria-label={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
-                  aria-pressed={isRoundPromptSoundEnabled}
-                  className={[
-                    "inline-flex h-9 items-center gap-1.5 whitespace-nowrap px-3 text-xs font-semibold transition focus:outline-none focus:ring-4 focus:ring-rose-100",
-                    isRoundPromptSoundEnabled ? "bg-rose-50 text-rose-700 hover:bg-rose-100" : "text-slate-600 hover:bg-slate-50",
-                  ].join(" ")}
-                  title={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
-                  type="button"
-                  onClick={handleToggleRoundPromptSound}
-                >
-                  <IconSpeaker className="h-4 w-4 shrink-0" />
-                  <span>提示音 {isRoundPromptSoundEnabled ? "开" : "关"}</span>
-                </button>
-                {isRoundPromptSoundEnabled ? (
-                  <button
-                    aria-expanded={isRoundPromptSoundVolumeOpen}
-                    aria-label="调整提示音音量"
-                    className="h-9 whitespace-nowrap border-l border-rose-100 bg-rose-50 px-2.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
-                    title="调整音量"
-                    type="button"
-                    onClick={() => setIsRoundPromptSoundVolumeOpen((isOpen) => !isOpen)}
-                  >
-                    音量
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          </div>
+          {/*
+            Round-start sound controls are intentionally hidden for now.
+            Browser audio is unreliable when the tab is backgrounded or the window is minimized,
+            which makes this reminder feel inconsistent during real play.
+          */}
         </div>
       )}
     </div>

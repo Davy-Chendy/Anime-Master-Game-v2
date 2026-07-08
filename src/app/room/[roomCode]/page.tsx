@@ -323,6 +323,12 @@ function getResultRankStyles(rank: number) {
   };
 }
 
+function getCompetitionRankByScore<T extends { score: number }>(rows: T[], index: number): number {
+  const previousRow = rows[index - 1];
+
+  return previousRow && previousRow.score === rows[index].score ? getCompetitionRankByScore(rows, index - 1) : index + 1;
+}
+
 function getQuestionScoreClass(score: number, maxScore: number) {
   if (score <= 0) {
     return "bg-slate-50 text-slate-300 ring-slate-100";
@@ -1304,6 +1310,10 @@ function GameResultPanel({
           questionScores: questionIndexes.map((questionIndex) => scoreByTeamQuestion.get(`${team}:${questionIndex}`) ?? 0),
         }))
         .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+        .map((row, index, rows) => ({
+          ...row,
+          rank: getCompetitionRankByScore(rows, index),
+        }))
     : [];
   const playerRows = leaderboard.map((entry) => ({
     ...entry,
@@ -1425,13 +1435,13 @@ function GameResultPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--line)] text-slate-700">
-                {teamRows.map((row, index) => {
-                  const rank = index + 1;
+                {teamRows.map((row) => {
+                  const rank = row.rank;
                   const styles = getTeamStyles(row.team);
                   const rankStyles = getResultRankStyles(rank);
 
                   return (
-                    <tr className={[rankStyles.row, index === 0 ? styles.panel : "", "transition hover:bg-slate-50"].join(" ")} key={row.team}>
+                    <tr className={[rankStyles.row, rank === 1 ? styles.panel : "", "transition hover:bg-slate-50"].join(" ")} key={row.team}>
                       <td className="px-4 py-3">
                         <span
                           className={[
