@@ -65,6 +65,9 @@ const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
 const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
 const ROUND_PROMPT_SOUND_STORAGE_KEY = "animeMaster.roundPromptSoundEnabled";
+const ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY = "animeMaster.roundPromptSoundVolume";
+const DEFAULT_ROUND_PROMPT_SOUND_VOLUME = 80;
+const MAX_ROUND_PROMPT_SOUND_GAIN = 0.22;
 
 function getInitialRoundPromptSoundEnabled() {
   if (typeof window === "undefined") {
@@ -86,8 +89,34 @@ function saveRoundPromptSoundEnabled(isEnabled: boolean) {
   }
 }
 
-function playRoundPromptSound() {
+function getInitialRoundPromptSoundVolume() {
   if (typeof window === "undefined") {
+    return DEFAULT_ROUND_PROMPT_SOUND_VOLUME;
+  }
+
+  try {
+    const storedVolume = Number(window.localStorage.getItem(ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY));
+    return Number.isFinite(storedVolume) ? Math.max(0, Math.min(100, Math.round(storedVolume))) : DEFAULT_ROUND_PROMPT_SOUND_VOLUME;
+  } catch {
+    return DEFAULT_ROUND_PROMPT_SOUND_VOLUME;
+  }
+}
+
+function saveRoundPromptSoundVolume(volume: number) {
+  try {
+    window.localStorage.setItem(ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY, String(volume));
+  } catch {
+    // Local storage can be unavailable in restricted browser modes; the in-memory slider still works for this page.
+  }
+}
+
+function playRoundPromptSound(volume = DEFAULT_ROUND_PROMPT_SOUND_VOLUME) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const normalizedVolume = Math.max(0, Math.min(100, volume)) / 100;
+  if (normalizedVolume <= 0) {
     return;
   }
 
@@ -106,7 +135,7 @@ function playRoundPromptSound() {
   oscillator.frequency.setValueAtTime(880, startAt);
   oscillator.frequency.exponentialRampToValueAtTime(1320, startAt + 0.12);
   gain.gain.setValueAtTime(0.0001, startAt);
-  gain.gain.exponentialRampToValueAtTime(0.08, startAt + 0.02);
+  gain.gain.exponentialRampToValueAtTime(MAX_ROUND_PROMPT_SOUND_GAIN * normalizedVolume, startAt + 0.02);
   gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
 
   oscillator.connect(gain);
@@ -763,6 +792,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [isRoundPromptSoundEnabled, setIsRoundPromptSoundEnabled] = useState(getInitialRoundPromptSoundEnabled);
+  const [roundPromptSoundVolume, setRoundPromptSoundVolume] = useState(getInitialRoundPromptSoundVolume);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
@@ -1951,7 +1981,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     saveRoundPromptSoundEnabled(nextEnabled);
 
     if (nextEnabled) {
-      playRoundPromptSound();
+      playRoundPromptSound(roundPromptSoundVolume);
+    }
+  }
+
+  function handleRoundPromptSoundVolumeChange(volume: number) {
+    const nextVolume = Math.max(0, Math.min(100, Math.round(volume)));
+    setRoundPromptSoundVolume(nextVolume);
+    saveRoundPromptSoundVolume(nextVolume);
+  }
+
+  function handleRoundPromptSoundVolumePreview() {
+    if (isRoundPromptSoundEnabled) {
+      playRoundPromptSound(roundPromptSoundVolume);
     }
   }
 
@@ -1984,11 +2026,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       return;
     }
 
-    playRoundPromptSound();
+    playRoundPromptSound(roundPromptSoundVolume);
   }, [
     canPlayRoundPromptSound,
     gameSession,
     isRoundPromptSoundEnabled,
+    roundPromptSoundVolume,
   ]);
 
   useEffect(() => {
@@ -3625,14 +3668,32 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             </section>
           </div>
 
-          <div className="mt-auto flex justify-end pt-4">
+          <div className="mt-auto flex items-end justify-end gap-3 pt-4">
+            {isRoundPromptSoundEnabled ? (
+              <label className="grid gap-1 text-right text-xs font-semibold text-slate-600">
+                <span>音量 {roundPromptSoundVolume}%</span>
+                <input
+                  aria-label="提示音音量"
+                  className="h-2 w-28 accent-rose-500"
+                  max={100}
+                  min={0}
+                  step={5}
+                  type="range"
+                  value={roundPromptSoundVolume}
+                  onBlur={handleRoundPromptSoundVolumePreview}
+                  onChange={(event) => handleRoundPromptSoundVolumeChange(Number(event.target.value))}
+                  onKeyUp={handleRoundPromptSoundVolumePreview}
+                  onPointerUp={handleRoundPromptSoundVolumePreview}
+                />
+              </label>
+            ) : null}
             <button
               aria-label={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
               aria-pressed={isRoundPromptSoundEnabled}
               className={[
                 "inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold transition focus:outline-none focus:ring-4 focus:ring-rose-100",
                 isRoundPromptSoundEnabled
-                  ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
+                  ? "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
                   : "border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50",
               ].join(" ")}
               title={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
