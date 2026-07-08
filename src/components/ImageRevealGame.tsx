@@ -363,6 +363,8 @@ const StandardScoreRow = memo(function StandardScoreRow({
   isLeadingPendingBuzzerAnswer,
   onRowRef,
 }: StandardScoreRowProps) {
+  const hasWrongCurrentRound = buzzerStatus === "wrong";
+
   return (
     <div
       className="rounded-md bg-slate-50 px-3 py-2 text-sm"
@@ -389,7 +391,7 @@ const StandardScoreRow = memo(function StandardScoreRow({
         {!alreadyCorrect && hasForfeitedCurrentRound ? (
           <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
         ) : null}
-        {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound ? (
+        {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound && !hasWrongCurrentRound ? (
           <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
         ) : null}
         {isBuzzerMode && buzzerStatus === "pending" ? (
@@ -397,7 +399,7 @@ const StandardScoreRow = memo(function StandardScoreRow({
             {isLeadingPendingBuzzerAnswer ? "判定中" : "排队中"}
           </span>
         ) : null}
-        {isBuzzerMode && buzzerStatus === "wrong" ? (
+        {!alreadyCorrect && hasWrongCurrentRound ? (
           <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
         ) : null}
       </div>
@@ -2761,7 +2763,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           {!isQuestionReviewing ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
               <div className="flex items-center justify-between gap-3">
-                <p className="font-semibold text-slate-950">图片标签</p>
+                <p className="font-semibold text-slate-950">正确答案</p>
                 <Button
                   className="h-9 px-3"
                   type="button"
