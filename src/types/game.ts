@@ -22,6 +22,7 @@ export type TeamBattleGuessVote = {
 
 export type TeamBattleState = {
   teams: Record<TeamBattleTeam, string[]>;
+  initialTeams?: Record<TeamBattleTeam, string[]>;
   teamMemberNames?: Record<string, string>;
   activeTeam: TeamBattleTeam;
   phase: TeamBattlePhase;
@@ -213,6 +214,13 @@ export type GameBootstrapSnapshot = {
   roundSnapshot: RoundSnapshot;
 };
 
+export type GameResultSnapshot = {
+  gameSession: GameSession;
+  leaderboard: LeaderboardEntry[];
+  questionSet: QuestionSet | null;
+  questionResults: QuestionResult[];
+};
+
 export type RealtimeDelta =
   | {
       scope: "room";
@@ -236,14 +244,21 @@ export type RealtimeDelta =
     }
   | {
       scope: "game";
+      type: "game_result_snapshot";
+      snapshot: GameResultSnapshot;
+    }
+  | {
+      scope: "game";
       type: "answer_submitted";
       answer: Answer;
+      buzzerAnswer?: BuzzerAnswer;
     }
   | {
       scope: "game";
       type: "answer_canceled";
       gameSession: GameSession;
       canceledAnswerId: string;
+      canceledPlayerId?: string;
     }
   | {
       scope: "game";
@@ -255,6 +270,9 @@ export type RealtimeDelta =
       type: "buzzer_answer_judged";
       gameSession: GameSession;
       buzzerAnswer: BuzzerAnswer;
+      scores?: PlayerScore[];
+      questionResults?: QuestionResult[];
+      buzzerAnswers?: BuzzerAnswer[];
     }
   | {
       scope: "game";

@@ -16,6 +16,7 @@ import type {
   GameSession,
   GameMode,
   GameBootstrapSnapshot,
+  GameResultSnapshot,
   LeaderboardEntry,
   Player,
   PlayerRole,
@@ -42,6 +43,14 @@ type DbQuestionEligiblePlayer = {
   game_session_id: string;
   question_index: number;
   player_id: string;
+  created_at: string;
+};
+type DbGameParticipant = {
+  game_session_id: string;
+  player_id: string;
+  nickname: string;
+  role: PlayerRole;
+  joined_at: string;
   created_at: string;
 };
 
@@ -220,6 +229,13 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
   const teamsRecord = record.teams && typeof record.teams === "object" ? record.teams : null;
   const redTeam = Array.isArray(teamsRecord?.red) ? teamsRecord.red.filter((id): id is string => typeof id === "string") : [];
   const blueTeam = Array.isArray(teamsRecord?.blue) ? teamsRecord.blue.filter((id): id is string => typeof id === "string") : [];
+  const initialTeamsRecord = record.initialTeams && typeof record.initialTeams === "object" ? record.initialTeams : null;
+  const initialRedTeam = Array.isArray(initialTeamsRecord?.red)
+    ? initialTeamsRecord.red.filter((id): id is string => typeof id === "string")
+    : redTeam;
+  const initialBlueTeam = Array.isArray(initialTeamsRecord?.blue)
+    ? initialTeamsRecord.blue.filter((id): id is string => typeof id === "string")
+    : blueTeam;
   const teamMemberNames = normalizeTeamMemberNames(record.teamMemberNames);
   const activeTeam = record.activeTeam === "blue" ? "blue" : "red";
   const phase =
@@ -230,6 +246,10 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     teams: {
       red: redTeam,
       blue: blueTeam,
+    },
+    initialTeams: {
+      red: initialRedTeam,
+      blue: initialBlueTeam,
     },
     teamMemberNames,
     activeTeam,
@@ -338,6 +358,7 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
 
   return {
     teams: { red, blue },
+    initialTeams: { red, blue },
     teamMemberNames,
     activeTeam: "red",
     phase: "REVEAL_VOTE",
@@ -389,12 +410,27 @@ async function resetTeamBattleStateForQuestion(
       activeGuesserById.get(playerId)?.nickname.trim() || state.teamMemberNames?.[playerId] || "已离开玩家",
     ]),
   );
+  const initialTeams: Record<TeamBattleTeam, string[]> = {
+    red: [...(state.initialTeams?.red ?? state.teams.red)],
+    blue: [...(state.initialTeams?.blue ?? state.teams.blue)],
+  };
+  for (const team of ["red", "blue"] as const) {
+    for (const memberId of teams[team]) {
+      if (!initialTeams.red.includes(memberId) && !initialTeams.blue.includes(memberId)) {
+        initialTeams[team].push(memberId);
+      }
+    }
+  }
   const activeTeam = getAvailableTeamBattleStartingTeam(teams, questionIndex);
   const activeTeamName = getTeamName(activeTeam);
 
   return {
     teams,
-    teamMemberNames,
+    initialTeams,
+    teamMemberNames: {
+      ...(state.teamMemberNames ?? {}),
+      ...teamMemberNames,
+    },
     activeTeam,
     phase: "REVEAL_VOTE",
     revealLimit: 1,
@@ -471,15 +507,12 @@ function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: strin
 
   const revealVotes = { ...state.revealVotes };
   const guessVotes = { ...state.guessVotes };
-  const teamMemberNames = { ...(state.teamMemberNames ?? {}) };
   delete revealVotes[playerId];
   delete guessVotes[playerId];
-  delete teamMemberNames[playerId];
 
   let nextState: TeamBattleState = {
     ...state,
     teams,
-    teamMemberNames,
     revealVotes,
     guessVotes,
   };
@@ -655,7 +688,12 @@ function isMissingEligibilityTableError(error: { message?: string } | null) {
   return /no such table/i.test(message) && /question_(snapshots|eligible_players)/i.test(message);
 }
 
-async function getCurrentRoomEligiblePlayerIds(roomId: string, presenterPlayerId: string) {
+function isMissingGameParticipantsTableError(error: { message?: string } | null) {
+  const message = error?.message ?? "";
+  return /no such table/i.test(message) && /game_participants/i.test(message);
+}
+
+async function getCurrentRoomGamePlayers(roomId: string) {
   const { data: players, error: playersError } = await d1
     .from("players")
     .select("*")
@@ -667,9 +705,11 @@ async function getCurrentRoomEligiblePlayerIds(roomId: string, presenterPlayerId
     throw new Error(playersError.message);
   }
 
-  return (players ?? [])
-    .filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId)
-    .map((player) => player.id);
+  return (players ?? []).filter(isGamePlayer);
+}
+
+async function getCurrentRoomEligiblePlayerIds(roomId: string, presenterPlayerId: string) {
+  return (await getCurrentRoomGamePlayers(roomId)).filter((player) => player.id !== presenterPlayerId).map((player) => player.id);
 }
 
 async function getQuestionEligiblePlayerIdsFromDb(gameSessionId: string, questionIndex: number) {
@@ -690,6 +730,128 @@ async function getQuestionEligiblePlayerIdsFromDb(gameSessionId: string, questio
   }
 
   return (data ?? []).map((row) => row.player_id);
+}
+
+async function getQuestionSnapshotFromDb(gameSessionId: string, questionIndex: number) {
+  const { data, error } = await d1
+    .from("question_snapshots")
+    .select("*")
+    .eq("game_session_id", gameSessionId)
+    .eq("question_index", questionIndex)
+    .maybeSingle<DbQuestionSnapshot>();
+
+  if (error) {
+    if (isMissingEligibilityTableError(error)) {
+      return null;
+    }
+
+    throw new Error(error.message);
+  }
+
+  return data;
+}
+
+async function getStoredQuestionEligiblePlayerIds(gameSessionId: string, questionIndex: number) {
+  const eligiblePlayerIdsFromDb = await getQuestionEligiblePlayerIdsFromDb(gameSessionId, questionIndex);
+  if (eligiblePlayerIdsFromDb && eligiblePlayerIdsFromDb.length > 0) {
+    return eligiblePlayerIdsFromDb;
+  }
+
+  const snapshot = await getQuestionSnapshotFromDb(gameSessionId, questionIndex);
+  return snapshot ? getQuestionEligiblePlayerIdsFromSnapshot(snapshot) ?? [] : [];
+}
+
+async function createGameParticipantSnapshot(gameSessionId: string, players: DbPlayer[]) {
+  if (players.length === 0) {
+    return;
+  }
+
+  const { error } = await d1.from("game_participants").upsert(
+    players.map((player) => ({
+      game_session_id: gameSessionId,
+      player_id: player.id,
+      nickname: player.nickname.trim() || "已离开玩家",
+      role: player.role ?? "PLAYER",
+      joined_at: player.joined_at,
+    })),
+    {
+      onConflict: "game_session_id,player_id",
+    },
+  );
+
+  if (error) {
+    if (isMissingGameParticipantsTableError(error)) {
+      return;
+    }
+
+    throw new Error(error.message);
+  }
+}
+
+async function getGameParticipantSnapshot(gameSession: GameSession) {
+  const { data, error } = await d1
+    .from("game_participants")
+    .select("*")
+    .eq("game_session_id", gameSession.id)
+    .order("joined_at", { ascending: true })
+    .returns<DbGameParticipant[]>();
+
+  if (error) {
+    if (!isMissingGameParticipantsTableError(error)) {
+      throw new Error(error.message);
+    }
+  }
+
+  const [
+    { data: roomPlayers, error: roomPlayersError },
+    firstQuestionEligiblePlayerIds,
+    scores,
+    questionResults,
+  ] = await Promise.all([
+    d1
+      .from("players")
+      .select("*")
+      .eq("room_id", gameSession.roomId)
+      .order("joined_at", { ascending: true })
+      .returns<DbPlayer[]>(),
+    getStoredQuestionEligiblePlayerIds(gameSession.id, 0),
+    getPlayerScores(gameSession.id),
+    getQuestionResultsForGameSession(gameSession.id),
+  ]);
+
+  if (roomPlayersError) {
+    throw new Error(roomPlayersError.message);
+  }
+
+  const roomPlayerById = new Map((roomPlayers ?? []).map((player) => [player.id, player]));
+  const storedParticipantById = new Map((data ?? []).map((participant) => [participant.player_id, participant]));
+  const participantIds = new Set<string>(firstQuestionEligiblePlayerIds);
+  for (const participant of data ?? []) {
+    participantIds.add(participant.player_id);
+  }
+  for (const score of scores) {
+    participantIds.add(score.playerId);
+  }
+  for (const result of questionResults) {
+    participantIds.add(result.playerId);
+  }
+
+  return Array.from(participantIds).map((playerId) => {
+    const storedParticipant = storedParticipantById.get(playerId);
+    if (storedParticipant) {
+      return storedParticipant;
+    }
+
+    const player = roomPlayerById.get(playerId);
+    return {
+      game_session_id: gameSession.id,
+      player_id: playerId,
+      nickname: player?.nickname.trim() || gameSession.teamBattleState?.teamMemberNames?.[playerId] || "已离开玩家",
+      role: player?.role ?? "PLAYER",
+      joined_at: player?.joined_at ?? gameSession.createdAt,
+      created_at: gameSession.createdAt,
+    };
+  });
 }
 
 async function insertQuestionEligibilitySnapshot(params: {
@@ -767,7 +929,9 @@ async function createQuestionEligibilitySnapshot(params: {
   questionIndex: number;
   presenterPlayerId: string;
 }) {
-  const eligiblePlayerIds = await getCurrentRoomEligiblePlayerIds(params.roomId, params.presenterPlayerId);
+  const players = await getCurrentRoomGamePlayers(params.roomId);
+  await createGameParticipantSnapshot(params.gameSessionId, players);
+  const eligiblePlayerIds = players.filter((player) => player.id !== params.presenterPlayerId).map((player) => player.id);
 
   return await insertQuestionEligibilitySnapshot({
     gameSessionId: params.gameSessionId,
@@ -1081,9 +1245,38 @@ const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index
 const MAX_PLAYERS_PER_ROOM = 50;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
+const ROUND_DEADLINE_GRACE_MS = 3000;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+
+type ServerTimedActionParams = {
+  serverReceivedAtMs?: number | null;
+};
+
+function getServerReceivedAtMs(params?: ServerTimedActionParams) {
+  return typeof params?.serverReceivedAtMs === "number" && Number.isFinite(params.serverReceivedAtMs)
+    ? params.serverReceivedAtMs
+    : Date.now();
+}
+
+function getRoundDeadlineMs(gameSession: Pick<GameSession, "roundStartedAt" | "roundSeconds">) {
+  if (!gameSession.roundStartedAt) {
+    return null;
+  }
+
+  return new Date(gameSession.roundStartedAt).getTime() + gameSession.roundSeconds * 1000;
+}
+
+function hasRoundAcceptWindowExpired(gameSession: Pick<GameSession, "roundStartedAt" | "roundSeconds">, receivedAtMs: number) {
+  const deadlineMs = getRoundDeadlineMs(gameSession);
+  return deadlineMs != null && receivedAtMs > deadlineMs + ROUND_DEADLINE_GRACE_MS;
+}
+
+function hasRoundForfeitDeadlineArrived(gameSession: Pick<GameSession, "roundStartedAt" | "roundSeconds">, receivedAtMs: number) {
+  const deadlineMs = getRoundDeadlineMs(gameSession);
+  return deadlineMs != null && receivedAtMs >= deadlineMs + ROUND_DEADLINE_GRACE_MS;
+}
 
 function normalizeRevealBlockCount(value: unknown) {
   return Number(value) === PORTRAIT_REVEAL_BLOCK_COUNT ? PORTRAIT_REVEAL_BLOCK_COUNT : REVEAL_BLOCK_COUNT;
@@ -2042,6 +2235,8 @@ export async function startGameWithQuestionSet(params: {
     throw new Error(gameSessionError.message);
   }
 
+  await createGameParticipantSnapshot(gameSession.id, activeGamePlayers);
+
   const eligiblePlayerIds = await createQuestionEligibilitySnapshotFromPlayers({
     gameSessionId: gameSession.id,
     questionIndex: gameSession.current_question_index,
@@ -2568,29 +2763,21 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
     throw new Error("排行榜加载失败：游戏不存在。");
   }
 
-  const [{ data: players, error: playersError }, scores] = await Promise.all([
-    d1
-      .from("players")
-      .select("*")
-      .eq("room_id", gameSession.roomId)
-      .returns<DbPlayer[]>(),
+  const [participants, scores] = await Promise.all([
+    getGameParticipantSnapshot(gameSession),
     getPlayerScores(gameSessionId),
   ]);
 
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
   const scoreByPlayerId = new Map(scores.map((score) => [score.playerId, score]));
 
-  return (players ?? [])
-    .filter((player) => isGamePlayer(player) && player.id !== gameSession.presenterPlayerId)
-    .map((player) => {
-      const score = scoreByPlayerId.get(player.id);
+  return participants
+    .filter((participant) => participant.role !== "SPECTATOR" && participant.player_id !== gameSession.presenterPlayerId)
+    .map((participant) => {
+      const score = scoreByPlayerId.get(participant.player_id);
 
       return {
-        playerId: player.id,
-        nickname: player.nickname,
+        playerId: participant.player_id,
+        nickname: participant.nickname,
         rank: 0,
         score: score?.score ?? 0,
         correctCount: score?.correctCount ?? 0,
@@ -2601,6 +2788,28 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
       ...entry,
       rank: index + 1,
     }));
+}
+
+export async function getGameResultSnapshot(gameSessionId: string): Promise<GameResultSnapshot> {
+  assertD1Env();
+
+  const gameSession = await getGameSessionById(gameSessionId);
+  if (!gameSession) {
+    throw new Error("加载结算快照失败：游戏不存在。");
+  }
+
+  const [leaderboard, questionSet, questionResults] = await Promise.all([
+    getLeaderboardForGameSession(gameSession.id),
+    getQuestionSetById(gameSession.questionSetId),
+    getQuestionResultsForGameSession(gameSession.id),
+  ]);
+
+  return {
+    gameSession,
+    leaderboard,
+    questionSet,
+    questionResults,
+  };
 }
 
 export async function publishQuestionSetToCommunity(params: {
@@ -2853,6 +3062,86 @@ async function addScoreToPlayer(params: {
   });
 }
 
+async function insertQuestionResultsForPlayers(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  playerIds: string[];
+  scoredRound: number;
+  scoreAwarded: number;
+  judgedByPlayerId: string;
+}) {
+  const uniquePlayerIds = Array.from(new Set(params.playerIds)).filter(Boolean);
+  if (uniquePlayerIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await d1
+    .from("question_results")
+    .insert(
+      uniquePlayerIds.map((playerId) => ({
+        game_session_id: params.gameSessionId,
+        question_index: params.questionIndex,
+        player_id: playerId,
+        scored_round: params.scoredRound,
+        score_awarded: params.scoreAwarded,
+        judged_by_player_id: params.judgedByPlayerId,
+      })),
+      {
+        onConflict: "game_session_id,question_index,player_id",
+        ignoreDuplicates: true,
+      },
+    )
+    .select("player_id")
+    .returns<{ player_id: string }[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((result) => result.player_id);
+}
+
+async function bulkAddScoresToPlayers(params: {
+  gameSessionId: string;
+  playerIds: string[];
+  scoreAwarded: number;
+}) {
+  const uniquePlayerIds = Array.from(new Set(params.playerIds)).filter(Boolean);
+  if (uniquePlayerIds.length === 0) {
+    return;
+  }
+
+  const { data: sessionScores, error: scoreLoadError } = await d1
+    .from("player_scores")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .returns<DbPlayerScore[]>();
+
+  if (scoreLoadError) {
+    throw new Error(scoreLoadError.message);
+  }
+
+  const scoreByPlayerId = new Map((sessionScores ?? []).map((score) => [score.player_id, score]));
+  const upsertRows = uniquePlayerIds.map((playerId) => {
+    const existingScore = scoreByPlayerId.get(playerId);
+
+    return {
+      game_session_id: params.gameSessionId,
+      player_id: playerId,
+      score: (existingScore?.score ?? 0) + params.scoreAwarded,
+      correct_count: (existingScore?.correct_count ?? 0) + 1,
+    };
+  });
+
+  const { error: scoreError } = await d1.from("player_scores").upsert(upsertRows, {
+    onConflict: "game_session_id,player_id",
+  });
+
+  if (scoreError) {
+    throw new Error(scoreError.message);
+  }
+}
+
 async function recalculateRankedBuzzerScores(params: {
   gameSession: DbGameSession;
 }) {
@@ -2962,6 +3251,8 @@ async function updatePendingBuzzerAnswer(params: {
   if (!data) {
     throw new Error("更新答案失败：该答案已经被判定，不能再修改。");
   }
+
+  return toBuzzerAnswer(data);
 }
 
 async function writePendingRoundRevealBuzzerAnswer(params: {
@@ -2975,28 +3266,31 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
       throw new Error("该抢答已经被判定，不能再修改。");
     }
 
-    await updatePendingBuzzerAnswer({
+    return await updatePendingBuzzerAnswer({
       id: params.existingBuzzerAnswer.id,
       answerText: params.answerText,
     });
-    return;
   }
 
-  const { error } = await d1.from("buzzer_answers").insert({
-    game_session_id: params.gameSession.id,
-    question_index: params.gameSession.currentQuestionIndex,
-    reveal_round: params.gameSession.currentRevealRound,
-    player_id: params.playerId,
-    answer_text: params.answerText,
-    status: "pending",
-    score_awarded: 0,
-    submitted_at: new Date().toISOString(),
-    judged_at: null,
-    judged_by_player_id: null,
-  });
+  const { data, error } = await d1
+    .from("buzzer_answers")
+    .insert({
+      game_session_id: params.gameSession.id,
+      question_index: params.gameSession.currentQuestionIndex,
+      reveal_round: params.gameSession.currentRevealRound,
+      player_id: params.playerId,
+      answer_text: params.answerText,
+      status: "pending",
+      score_awarded: 0,
+      submitted_at: new Date().toISOString(),
+      judged_at: null,
+      judged_by_player_id: null,
+    })
+    .select()
+    .single<DbBuzzerAnswer>();
 
   if (!error) {
-    return;
+    return toBuzzerAnswer(data);
   }
 
   if (!isUniqueViolation(error)) {
@@ -3020,7 +3314,7 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
     throw new Error("提交失败：该抢答已经被判定，不能再修改。");
   }
 
-  await updatePendingBuzzerAnswer({
+  return await updatePendingBuzzerAnswer({
     id: currentBuzzerAnswer.id,
     answerText: params.answerText,
   });
@@ -3055,24 +3349,27 @@ async function forfeitMissingRoundActions(
     (guesserId) => !resolvedRoundActionState.hasPlayerActed(guesserId),
   );
 
-  for (const guesserId of missingGuesserIds) {
-    const { error } = await d1.from("answers").upsert(
-      {
-        game_session_id: currentGameSession.id,
-        question_index: currentGameSession.current_question_index,
-        reveal_round: currentGameSession.current_reveal_round,
-        player_id: guesserId,
-        answer_text: FORFEIT_ANSWER_TEXT,
-        submitted_at: now,
-      },
-      {
-        onConflict: "game_session_id,question_index,reveal_round,player_id",
-      },
-    );
+  if (missingGuesserIds.length === 0) {
+    return 0;
+  }
 
-    if (error) {
-      throw new Error(error.message);
-    }
+  const { error } = await d1.from("answers").insert(
+    missingGuesserIds.map((guesserId) => ({
+      game_session_id: currentGameSession.id,
+      question_index: currentGameSession.current_question_index,
+      reveal_round: currentGameSession.current_reveal_round,
+      player_id: guesserId,
+      answer_text: FORFEIT_ANSWER_TEXT,
+      submitted_at: now,
+    })),
+    {
+      onConflict: "game_session_id,question_index,reveal_round,player_id",
+      ignoreDuplicates: true,
+    },
+  );
+
+  if (error) {
+    throw new Error(error.message);
   }
 
   return missingGuesserIds.length;
@@ -3098,13 +3395,10 @@ async function settleRevealRoundForNextSelection(currentGameSession: DbGameSessi
   return toGameSession(updatedGameSession);
 }
 
-async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
+async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession, receivedAtMs = Date.now()) {
   const currentSession = toGameSession(currentGameSession);
   const currentRound = currentGameSession.current_reveal_round;
-  const roundStartedAt = currentGameSession.round_started_at;
-  const roundEnded = Boolean(
-    roundStartedAt && Date.now() - new Date(roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
-  );
+  const roundEnded = hasRoundForfeitDeadlineArrived(currentSession, receivedAtMs);
 
   let roundActionState = await getRoundActionState(currentSession);
 
@@ -3142,7 +3436,7 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
 
 export async function autoForfeitExpiredRound(params: {
   gameSessionId: string;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const { data: currentGameSession, error } = await d1
@@ -3169,8 +3463,7 @@ export async function autoForfeitExpiredRound(params: {
     return { gameSession: currentSession };
   }
 
-  const roundEnded = Date.now() - new Date(currentSession.roundStartedAt).getTime() >= currentSession.roundSeconds * 1000;
-  if (!roundEnded) {
+  if (!hasRoundForfeitDeadlineArrived(currentSession, getServerReceivedAtMs(params))) {
     return { gameSession: currentSession };
   }
 
@@ -3183,7 +3476,7 @@ export async function submitAnswer(params: {
   gameSessionId: string;
   playerId: string;
   answerText: string;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const answerText = params.answerText.trim();
@@ -3213,7 +3506,7 @@ export async function submitAnswer(params: {
     throw new Error("本轮尚未开始，暂时不能提交答案。");
   }
 
-  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+  if (hasRoundAcceptWindowExpired(gameSession, getServerReceivedAtMs(params))) {
     throw new Error("本轮答题时间已结束，不能再提交答案。");
   }
 
@@ -3266,7 +3559,7 @@ export async function submitAnswer(params: {
     throw new Error(buzzerLoadError.message);
   }
 
-  await writePendingRoundRevealBuzzerAnswer({
+  const buzzerAnswer = await writePendingRoundRevealBuzzerAnswer({
     gameSession,
     playerId: params.playerId,
     answerText,
@@ -3296,13 +3589,16 @@ export async function submitAnswer(params: {
     throw new Error(error.message);
   }
 
-  return toAnswer(data);
+  return {
+    ...toAnswer(data),
+    buzzerAnswer,
+  };
 }
 
 export async function submitForfeitAnswer(params: {
   gameSessionId: string;
   playerId: string;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const gameSession = await getGameSessionById(params.gameSessionId);
@@ -3318,7 +3614,7 @@ export async function submitForfeitAnswer(params: {
   await assertGamePlayerInRoom(gameSession.roomId, params.playerId);
   await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
-  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+  if (hasRoundAcceptWindowExpired(gameSession, getServerReceivedAtMs(params))) {
     throw new Error("本轮答题时间已结束，不能再放弃作答。");
   }
 
@@ -3419,7 +3715,7 @@ export async function submitForfeitAnswer(params: {
 export async function cancelForfeitAnswer(params: {
   gameSessionId: string;
   playerId: string;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const gameSession = await getGameSessionById(params.gameSessionId);
@@ -3435,7 +3731,7 @@ export async function cancelForfeitAnswer(params: {
   await assertGamePlayerInRoom(gameSession.roomId, params.playerId);
   await assertPlayerEligibleForCurrentQuestion(gameSession, params.playerId);
 
-  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+  if (hasRoundAcceptWindowExpired(gameSession, getServerReceivedAtMs(params))) {
     throw new Error("本轮答题时间已结束，不能再取消放弃。");
   }
 
@@ -3482,7 +3778,7 @@ export async function submitBuzzerAnswer(params: {
   playerId: string;
   answerText: string;
   clientRoundElapsedMs?: number | null;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const answerText = params.answerText.trim();
@@ -3509,7 +3805,8 @@ export async function submitBuzzerAnswer(params: {
   }
 
   const roundStartedAtMs = new Date(gameSession.roundStartedAt).getTime();
-  const serverRoundElapsedMs = Date.now() - roundStartedAtMs;
+  const serverReceivedAtMs = getServerReceivedAtMs(params);
+  const serverRoundElapsedMs = serverReceivedAtMs - roundStartedAtMs;
   const clientRoundElapsedMs = Number.isFinite(params.clientRoundElapsedMs) ? params.clientRoundElapsedMs : null;
   const canUseClientRoundElapsedMs =
     typeof clientRoundElapsedMs === "number" &&
@@ -3518,7 +3815,7 @@ export async function submitBuzzerAnswer(params: {
   const effectiveRoundElapsedMs = canUseClientRoundElapsedMs ? clientRoundElapsedMs : serverRoundElapsedMs;
   const roundDurationMs = gameSession.roundSeconds * 1000;
 
-  if (effectiveRoundElapsedMs >= roundDurationMs) {
+  if (serverRoundElapsedMs > roundDurationMs + ROUND_DEADLINE_GRACE_MS) {
     throw new Error("本轮抢答时间已结束，不能再提交。");
   }
 
@@ -3746,6 +4043,20 @@ export async function judgeBuzzerAnswer(params: {
     params.isCorrect && currentSession.gameMode === "BUZZER_FIRST_CORRECT"
       ? await revealQuestionForReview(currentGameSession.id)
       : currentSession;
+  const scoringDelta = params.isCorrect
+    ? await Promise.all([
+        getPlayerScores(currentGameSession.id),
+        getQuestionResultsForQuestion({
+          gameSessionId: currentGameSession.id,
+          questionIndex: currentGameSession.current_question_index,
+        }),
+        getBuzzerAnswersForQuestionRound({
+          gameSessionId: currentGameSession.id,
+          questionIndex: currentGameSession.current_question_index,
+          revealRound: currentGameSession.current_reveal_round,
+        }),
+      ])
+    : null;
 
   return {
     gameSession: nextGameSession,
@@ -3756,13 +4067,20 @@ export async function judgeBuzzerAnswer(params: {
       judgedAt,
       judgedByPlayerId: params.presenterPlayerId,
     },
+    ...(scoringDelta
+      ? {
+          scores: scoringDelta[0],
+          questionResults: scoringDelta[1],
+          buzzerAnswers: scoringDelta[2],
+        }
+      : {}),
   };
 }
 
 export async function settleBuzzerRound(params: {
   gameSessionId: string;
   presenterPlayerId: string;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const { data: currentGameSession, error } = await d1
@@ -3787,7 +4105,7 @@ export async function settleBuzzerRound(params: {
     throw new Error("红蓝对抗模式不能使用普通抢答结算。");
   }
 
-  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);
+  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession, getServerReceivedAtMs(params));
 
   return {
     gameSession: nextGameSession,
@@ -4162,28 +4480,19 @@ export async function judgeTeamBattleGuess(params: {
     [winningTeam]: state.teamScores[winningTeam] + 1,
   };
 
-  for (const scoredPlayerId of winningMembers) {
-    const { error: resultError } = await d1.from("question_results").insert({
-      game_session_id: currentGameSession.id,
-      question_index: currentGameSession.current_question_index,
-      player_id: scoredPlayerId,
-      scored_round: currentGameSession.current_reveal_round,
-      score_awarded: 1,
-      judged_by_player_id: params.presenterPlayerId,
-    });
-
-    if (resultError && !isUniqueViolation(resultError)) {
-      throw new Error(resultError.message);
-    }
-
-    if (!resultError) {
-      await addScoreToPlayer({
-        gameSessionId: currentGameSession.id,
-        playerId: scoredPlayerId,
-        scoreAwarded: 1,
-      });
-    }
-  }
+  const newlyScoredPlayerIds = await insertQuestionResultsForPlayers({
+    gameSessionId: currentGameSession.id,
+    questionIndex: currentGameSession.current_question_index,
+    playerIds: winningMembers,
+    scoredRound: currentGameSession.current_reveal_round,
+    scoreAwarded: 1,
+    judgedByPlayerId: params.presenterPlayerId,
+  });
+  await bulkAddScoresToPlayers({
+    gameSessionId: currentGameSession.id,
+    playerIds: newlyScoredPlayerIds,
+    scoreAwarded: 1,
+  });
 
   const nextState: TeamBattleState = {
     ...state,
@@ -4293,58 +4602,19 @@ export async function gradeAnswersAndAdvance(params: {
   const uniqueCorrectPlayerIds = Array.from(new Set(params.correctPlayerIds)).filter(
     (playerId) => playerId && playerId !== params.presenterPlayerId && eligiblePlayerSet.has(playerId),
   );
-  const newlyScoredPlayerIds: string[] = [];
-
-  for (const correctPlayerId of uniqueCorrectPlayerIds) {
-    const { error } = await d1.from("question_results").insert({
-      game_session_id: currentGameSession.id,
-      question_index: questionIndex,
-      player_id: correctPlayerId,
-      scored_round: currentRound,
-      score_awarded: roundScore,
-      judged_by_player_id: params.presenterPlayerId,
-    });
-
-    if (error) {
-      if (isUniqueViolation(error)) {
-        continue;
-      }
-
-      throw new Error(error.message);
-    }
-
-    newlyScoredPlayerIds.push(correctPlayerId);
-  }
-
-  for (const scoredPlayerId of newlyScoredPlayerIds) {
-    const { data: existingScore, error: scoreLoadError } = await d1
-      .from("player_scores")
-      .select("*")
-      .eq("game_session_id", currentGameSession.id)
-      .eq("player_id", scoredPlayerId)
-      .maybeSingle<DbPlayerScore>();
-
-    if (scoreLoadError) {
-      throw new Error(scoreLoadError.message);
-    }
-
-    const { error: scoreError } = await d1.from("player_scores").upsert(
-      {
-        id: existingScore?.id,
-        game_session_id: currentGameSession.id,
-        player_id: scoredPlayerId,
-        score: (existingScore?.score ?? 0) + roundScore,
-        correct_count: (existingScore?.correct_count ?? 0) + 1,
-      },
-      {
-        onConflict: "game_session_id,player_id",
-      },
-    );
-
-    if (scoreError) {
-      throw new Error(scoreError.message);
-    }
-  }
+  const newlyScoredPlayerIds = await insertQuestionResultsForPlayers({
+    gameSessionId: currentGameSession.id,
+    questionIndex,
+    playerIds: uniqueCorrectPlayerIds,
+    scoredRound: currentRound,
+    scoreAwarded: roundScore,
+    judgedByPlayerId: params.presenterPlayerId,
+  });
+  await bulkAddScoresToPlayers({
+    gameSessionId: currentGameSession.id,
+    playerIds: newlyScoredPlayerIds,
+    scoreAwarded: roundScore,
+  });
 
   const { data: questionResults, error: questionResultsError } = await d1
     .from("question_results")

@@ -7,6 +7,7 @@ import type {
   DbRoom,
   GameBootstrapSnapshot,
   GameMode,
+  GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
   Player,
@@ -250,6 +251,9 @@ export const getRoundSnapshot = (gameSessionId: string) => rpc<RoundSnapshot>("g
 export const getGameBootstrapSnapshot = (gameSessionId: string) =>
   rpc<GameBootstrapSnapshot>("getGameBootstrapSnapshot", gameSessionId);
 
+export const getGameResultSnapshot = (gameSessionId: string) =>
+  rpc<GameResultSnapshot>("getGameResultSnapshot", gameSessionId);
+
 export const getPlayerScores = (gameSessionId: string) => rpc<PlayerScore[]>("getPlayerScores", gameSessionId);
 
 export const getLeaderboardForGameSession = (gameSessionId: string) =>
@@ -279,7 +283,7 @@ export const getQuestionResultsForGameSession = (gameSessionId: string) =>
   rpc<QuestionResult[]>("getQuestionResultsForGameSession", gameSessionId);
 
 export const submitAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
-  rpc<Answer>("submitAnswer", params);
+  rpc<Answer & { buzzerAnswer?: BuzzerAnswer }>("submitAnswer", params);
 
 export const submitForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
   rpc<Answer>("submitForfeitAnswer", params);
@@ -298,7 +302,14 @@ export const judgeBuzzerAnswer = (params: {
   presenterPlayerId: string;
   buzzerAnswerId: string;
   isCorrect: boolean;
-}) => rpc<{ gameSession: GameSession; judgedAnswer: BuzzerAnswer }>("judgeBuzzerAnswer", params);
+}) =>
+  rpc<{
+    gameSession: GameSession;
+    judgedAnswer: BuzzerAnswer;
+    scores?: PlayerScore[];
+    questionResults?: QuestionResult[];
+    buzzerAnswers?: BuzzerAnswer[];
+  }>("judgeBuzzerAnswer", params);
 
 export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);

@@ -1,18 +1,20 @@
 ﻿"use client";
 
-import type { RoundSnapshot } from "@/types/game";
+import type { GameResultSnapshot, RoundSnapshot } from "@/types/game";
 import type { RealtimeDelta } from "@/types/game";
 
 type ChangeMessage = {
   type: "change";
   name: string;
-  result: unknown;
-  args: unknown[];
+  result?: unknown;
+  args?: unknown[];
   topic: string;
+  version?: number;
   clientActionId?: string;
   delta?: RealtimeDelta;
   deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
+  gameResultSnapshot?: GameResultSnapshot;
 };
 
 type ActionResultMessage = {
@@ -96,6 +98,7 @@ const WS_QUERY_NAMES = new Set([
   "getBuzzerAnswersForQuestion",
   "getBuzzerAnswersForQuestionRound",
   "getGameBootstrapSnapshot",
+  "getGameResultSnapshot",
   "getGameSessionById",
   "getLeaderboardForGameSession",
   "getPlayerScores",
@@ -107,6 +110,7 @@ const WS_QUERY_NAMES = new Set([
 const ROOM_ID_STRING_ARG_NAMES = new Set(["getPlayersByRoomId"]);
 const GAME_SESSION_ID_STRING_ARG_NAMES = new Set([
   "getGameBootstrapSnapshot",
+  "getGameResultSnapshot",
   "getGameSessionById",
   "getLeaderboardForGameSession",
   "getPlayerScores",
@@ -509,4 +513,12 @@ export function bindGameSessionRealtimeTopic(gameSessionId: string | null | unde
       gameSessionTopics.delete(gameSessionId);
     }
   };
+}
+
+export function ensureRealtimeTopic(topic: string | null | undefined) {
+  if (!topic) {
+    return;
+  }
+
+  ensureSocket(topic);
 }

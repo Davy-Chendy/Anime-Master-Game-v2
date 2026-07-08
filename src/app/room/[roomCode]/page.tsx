@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "@/lib/router";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
@@ -8,17 +8,14 @@ import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
-import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
+import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import {
   cancelCurrentRound,
   cancelPresenterSetup,
   dissolveRoom,
-  getGameSessionById,
-  getLeaderboardForGameSession,
+  getGameResultSnapshot,
   getRoomWithPlayers,
-  getQuestionSetById,
-  getQuestionResultsForGameSession,
   getQuestionSetRatingProgress,
   joinRoom,
   kickPlayerFromRoom,
@@ -31,6 +28,7 @@ import {
 } from "@/lib/cloudflareRooms";
 import type {
   GameMode,
+  GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
   Player,
@@ -50,6 +48,7 @@ const statusText: Record<RoomStatus, string> = {
   GAME_RESULT: "本局结算",
 };
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const gameResultSnapshotCache = new Map<string, GameResultSnapshot>();
 
 type GameSettings = {
   gameMode: GameMode;
@@ -68,6 +67,16 @@ function isRoom(value: unknown): value is Room {
 
 function isQuestionSet(value: unknown): value is QuestionSet {
   return isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && "imageCount" in value;
+}
+
+function isGameResultSnapshot(value: unknown): value is GameResultSnapshot {
+  return (
+    isRecord(value) &&
+    isRecord(value.gameSession) &&
+    Array.isArray(value.leaderboard) &&
+    ("questionSet" in value) &&
+    Array.isArray(value.questionResults)
+  );
 }
 
 function getBroadcastRoom(result: unknown) {
@@ -92,6 +101,54 @@ function getBroadcastQuestionSet(result: unknown) {
   }
 
   return null;
+}
+
+function getBroadcastGameResultSnapshot(message: {
+  result?: unknown;
+  delta?: RealtimeDelta;
+  deltas?: RealtimeDelta[];
+  gameResultSnapshot?: GameResultSnapshot;
+}) {
+  if (isGameResultSnapshot(message.gameResultSnapshot)) {
+    return message.gameResultSnapshot;
+  }
+
+  for (const delta of message.deltas ?? []) {
+    if (delta.scope === "game" && delta.type === "game_result_snapshot") {
+      return delta.snapshot;
+    }
+  }
+
+  if (message.delta?.scope === "game" && message.delta.type === "game_result_snapshot") {
+    return message.delta.snapshot;
+  }
+
+  if (isRecord(message.result) && isGameResultSnapshot(message.result.gameResultSnapshot)) {
+    return message.result.gameResultSnapshot;
+  }
+
+  return null;
+}
+
+function cacheGameResultSnapshot(snapshot: GameResultSnapshot | null) {
+  if (snapshot?.gameSession.id) {
+    gameResultSnapshotCache.set(snapshot.gameSession.id, snapshot);
+  }
+}
+
+function applyCachedGameResultSnapshot(
+  snapshot: GameResultSnapshot,
+  setters: {
+    setLeaderboard: (leaderboard: LeaderboardEntry[]) => void;
+    setGameSession: (gameSession: GameSession) => void;
+    setQuestionSet: (questionSet: QuestionSet | null) => void;
+    setQuestionResults: (questionResults: QuestionResult[]) => void;
+  },
+) {
+  setters.setLeaderboard(snapshot.leaderboard);
+  setters.setGameSession(snapshot.gameSession);
+  setters.setQuestionSet(snapshot.questionSet);
+  setters.setQuestionResults(snapshot.questionResults);
 }
 
 type GameModeCopy = {
@@ -168,6 +225,10 @@ function getTeamStyles(team: TeamBattleTeam) {
 
 function getRealtimeDeltas(message: { delta?: RealtimeDelta; deltas?: RealtimeDelta[] }) {
   return message.deltas ?? (message.delta ? [message.delta] : []);
+}
+
+function getRealtimeVersion(message: { version?: number }) {
+  return typeof message.version === "number" && Number.isFinite(message.version) ? message.version : null;
 }
 
 function isQuestionSetUpdatedDelta(
@@ -926,18 +987,39 @@ function GameResultPanel({
   const playerIds = useMemo(() => getGamePlayers(room.players).map((player) => player.id), [room.players]);
   const canRateQuestionSet = room.players.find((player) => player.id === playerId)?.role === "PLAYER";
 
-  async function loadRatingProgress(questionSetId: string) {
-    const nextProgress = await getQuestionSetRatingProgress({
-      questionSetId,
-      playerIds,
-      playerId,
-    });
-    setRatingProgress(nextProgress);
-
-    if (nextProgress.playerRating) {
-      setRatingValue(nextProgress.playerRating);
+  useEffect(() => {
+    if (!room.id || !currentGameId) {
+      return;
     }
-  }
+
+    const unbindGameSessionTopic = bindGameSessionRealtimeTopic(currentGameId, `room:${room.id}`);
+    ensureRealtimeTopic(`room:${room.id}`);
+
+    return () => {
+      unbindGameSessionTopic();
+    };
+  }, [currentGameId, room.id]);
+
+  useEffect(() => {
+    if (!room.id || !currentGameId) {
+      return;
+    }
+
+    return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
+      const snapshot = getBroadcastGameResultSnapshot(message);
+      if (snapshot?.gameSession.id !== currentGameId) {
+        return;
+      }
+
+      cacheGameResultSnapshot(snapshot);
+      applyCachedGameResultSnapshot(snapshot, {
+        setLeaderboard,
+        setGameSession,
+        setQuestionSet,
+        setQuestionResults,
+      });
+    });
+  }, [currentGameId, room.id]);
 
   useEffect(() => {
     let isMounted = true;
@@ -952,32 +1034,29 @@ function GameResultPanel({
         return;
       }
 
+      const cachedSnapshot = gameResultSnapshotCache.get(currentGameId);
+      if (cachedSnapshot) {
+        applyCachedGameResultSnapshot(cachedSnapshot, {
+          setLeaderboard,
+          setGameSession,
+          setQuestionSet,
+          setQuestionResults,
+        });
+        return;
+      }
+
       setIsLoadingLeaderboard(true);
       try {
-        const [nextLeaderboard, loadedGameSession] = await Promise.all([
-          getLeaderboardForGameSession(currentGameId),
-          getGameSessionById(currentGameId),
-        ]);
-        const loadedQuestionSet = loadedGameSession ? await getQuestionSetById(loadedGameSession.questionSetId) : null;
-        const loadedQuestionResults = loadedGameSession ? await getQuestionResultsForGameSession(loadedGameSession.id) : [];
-        const nextRatingProgress =
-          loadedQuestionSet?.isPublic && loadedQuestionSet.id
-            ? await getQuestionSetRatingProgress({
-                questionSetId: loadedQuestionSet.id,
-                playerIds,
-                playerId,
-              })
-            : null;
+        const snapshot = await getGameResultSnapshot(currentGameId);
 
         if (isMounted) {
-          setLeaderboard(nextLeaderboard);
-          setGameSession(loadedGameSession);
-          setQuestionSet(loadedQuestionSet);
-          setQuestionResults(loadedQuestionResults);
-          setRatingProgress(nextRatingProgress);
-          if (nextRatingProgress?.playerRating) {
-            setRatingValue(nextRatingProgress.playerRating);
-          }
+          cacheGameResultSnapshot(snapshot);
+          applyCachedGameResultSnapshot(snapshot, {
+            setLeaderboard,
+            setGameSession,
+            setQuestionSet,
+            setQuestionResults,
+          });
         }
       } catch (caughtError) {
         if (isMounted) {
@@ -995,7 +1074,43 @@ function GameResultPanel({
     return () => {
       isMounted = false;
     };
-  }, [currentGameId, onError, playerId, playerIds]);
+  }, [currentGameId, onError]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function refreshRatingProgress() {
+      if (!questionSet?.isPublic || !questionSet.id) {
+        setRatingProgress(null);
+        return;
+      }
+
+      try {
+        const nextProgress = await getQuestionSetRatingProgress({
+          questionSetId: questionSet.id,
+          playerIds,
+          playerId,
+        });
+
+        if (isMounted) {
+          setRatingProgress(nextProgress);
+          if (nextProgress.playerRating) {
+            setRatingValue(nextProgress.playerRating);
+          }
+        }
+      } catch (caughtError) {
+        if (isMounted) {
+          onError(caughtError instanceof Error ? caughtError.message : "加载评分进度失败");
+        }
+      }
+    }
+
+    refreshRatingProgress();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [onError, playerId, playerIds, questionSet?.id, questionSet?.isPublic]);
 
   useEffect(() => {
     if (!room.id || !questionSet?.id) {
@@ -1010,6 +1125,15 @@ function GameResultPanel({
       const pushedQuestionSet = questionSetDelta?.questionSet ?? getBroadcastQuestionSet(message.result);
       if (pushedQuestionSet?.id === questionSet.id) {
         setQuestionSet(pushedQuestionSet);
+        if (currentGameId) {
+          const cachedSnapshot = gameResultSnapshotCache.get(currentGameId);
+          if (cachedSnapshot) {
+            gameResultSnapshotCache.set(currentGameId, {
+              ...cachedSnapshot,
+              questionSet: pushedQuestionSet,
+            });
+          }
+        }
 
         if (questionSetDelta?.ratedPlayerId) {
           setRatingProgress((currentProgress) => {
@@ -1035,7 +1159,7 @@ function GameResultPanel({
         return;
       }
     });
-  }, [playerId, questionSet?.id, room.id]);
+  }, [currentGameId, playerId, questionSet?.id, room.id]);
 
   async function handleRateQuestionSet() {
     if (!questionSet || !room.id) {
@@ -1101,10 +1225,11 @@ function GameResultPanel({
         .map((team) => ({
           team,
           score: gameSession.teamBattleState?.teamScores[team] ?? 0,
-          members: (gameSession.teamBattleState?.teams[team] ?? []).flatMap((memberId) => {
+          members: (gameSession.teamBattleState?.initialTeams?.[team] ?? gameSession.teamBattleState?.teams[team] ?? []).flatMap((memberId) => {
             const player = playerById.get(memberId);
 
-            return player ? [{ id: memberId, nickname: player.nickname }] : [];
+            const nickname = player?.nickname ?? gameSession.teamBattleState?.teamMemberNames?.[memberId] ?? "已离开玩家";
+            return [{ id: memberId, nickname }];
           }),
           questionScores: questionIndexes.map((questionIndex) => scoreByTeamQuestion.get(`${team}:${questionIndex}`) ?? 0),
         }))
@@ -1129,6 +1254,63 @@ function GameResultPanel({
 
   return (
     <div className="space-y-5">
+      <div className="grid gap-5 lg:grid-cols-2">
+        <Panel title="题库评分">
+          {canRate ? (
+            <>
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p className="text-3xl font-bold text-slate-950">{Number(questionSet?.ratingAvg ?? 0).toFixed(1)}</p>
+                  <p className="mt-1 text-sm text-[var(--muted)]">{questionSet?.ratingCount ?? 0} 人评分</p>
+                </div>
+                <p className="text-sm font-semibold text-slate-950">
+                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? playerIds.length} 已完成
+                </p>
+              </div>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${ratingPercent}%` }} />
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <select
+                  className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
+                  value={ratingValue}
+                  onChange={(event) => setRatingValue(Number(event.target.value))}
+                >
+                  {[1, 2, 3, 4, 5].map((rating) => (
+                    <option key={rating} value={rating}>
+                      {rating} 星
+                    </option>
+                  ))}
+                </select>
+                <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
+                  {isRating ? "提交中…" : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm leading-6 text-[var(--muted)]">
+              {questionSet?.isPublic ? "观战者不参与本局题库评分" : "本局题库未发布到社区，暂不开放评分"}
+            </p>
+          )}
+        </Panel>
+
+        <Panel title="操作">
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+            <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
+            </p>
+          </div>
+          {isHost ? (
+            <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
+              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
+            </Button>
+          ) : (
+            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
+          )}
+        </Panel>
+      </div>
+
       <Panel
         title="本局排行榜"
         action={<span className="text-sm font-medium text-[var(--muted)]">出题人：{presenterName}</span>}
@@ -1283,63 +1465,6 @@ function GameResultPanel({
           </div>
         )}
       </Panel>
-
-      <div className="grid gap-5 lg:grid-cols-2">
-        <Panel title="题库评分">
-          {canRate ? (
-            <>
-              <div className="flex flex-wrap items-end justify-between gap-3">
-                <div>
-                  <p className="text-3xl font-bold text-slate-950">{Number(questionSet?.ratingAvg ?? 0).toFixed(1)}</p>
-                  <p className="mt-1 text-sm text-[var(--muted)]">{questionSet?.ratingCount ?? 0} 人评分</p>
-                </div>
-                <p className="text-sm font-semibold text-slate-950">
-                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? playerIds.length} 已完成
-                </p>
-              </div>
-              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${ratingPercent}%` }} />
-              </div>
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                <select
-                  className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
-                  value={ratingValue}
-                  onChange={(event) => setRatingValue(Number(event.target.value))}
-                >
-                  {[1, 2, 3, 4, 5].map((rating) => (
-                    <option key={rating} value={rating}>
-                      {rating} 星
-                    </option>
-                  ))}
-                </select>
-                <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
-                  {isRating ? "提交中…" : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
-                </Button>
-              </div>
-            </>
-          ) : (
-            <p className="text-sm leading-6 text-[var(--muted)]">
-              {questionSet?.isPublic ? "观战者不参与本局题库评分" : "本局题库未发布到社区，暂不开放评分"}
-            </p>
-          )}
-        </Panel>
-
-        <Panel title="操作">
-          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-            <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
-            <p className="mt-1 text-sm text-[var(--muted)]">
-              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
-            </p>
-          </div>
-          {isHost ? (
-            <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
-            </Button>
-          ) : (
-            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
-          )}
-        </Panel>
-      </div>
     </div>
   );
 }
@@ -1365,6 +1490,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
   const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
+  const lastRoomRealtimeVersionRef = useRef<number | null>(null);
+  const missedRoomRealtimeVersionRef = useRef(false);
+  const roomCatchUpTargetVersionRef = useRef<number | null>(null);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     gameMode: "ROUND_REVEAL",
     maxRevealRounds: 3,
@@ -1500,6 +1628,18 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         return;
       }
 
+      const pushedUpdatedAtMs = pushedRoom.updatedAt ? new Date(pushedRoom.updatedAt).getTime() : null;
+      const activeUpdatedAtMs = activeRoom.updatedAt ? new Date(activeRoom.updatedAt).getTime() : null;
+      if (
+        pushedUpdatedAtMs != null &&
+        activeUpdatedAtMs != null &&
+        Number.isFinite(pushedUpdatedAtMs) &&
+        Number.isFinite(activeUpdatedAtMs) &&
+        pushedUpdatedAtMs < activeUpdatedAtMs
+      ) {
+        return;
+      }
+
       const wasRoomMember = activeRoom.players.some((player) => player.id === playerId);
       if (wasRoomMember && pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
         markPlayerRemoved();
@@ -1517,28 +1657,107 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       );
     }
 
+    let refreshPromise: Promise<void> | null = null;
+    lastRoomRealtimeVersionRef.current = null;
+    missedRoomRealtimeVersionRef.current = false;
+    roomCatchUpTargetVersionRef.current = null;
+
+    function shouldContinueRoomCatchUp(coveredTargetVersion: number | null) {
+      const latestTargetVersion = roomCatchUpTargetVersionRef.current;
+      return (
+        latestTargetVersion != null &&
+        (coveredTargetVersion == null || latestTargetVersion > coveredTargetVersion)
+      );
+    }
+
     async function refreshLatestRoom() {
+      if (refreshPromise) {
+        return refreshPromise;
+      }
+
+      const startTargetVersion = roomCatchUpTargetVersionRef.current;
+      const runPromise = doRefreshLatestRoom(startTargetVersion);
+      refreshPromise = runPromise.then(() => undefined).finally(() => {
+        refreshPromise = null;
+      });
+      void runPromise.then((didRefresh) => {
+        if (didRefresh && isActive && shouldContinueRoomCatchUp(startTargetVersion)) {
+          window.setTimeout(() => {
+            if (isActive) {
+              void refreshLatestRoom();
+            }
+          }, 0);
+        }
+      });
+      return refreshPromise;
+    }
+
+    async function doRefreshLatestRoom(coveredTargetVersion: number | null) {
       try {
         const latestRoom = await getRoomWithPlayers(roomCode);
 
         if (!isActive) {
-          return;
+          return false;
         }
 
         if (!latestRoom) {
           markRoomDissolved();
-          return;
+          return true;
         }
 
         applyRoomUpdate(latestRoom);
+        if (coveredTargetVersion != null) {
+          lastRoomRealtimeVersionRef.current = Math.max(
+            lastRoomRealtimeVersionRef.current ?? 0,
+            coveredTargetVersion,
+          );
+        }
+        if (shouldContinueRoomCatchUp(coveredTargetVersion)) {
+          missedRoomRealtimeVersionRef.current = true;
+        } else {
+          roomCatchUpTargetVersionRef.current = null;
+          missedRoomRealtimeVersionRef.current = false;
+        }
+        return true;
       } catch {
         // Realtime remains the primary path; this catch-up read is best effort.
+        return false;
       }
     }
+
+    let hasOpenedRealtime = false;
 
     const unsubscribe = subscribeRealtimeTopic(
       `room:${room.id}`,
       (message) => {
+        const messageVersion = getRealtimeVersion(message);
+        if (messageVersion != null) {
+          const lastVersion = lastRoomRealtimeVersionRef.current;
+          if (lastVersion != null && messageVersion <= lastVersion) {
+            return;
+          }
+
+          if (missedRoomRealtimeVersionRef.current) {
+            roomCatchUpTargetVersionRef.current = Math.max(roomCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            void refreshLatestRoom();
+            return;
+          }
+
+          if (lastVersion != null && messageVersion > lastVersion + 1) {
+            missedRoomRealtimeVersionRef.current = true;
+            roomCatchUpTargetVersionRef.current = Math.max(roomCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            void refreshLatestRoom();
+            return;
+          }
+
+          lastRoomRealtimeVersionRef.current = messageVersion;
+        }
+
+        if (missedRoomRealtimeVersionRef.current) {
+          void refreshLatestRoom();
+          return;
+        }
+
         const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
         if (dissolvedDelta?.roomId === room.id) {
           markRoomDissolved();
@@ -1546,6 +1765,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
 
         const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
+        cacheGameResultSnapshot(getBroadcastGameResultSnapshot(message));
         const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
         if (pushedRoom && pushedRoom.id === room.id) {
           applyRoomUpdate(pushedRoom);
@@ -1554,19 +1774,18 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       },
       {
         onOpen: () => {
+          if (!hasOpenedRealtime) {
+            hasOpenedRealtime = true;
+            return;
+          }
+
           void refreshLatestRoom();
         },
       },
     );
 
-    void refreshLatestRoom();
-    const catchUpTimer = window.setTimeout(() => {
-      void refreshLatestRoom();
-    }, 750);
-
     return () => {
       isActive = false;
-      window.clearTimeout(catchUpTimer);
       unsubscribe();
     };
   }, [playerId, room?.id, roomCode]);

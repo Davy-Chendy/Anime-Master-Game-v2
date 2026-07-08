@@ -119,6 +119,20 @@ function getQuestionSetUploaderName(questionSet: QuestionSet) {
   return questionSet.createdByNickname?.trim() || "未知上传者";
 }
 
+function formatQuestionSetPublishedAt(questionSet: QuestionSet) {
+  const publishedAt = new Date(questionSet.createdAt);
+
+  if (Number.isNaN(publishedAt.getTime())) {
+    return "未知时间";
+  }
+
+  const year = String(publishedAt.getFullYear()).slice(-2);
+  const month = String(publishedAt.getMonth() + 1).padStart(2, "0");
+  const day = String(publishedAt.getDate()).padStart(2, "0");
+
+  return `${year}/${month}/${day}`;
+}
+
 function formatBytes(bytes: number) {
   if (bytes >= 1024 * 1024) {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -822,7 +836,8 @@ export function QuestionSetUploader({
                       <p className="truncate font-semibold text-slate-950">{item.title}</p>
                       <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">{item.description || "暂无简介"}</p>
                       <p className="mt-2 text-xs text-[var(--muted)]">
-                        上传者：{getQuestionSetUploaderName(item)} · {item.imageCount} 张 · {Number(item.ratingAvg).toFixed(1)} 分 · {item.ratingCount} 人评分
+                        上传者：{getQuestionSetUploaderName(item)} · 发布时间：{formatQuestionSetPublishedAt(item)} · {item.imageCount} 张 ·{" "}
+                        {Number(item.ratingAvg).toFixed(1)} 分 · {item.ratingCount} 人评分
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
@@ -855,8 +870,8 @@ export function QuestionSetUploader({
                 <p className="text-lg font-semibold text-slate-950">{previewingCommunitySet.title}</p>
                 <p className="mt-1 text-sm text-[var(--muted)]">{previewingCommunitySet.description || "暂无简介"}</p>
                 <p className="mt-2 text-xs text-[var(--muted)]">
-                  上传者：{getQuestionSetUploaderName(previewingCommunitySet)}，{previewingCommunitySet.imageCount} 张，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，
-                  {previewingCommunitySet.ratingCount} 人评分
+                  上传者：{getQuestionSetUploaderName(previewingCommunitySet)}，发布时间：{formatQuestionSetPublishedAt(previewingCommunitySet)}，
+                  {previewingCommunitySet.imageCount} 张，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，{previewingCommunitySet.ratingCount} 人评分
                 </p>
               </div>
               <div className="flex shrink-0 gap-2">
