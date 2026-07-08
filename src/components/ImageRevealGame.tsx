@@ -66,8 +66,9 @@ const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
 const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
 const ROUND_PROMPT_SOUND_STORAGE_KEY = "animeMaster.roundPromptSoundEnabled";
 const ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY = "animeMaster.roundPromptSoundVolume";
+const ROUND_PROMPT_SOUND_URL = "/sounds/round-start.mp3";
 const DEFAULT_ROUND_PROMPT_SOUND_VOLUME = 80;
-const MAX_ROUND_PROMPT_SOUND_GAIN = 0.45;
+let roundPromptAudioElement: HTMLAudioElement | null = null;
 
 function getInitialRoundPromptSoundEnabled() {
   if (typeof window === "undefined") {
@@ -110,49 +111,29 @@ function saveRoundPromptSoundVolume(volume: number) {
   }
 }
 
-function playRoundPromptSound(volume = DEFAULT_ROUND_PROMPT_SOUND_VOLUME) {
+function getRoundPromptAudioElement() {
   if (typeof window === "undefined") {
+    return null;
+  }
+
+  if (!roundPromptAudioElement) {
+    roundPromptAudioElement = new Audio(ROUND_PROMPT_SOUND_URL);
+    roundPromptAudioElement.preload = "auto";
+  }
+
+  return roundPromptAudioElement;
+}
+
+function playRoundPromptSound(volume = DEFAULT_ROUND_PROMPT_SOUND_VOLUME) {
+  const audio = getRoundPromptAudioElement();
+  if (!audio) {
     return;
   }
 
-  const normalizedVolume = Math.max(0, Math.min(100, volume)) / 100;
-  if (normalizedVolume <= 0) {
-    return;
-  }
-
-  const AudioContextConstructor =
-    window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  if (!AudioContextConstructor) {
-    return;
-  }
-
-  const audioContext = new AudioContextConstructor();
-  const startAt = audioContext.currentTime;
-  const peakGain = MAX_ROUND_PROMPT_SOUND_GAIN * normalizedVolume;
-
-  function scheduleBeep(offset: number, startFrequency: number, endFrequency: number) {
-    const beepStartAt = startAt + offset;
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-
-    oscillator.type = "triangle";
-    oscillator.frequency.setValueAtTime(startFrequency, beepStartAt);
-    oscillator.frequency.exponentialRampToValueAtTime(endFrequency, beepStartAt + 0.11);
-    gain.gain.setValueAtTime(0.0001, beepStartAt);
-    gain.gain.exponentialRampToValueAtTime(peakGain, beepStartAt + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, beepStartAt + 0.16);
-
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-    oscillator.start(beepStartAt);
-    oscillator.stop(beepStartAt + 0.18);
-  }
-
-  scheduleBeep(0, 740, 1040);
-  scheduleBeep(0.24, 880, 1320);
-  window.setTimeout(() => {
-    void audioContext.close();
-  }, 600);
+  audio.pause();
+  audio.currentTime = 0;
+  audio.volume = Math.max(0, Math.min(100, volume)) / 100;
+  void audio.play();
 }
 
 function isForfeitAnswer(answer: Answer | null | undefined) {
@@ -818,6 +799,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const gameSessionRef = useRef<GameSession | null>(null);
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
+  const roundPromptSoundControlsRef = useRef<HTMLDivElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
   const roundSnapshotFetchRef = useRef<{
     gameSessionId: string;
@@ -2046,6 +2028,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     isRoundPromptSoundEnabled,
     roundPromptSoundVolume,
   ]);
+
+  useEffect(() => {
+    if (!isRoundPromptSoundVolumeOpen) {
+      return;
+    }
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      const controlsElement = roundPromptSoundControlsRef.current;
+      if (controlsElement && event.target instanceof Node && controlsElement.contains(event.target)) {
+        return;
+      }
+
+      setIsRoundPromptSoundVolumeOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handleDocumentPointerDown);
+    return () => document.removeEventListener("pointerdown", handleDocumentPointerDown);
+  }, [isRoundPromptSoundVolumeOpen]);
 
   useEffect(() => {
     if (!canTypeAnswer || !gameSession?.roundStartedAt) {
@@ -3682,7 +3682,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           </div>
 
           <div className="mt-auto flex justify-end pt-4">
-            <div className="relative">
+            <div className="relative" ref={roundPromptSoundControlsRef}>
               {isRoundPromptSoundEnabled && isRoundPromptSoundVolumeOpen ? (
                 <div className="absolute bottom-full right-0 z-10 mb-2 w-52 rounded-md border border-[var(--line)] bg-white p-3 text-xs font-semibold text-slate-600 shadow-lg">
                   <label className="block">
