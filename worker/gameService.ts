@@ -111,7 +111,39 @@ function countGamePlayers(players: Pick<DbPlayer, "role">[]) {
   return players.filter(isGamePlayer).length;
 }
 
+function isGameMode(value: unknown): value is GameMode {
+  return value === "ROUND_REVEAL" || value === "BUZZER_FIRST_CORRECT" || value === "BUZZER_RANKED" || value === "TEAM_BATTLE";
+}
+
+function normalizeMaxRevealRounds(value: unknown) {
+  return Math.max(1, Math.min(10, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : 3)));
+}
+
+function normalizeRoundSeconds(value: unknown) {
+  return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : 60)));
+}
+
+function normalizeRoundScores(value: unknown, maxRevealRounds: number) {
+  let source: unknown[] = [];
+  if (Array.isArray(value)) {
+    source = value;
+  } else if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      source = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      source = [];
+    }
+  }
+
+  return Array.from({ length: maxRevealRounds }, (_, index) => {
+    const score = source[index] ?? Math.max(1, maxRevealRounds - index);
+    return Math.max(0, Math.floor(typeof score === "number" && Number.isFinite(score) ? score : 0));
+  });
+}
+
 function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
+  const maxRevealRounds = normalizeMaxRevealRounds(room.lobby_max_reveal_rounds);
   return {
     id: room.id,
     code: room.room_code,
@@ -121,6 +153,10 @@ function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
     currentPresenterPlayerId: room.current_presenter_player_id,
     currentGameId: room.current_game_id,
     preparedQuestionSetId: room.prepared_question_set_id ?? null,
+    gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
+    maxRevealRounds,
+    roundSeconds: normalizeRoundSeconds(room.lobby_round_seconds),
+    roundScores: normalizeRoundScores(room.lobby_round_scores, maxRevealRounds),
     createdAt: room.created_at,
     updatedAt: room.updated_at,
   };
@@ -2136,6 +2172,65 @@ export async function prepareQuestionSetForStart(params: {
   return toRoom(room);
 }
 
+export async function updateRoomGameSettings(params: {
+  roomId: string;
+  hostPlayerId: string;
+  gameMode: GameMode;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
+}) {
+  assertD1Env();
+
+  if (!isGameMode(params.gameMode)) {
+    throw new Error("不支持的游戏模式。");
+  }
+
+  const maxRevealRounds = normalizeMaxRevealRounds(params.maxRevealRounds);
+  const roundSeconds = normalizeRoundSeconds(params.roundSeconds);
+  const roundScores = normalizeRoundScores(params.roundScores, maxRevealRounds);
+
+  const { data: currentRoom, error: currentRoomError } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", params.roomId)
+    .eq("host_player_id", params.hostPlayerId)
+    .maybeSingle<DbRoom>();
+
+  if (currentRoomError) {
+    throw new Error(currentRoomError.message);
+  }
+
+  if (!currentRoom || (currentRoom.game_status !== "LOBBY" && currentRoom.game_status !== "QUESTION_SETUP")) {
+    throw new Error("只有房主可以在房间大厅或题库准备阶段修改游戏模式。");
+  }
+
+  const { data: room, error } = await d1
+    .from("rooms")
+    .update({
+      lobby_game_mode: params.gameMode,
+      lobby_max_reveal_rounds: maxRevealRounds,
+      lobby_round_seconds: roundSeconds,
+      lobby_round_scores: roundScores,
+    })
+    .eq("id", params.roomId)
+    .eq("host_player_id", params.hostPlayerId)
+    .eq("game_status", currentRoom.game_status)
+    .select()
+    .maybeSingle<DbRoom>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!room) {
+    throw new Error("修改游戏模式失败：房间状态已变化，请刷新后重试。");
+  }
+
+  const players = await getDbPlayersByRoomId(params.roomId);
+  return toRoom(room, players);
+}
+
 export async function startGameWithQuestionSet(params: {
   roomId: string;
   hostPlayerId: string;
@@ -2184,9 +2279,9 @@ export async function startGameWithQuestionSet(params: {
     throw new Error("开始游戏失败：不能使用他人的未公开题库。");
   }
 
-  const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
-  const roundSeconds = Math.max(1, Math.min(600, Math.floor(params.roundSeconds ?? 60)));
-  const gameMode = params.gameMode ?? "ROUND_REVEAL";
+  const maxRevealRounds = normalizeMaxRevealRounds(params.maxRevealRounds ?? room.lobby_max_reveal_rounds);
+  const roundSeconds = normalizeRoundSeconds(params.roundSeconds ?? room.lobby_round_seconds);
+  const gameMode = isGameMode(params.gameMode) ? params.gameMode : room.lobby_game_mode ?? "ROUND_REVEAL";
   const { data: players, error: playersError } = await d1
     .from("players")
     .select("*")
@@ -2210,10 +2305,7 @@ export async function startGameWithQuestionSet(params: {
   }
 
   const teamBattleState = gameMode === "TEAM_BATTLE" ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId) : null;
-  const roundScores = Array.from({ length: maxRevealRounds }, (_, index) => {
-    const score = params.roundScores?.[index] ?? Math.max(1, maxRevealRounds - index);
-    return Math.max(0, Math.floor(score));
-  });
+  const roundScores = normalizeRoundScores(params.roundScores ?? room.lobby_round_scores, maxRevealRounds);
 
   const { data: gameSession, error: gameSessionError } = await d1
     .from("game_sessions")

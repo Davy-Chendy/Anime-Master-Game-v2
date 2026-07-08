@@ -190,6 +190,15 @@ export const prepareQuestionSetForStart = (params: {
   questionSetId: string;
 }) => rpc<Room>("prepareQuestionSetForStart", params);
 
+export const updateRoomGameSettings = (params: {
+  roomId: string;
+  hostPlayerId: string;
+  gameMode: GameMode;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
+}) => rpc<Room>("updateRoomGameSettings", params);
+
 export const startGameWithQuestionSet = (params: {
   roomId: string;
   hostPlayerId: string;

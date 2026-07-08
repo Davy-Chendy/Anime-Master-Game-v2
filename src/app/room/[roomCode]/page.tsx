@@ -24,6 +24,7 @@ import {
   returnRoomToLobby,
   selectPresenterForRound,
   startGameWithQuestionSet,
+  updateRoomGameSettings,
   updatePlayerRole,
 } from "@/lib/cloudflareRooms";
 import type {
@@ -56,6 +57,55 @@ type GameSettings = {
   roundSeconds: number;
   roundScores: number[];
 };
+
+const defaultGameSettings: GameSettings = {
+  gameMode: "ROUND_REVEAL",
+  maxRevealRounds: 3,
+  roundSeconds: 60,
+  roundScores: [3, 2, 1],
+};
+
+function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
+  const rawMaxRevealRounds =
+    typeof settings.maxRevealRounds === "number" && Number.isFinite(settings.maxRevealRounds)
+      ? settings.maxRevealRounds
+      : defaultGameSettings.maxRevealRounds;
+  const rawRoundSeconds =
+    typeof settings.roundSeconds === "number" && Number.isFinite(settings.roundSeconds)
+      ? settings.roundSeconds
+      : defaultGameSettings.roundSeconds;
+  const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(rawMaxRevealRounds)));
+  const sourceScores = Array.isArray(settings.roundScores) ? settings.roundScores : defaultGameSettings.roundScores;
+
+  return {
+    gameMode: settings.gameMode ?? defaultGameSettings.gameMode,
+    maxRevealRounds,
+    roundSeconds: Math.max(1, Math.min(600, Math.floor(rawRoundSeconds))),
+    roundScores: Array.from({ length: maxRevealRounds }, (_, index) => {
+      const score = sourceScores[index] ?? Math.max(1, maxRevealRounds - index);
+      return Math.max(0, Math.floor(typeof score === "number" && Number.isFinite(score) ? score : 0));
+    }),
+  };
+}
+
+function getRoomGameSettings(room: Room | null | undefined): GameSettings {
+  return normalizeGameSettings({
+    gameMode: room?.gameMode,
+    maxRevealRounds: room?.maxRevealRounds,
+    roundSeconds: room?.roundSeconds,
+    roundScores: room?.roundScores,
+  });
+}
+
+function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
+  return (
+    left.gameMode === right.gameMode &&
+    left.maxRevealRounds === right.maxRevealRounds &&
+    left.roundSeconds === right.roundSeconds &&
+    left.roundScores.length === right.roundScores.length &&
+    left.roundScores.every((score, index) => score === right.roundScores[index])
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -1490,15 +1540,11 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
   const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
+  const settingsUpdateSeqRef = useRef(0);
   const lastRoomRealtimeVersionRef = useRef<number | null>(null);
   const missedRoomRealtimeVersionRef = useRef(false);
   const roomCatchUpTargetVersionRef = useRef<number | null>(null);
-  const [gameSettings, setGameSettings] = useState<GameSettings>({
-    gameMode: "ROUND_REVEAL",
-    maxRevealRounds: 3,
-    roundSeconds: 60,
-    roundScores: [3, 2, 1],
-  });
+  const [gameSettings, setGameSettings] = useState<GameSettings>(defaultGameSettings);
 
   useEffect(() => {
     if (!error) {
@@ -1805,6 +1851,13 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
 
+  useEffect(() => {
+    setGameSettings((currentSettings) => {
+      const roomSettings = getRoomGameSettings(room);
+      return areGameSettingsEqual(currentSettings, roomSettings) ? currentSettings : roomSettings;
+    });
+  }, [room]);
+
   async function handleExitRoom() {
     if (!room?.id || !playerId || (room.status === "PLAYING" && isCurrentPresenter)) {
       return;
@@ -2002,6 +2055,50 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError(caughtError instanceof Error ? caughtError.message : "回到房间大厅失败，请稍后重试");
     } finally {
       setIsReturningToLobby(false);
+    }
+  }
+
+  async function handleGameSettingsChange(nextSettings: GameSettings) {
+    if (!room?.id || !playerId || !isHost || (room.status !== "LOBBY" && room.status !== "QUESTION_SETUP")) {
+      return;
+    }
+
+    const normalizedSettings = normalizeGameSettings(nextSettings);
+    if (areGameSettingsEqual(normalizedSettings, gameSettings)) {
+      return;
+    }
+
+    const updateSeq = settingsUpdateSeqRef.current + 1;
+    settingsUpdateSeqRef.current = updateSeq;
+    setGameSettings(normalizedSettings);
+    setError("");
+
+    try {
+      const nextRoom = await updateRoomGameSettings({
+        roomId: room.id,
+        hostPlayerId: playerId,
+        gameMode: normalizedSettings.gameMode,
+        maxRevealRounds: normalizedSettings.maxRevealRounds,
+        roundSeconds: normalizedSettings.roundSeconds,
+        roundScores: normalizedSettings.roundScores,
+      });
+
+      if (settingsUpdateSeqRef.current === updateSeq) {
+        setRoom((currentRoom) =>
+          currentRoom
+            ? {
+                ...currentRoom,
+                ...nextRoom,
+                players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
+              }
+            : nextRoom,
+        );
+      }
+    } catch (caughtError) {
+      if (settingsUpdateSeqRef.current === updateSeq) {
+        setGameSettings(getRoomGameSettings(room));
+        setError(caughtError instanceof Error ? caughtError.message : "修改游戏模式失败，请稍后重试");
+      }
     }
   }
 
@@ -2225,7 +2322,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             presenterName={presenterName}
             isStartingGame={isStartingGame}
             isCancelingRound={isCancelingRound}
-            onSettingsChange={setGameSettings}
+            onSettingsChange={handleGameSettingsChange}
             onOpenPresenterPicker={() => setIsPresenterPickerOpen(true)}
             onStartGame={handleStartGame}
             onCancelRound={handleRequestCancelRound}

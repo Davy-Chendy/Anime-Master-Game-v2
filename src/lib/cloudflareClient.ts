@@ -64,6 +64,7 @@ const MUTATION_NAMES = new Set([
   "createUploadedQuestionSet",
   "createQuestionSetFromUrlText",
   "prepareQuestionSetForStart",
+  "updateRoomGameSettings",
   "startGameWithQuestionSet",
   "confirmRevealBlocks",
   "submitAnswer",

@@ -49,6 +49,10 @@ export type Room = {
   currentPresenterPlayerId?: string | null;
   currentGameId?: string | null;
   preparedQuestionSetId?: string | null;
+  gameMode?: GameMode;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
   createdAt: number | string;
   updatedAt?: string;
 };
@@ -61,6 +65,10 @@ export type DbRoom = {
   current_presenter_player_id: string | null;
   current_game_id: string | null;
   prepared_question_set_id?: string | null;
+  lobby_game_mode?: GameMode | null;
+  lobby_max_reveal_rounds?: number | null;
+  lobby_round_seconds?: number | null;
+  lobby_round_scores?: unknown;
   created_at: string;
   updated_at: string;
 };
