@@ -116,6 +116,10 @@ const QUESTION_URL_IMPORT_MAX_COUNT = 120;
 const REMOTE_UPLOAD_IMAGE_MAX_SIZE = 1600;
 const REMOTE_UPLOAD_IMAGE_QUALITY = 78;
 const REMOTE_UPLOAD_IMAGE_FORMAT = "image/webp";
+const ROOM_CLEANUP_IDLE_MS = 48 * 60 * 60 * 1000;
+const ROOM_CLEANUP_MAX_ROOMS_PER_RUN = 50;
+const ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN = 100;
+const ROOM_CLEANUP_SQL_CHUNK_SIZE = 50;
 const DEFAULT_REMOTE_IMAGE_PROXY_CANDIDATES = [
   "https://corsproxy.io/?url=",
   "https://api.allorigins.win/raw?url=",
@@ -1849,6 +1853,372 @@ async function handleR2ImagesList(request: Request, env: Env) {
   );
 }
 
+type ExpiredRoomRow = {
+  id: string;
+  room_code: string;
+  game_status: string;
+  updated_at: string;
+};
+
+type CleanupQuestionSetImageRow = {
+  room_id?: string | null;
+  question_set_id: string;
+  image_url?: string | null;
+};
+
+type R2ImageReferenceRow = {
+  question_set_id: string;
+  is_public: number | boolean;
+  image_url: string;
+};
+
+type IdRow = {
+  id: string;
+};
+
+function chunkArray<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function placeholders(count: number) {
+  return Array.from({ length: count }, () => "?").join(", ");
+}
+
+function isDbTruthy(value: number | boolean) {
+  return value === true || value === 1;
+}
+
+async function queryRows<T>(env: Env, sql: string, ...params: unknown[]) {
+  const result = await env.DB.prepare(sql).bind(...params).all<T>();
+  return result.results ?? [];
+}
+
+function sanitizeCleanupR2Key(key: string, env: Env) {
+  const prefix = getR2ImagePrefix(env);
+  if (!prefix) {
+    return null;
+  }
+
+  const normalizedKey = key.trim();
+  if (!normalizedKey || normalizedKey.includes("..") || normalizedKey.startsWith("/")) {
+    return null;
+  }
+
+  return normalizedKey.startsWith(`${prefix}/`) ? normalizedKey : null;
+}
+
+function getR2ObjectKeyFromImageUrl(imageUrl: string, env: Env, options: { allowAnyOriginPrefixPath?: boolean } = {}) {
+  let url: URL;
+  try {
+    url = new URL(imageUrl);
+  } catch {
+    return null;
+  }
+
+  const routeKey = getR2ObjectKeyFromPath(url.pathname);
+  if (routeKey) {
+    return sanitizeCleanupR2Key(routeKey, env);
+  }
+
+  if (options.allowAnyOriginPrefixPath) {
+    const prefix = getR2ImagePrefix(env);
+    const prefixPath = `/${prefix}/`;
+    if (prefix && url.pathname.startsWith(prefixPath)) {
+      const encodedKey = url.pathname.slice(1);
+      const key = encodedKey
+        .split("/")
+        .map((part) => decodeURIComponent(part))
+        .join("/");
+      return sanitizeCleanupR2Key(key, env);
+    }
+  }
+
+  const configuredBase = env.R2_PUBLIC_BASE_URL?.trim().replace(/\/+$/g, "");
+  if (!configuredBase) {
+    return null;
+  }
+
+  try {
+    const base = new URL(`${configuredBase}/`);
+    if (url.origin !== base.origin || !url.pathname.startsWith(base.pathname)) {
+      return null;
+    }
+
+    const encodedKey = url.pathname.slice(base.pathname.length);
+    const key = encodedKey
+      .split("/")
+      .map((part) => decodeURIComponent(part))
+      .join("/");
+    return sanitizeCleanupR2Key(key, env);
+  } catch {
+    return null;
+  }
+}
+
+function getR2ReferenceLikePatterns(env: Env) {
+  const prefix = getR2ImagePrefix(env);
+  if (!prefix) {
+    return [];
+  }
+
+  const patterns = new Set<string>([`%/${prefix}/%`]);
+  const configuredBase = env.R2_PUBLIC_BASE_URL?.trim().replace(/\/+$/g, "");
+  if (configuredBase) {
+    patterns.add(`${configuredBase}/${prefix}/%`);
+  }
+
+  return Array.from(patterns);
+}
+
+async function getExpiredRooms(env: Env, cutoffIso: string) {
+  return queryRows<ExpiredRoomRow>(
+    env,
+    `select id, room_code, game_status, updated_at
+     from rooms
+     where updated_at < ?
+     order by updated_at asc
+     limit ?`,
+    cutoffIso,
+    ROOM_CLEANUP_MAX_ROOMS_PER_RUN,
+  );
+}
+
+async function getUnpublishedQuestionSetImageRowsForRooms(env: Env, roomIds: string[]) {
+  const rows: CleanupQuestionSetImageRow[] = [];
+  for (const roomIdChunk of chunkArray(roomIds, ROOM_CLEANUP_SQL_CHUNK_SIZE)) {
+    if (roomIdChunk.length === 0) {
+      continue;
+    }
+
+    const roomPlaceholders = placeholders(roomIdChunk.length);
+    rows.push(
+      ...(await queryRows<CleanupQuestionSetImageRow>(
+        env,
+        `select distinct r.id as room_id, qs.id as question_set_id, q.image_url as image_url
+         from rooms r
+         join question_sets qs on qs.id = r.prepared_question_set_id
+         left join questions q on q.question_set_id = qs.id
+         where r.id in (${roomPlaceholders}) and qs.is_public = 0
+         union
+         select distinct gs.room_id as room_id, qs.id as question_set_id, q.image_url as image_url
+         from game_sessions gs
+         join question_sets qs on qs.id = gs.question_set_id
+         left join questions q on q.question_set_id = qs.id
+         where gs.room_id in (${roomPlaceholders}) and qs.is_public = 0`,
+        ...roomIdChunk,
+        ...roomIdChunk,
+      )),
+    );
+  }
+
+  return rows;
+}
+
+async function getOldOrphanUnpublishedQuestionSetIds(env: Env, cutoffIso: string) {
+  const rows = await queryRows<IdRow>(
+    env,
+    `select qs.id
+     from question_sets qs
+     where qs.is_public = 0
+       and qs.updated_at < ?
+       and not exists (
+         select 1 from game_sessions gs where gs.question_set_id = qs.id
+       )
+       and not exists (
+         select 1 from rooms r where r.prepared_question_set_id = qs.id
+       )
+     order by qs.updated_at asc
+     limit ?`,
+    cutoffIso,
+    ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN,
+  );
+  return rows.map((row) => row.id);
+}
+
+async function getQuestionSetImageRows(env: Env, questionSetIds: string[]) {
+  const rows: CleanupQuestionSetImageRow[] = [];
+  for (const questionSetIdChunk of chunkArray(questionSetIds, ROOM_CLEANUP_SQL_CHUNK_SIZE)) {
+    if (questionSetIdChunk.length === 0) {
+      continue;
+    }
+
+    rows.push(
+      ...(await queryRows<CleanupQuestionSetImageRow>(
+        env,
+        `select qs.id as question_set_id, q.image_url as image_url
+         from question_sets qs
+         left join questions q on q.question_set_id = qs.id
+         where qs.id in (${placeholders(questionSetIdChunk.length)}) and qs.is_public = 0`,
+        ...questionSetIdChunk,
+      )),
+    );
+  }
+
+  return rows;
+}
+
+async function deleteExpiredRooms(env: Env, roomIds: string[], cutoffIso: string) {
+  const deletedRoomIds: string[] = [];
+  for (const roomIdChunk of chunkArray(roomIds, ROOM_CLEANUP_SQL_CHUNK_SIZE)) {
+    if (roomIdChunk.length === 0) {
+      continue;
+    }
+
+    const rows = await queryRows<IdRow>(
+      env,
+      `delete from rooms
+       where id in (${placeholders(roomIdChunk.length)}) and updated_at < ?
+       returning id`,
+      ...roomIdChunk,
+      cutoffIso,
+    );
+    deletedRoomIds.push(...rows.map((row) => row.id));
+  }
+
+  return deletedRoomIds;
+}
+
+async function getR2ImageReferences(env: Env) {
+  const patterns = getR2ReferenceLikePatterns(env);
+  if (patterns.length === 0) {
+    return [];
+  }
+
+  const whereClause = patterns.map(() => "q.image_url like ?").join(" or ");
+  return queryRows<R2ImageReferenceRow>(
+    env,
+    `select q.question_set_id, qs.is_public, q.image_url
+     from questions q
+     join question_sets qs on qs.id = q.question_set_id
+     where ${whereClause}`,
+    ...patterns,
+  );
+}
+
+async function deleteUnreferencedQuestionSets(env: Env, questionSetIds: string[]) {
+  const deletedQuestionSetIds: string[] = [];
+  for (const questionSetIdChunk of chunkArray(questionSetIds, ROOM_CLEANUP_SQL_CHUNK_SIZE)) {
+    if (questionSetIdChunk.length === 0) {
+      continue;
+    }
+
+    const rows = await queryRows<IdRow>(
+      env,
+      `delete from question_sets
+       where is_public = 0
+         and id in (${placeholders(questionSetIdChunk.length)})
+         and not exists (
+           select 1 from game_sessions gs where gs.question_set_id = question_sets.id
+         )
+         and not exists (
+           select 1 from rooms r where r.prepared_question_set_id = question_sets.id
+         )
+       returning id`,
+      ...questionSetIdChunk,
+    );
+    deletedQuestionSetIds.push(...rows.map((row) => row.id));
+  }
+
+  return deletedQuestionSetIds;
+}
+
+async function cleanupExpiredRooms(env: Env, now = Date.now()) {
+  if (!env.IMAGE_BUCKET) {
+    throw new Error("自动清理失败：缺少 R2 存储绑定。");
+  }
+
+  const cutoffIso = new Date(now - ROOM_CLEANUP_IDLE_MS).toISOString();
+  const expiredRooms = await getExpiredRooms(env, cutoffIso);
+  const expiredRoomIds = expiredRooms.map((room) => room.id);
+  const roomCandidateRows = await getUnpublishedQuestionSetImageRowsForRooms(env, expiredRoomIds);
+  const deletedRoomIds = await deleteExpiredRooms(env, expiredRoomIds, cutoffIso);
+  const deletedRoomIdSet = new Set(deletedRoomIds);
+  const rowsForDeletedRooms = roomCandidateRows.filter((row) => row.room_id && deletedRoomIdSet.has(row.room_id));
+  const orphanQuestionSetIds = await getOldOrphanUnpublishedQuestionSetIds(env, cutoffIso);
+  const orphanRows = await getQuestionSetImageRows(env, orphanQuestionSetIds);
+  const cleanupRows = [...rowsForDeletedRooms, ...orphanRows];
+  const candidateQuestionSetIds = new Set(cleanupRows.map((row) => row.question_set_id));
+  const candidateKeys = new Set<string>();
+  const questionSetKeys = new Map<string, Set<string>>();
+
+  for (const row of cleanupRows) {
+    const imageUrl = row.image_url;
+    if (!imageUrl) {
+      continue;
+    }
+
+    const key = getR2ObjectKeyFromImageUrl(imageUrl, env);
+    if (!key) {
+      continue;
+    }
+
+    candidateKeys.add(key);
+    const keys = questionSetKeys.get(row.question_set_id) ?? new Set<string>();
+    keys.add(key);
+    questionSetKeys.set(row.question_set_id, keys);
+  }
+
+  const protectedKeys = new Set<string>();
+  if (candidateKeys.size > 0) {
+    const references = await getR2ImageReferences(env);
+    for (const reference of references) {
+      const key = getR2ObjectKeyFromImageUrl(reference.image_url, env, { allowAnyOriginPrefixPath: true });
+      if (!key || !candidateKeys.has(key)) {
+        continue;
+      }
+
+      if (isDbTruthy(reference.is_public) || !candidateQuestionSetIds.has(reference.question_set_id)) {
+        protectedKeys.add(key);
+      }
+    }
+  }
+
+  const failedR2Keys = new Set<string>();
+  let deletedR2KeyCount = 0;
+  for (const key of candidateKeys) {
+    if (protectedKeys.has(key)) {
+      continue;
+    }
+
+    try {
+      await env.IMAGE_BUCKET.delete(key);
+      deletedR2KeyCount += 1;
+    } catch (error) {
+      failedR2Keys.add(key);
+      logAuxiliaryFailure("expired_room_r2_delete_failed", error, { key });
+    }
+  }
+
+  const deletableQuestionSetIds = Array.from(candidateQuestionSetIds).filter((questionSetId) => {
+    const keys = questionSetKeys.get(questionSetId);
+    if (!keys) {
+      return true;
+    }
+
+    return !Array.from(keys).some((key) => failedR2Keys.has(key));
+  });
+  const deletedQuestionSetIds = await deleteUnreferencedQuestionSets(env, deletableQuestionSetIds);
+  const summary = {
+    event: "expired_room_cleanup_completed",
+    cutoffIso,
+    selectedRoomCount: expiredRooms.length,
+    deletedRoomCount: deletedRoomIds.length,
+    candidateQuestionSetCount: candidateQuestionSetIds.size,
+    deletedQuestionSetCount: deletedQuestionSetIds.length,
+    candidateR2KeyCount: candidateKeys.size,
+    deletedR2KeyCount,
+    protectedR2KeyCount: protectedKeys.size,
+    failedR2KeyCount: failedR2Keys.size,
+  };
+
+  console.info(JSON.stringify(summary));
+  return summary;
+}
+
 export class RoomDurableObject {
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
   private readonly roundSnapshotCache = new Map<string, { expiresAt: number; snapshot: RoundSnapshot }>();
@@ -3004,6 +3374,10 @@ export class RoomDurableObject {
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await cleanupExpiredRooms(env);
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
