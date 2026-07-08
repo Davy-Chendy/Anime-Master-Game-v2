@@ -355,18 +355,18 @@ function getCompactNameClass(nickname: string) {
   const length = Array.from(nickname).length;
 
   if (length <= 7) {
-    return "text-sm";
-  }
-
-  if (length <= 10) {
     return "text-[13px]";
   }
 
-  if (length <= 14) {
+  if (length <= 10) {
     return "text-xs";
   }
 
-  return "text-[11px]";
+  if (length <= 14) {
+    return "text-[11px]";
+  }
+
+  return "text-[10px]";
 }
 
 function getCompactScoreClass(score: number) {
@@ -583,7 +583,7 @@ const CompactScoreRow = memo(function CompactScoreRow({
 
   return (
     <div
-      className="grid h-8 grid-cols-[2ch_minmax(0,1fr)_2.75rem_3.25ch] items-center gap-1.5 rounded-md bg-slate-50 px-2 text-sm"
+      className="grid h-8 grid-cols-[1.25rem_minmax(0,1fr)_1.75rem_2.25rem] items-center gap-1 rounded-md bg-slate-50 px-1.5 text-sm"
       ref={(element) => {
         onRowRef(playerId, element);
       }}
@@ -594,7 +594,7 @@ const CompactScoreRow = memo(function CompactScoreRow({
       </span>
       <span
         aria-label={status.label}
-        className={`grid h-6 min-w-0 place-items-center rounded px-1 text-xs font-bold leading-none ${status.className}`}
+        className={`grid h-5 min-w-0 place-items-center rounded px-0.5 text-[11px] font-bold leading-none ${status.className}`}
         title={status.label}
       >
         {status.content}
@@ -2734,7 +2734,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     >
       <div className="mb-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <p className="text-sm font-semibold text-slate-900">积分榜</p>
-        <span className="min-w-0 truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
+        <span className="min-w-0 max-w-full justify-self-end truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
           出题人：{presenterName}
         </span>
         {!isTeamBattleMode ? (
