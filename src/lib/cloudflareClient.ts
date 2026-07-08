@@ -6,8 +6,8 @@ import type { RealtimeDelta } from "@/types/game";
 type ChangeMessage = {
   type: "change";
   name: string;
-  result: unknown;
-  args: unknown[];
+  result?: unknown;
+  args?: unknown[];
   topic: string;
   version?: number;
   clientActionId?: string;

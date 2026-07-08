@@ -45,8 +45,8 @@ type RpcBody = {
 type BroadcastMessage = {
   type: "change";
   name: string;
-  result: unknown;
-  args: unknown[];
+  result?: unknown;
+  args?: unknown[];
   topic: string;
   version?: number;
   clientActionId?: string;
@@ -54,6 +54,15 @@ type BroadcastMessage = {
   deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
   gameResultSnapshot?: GameResultSnapshot;
+};
+
+type ClientBroadcastMessage = {
+  type: "change";
+  name: string;
+  topic: string;
+  version: number;
+  clientActionId?: string;
+  deltas?: RealtimeDelta[];
 };
 
 type AutoForfeitAlarmState = {
@@ -565,6 +574,30 @@ function getBroadcastGameResultSnapshot(message: BroadcastMessage) {
   }
 
   return null;
+}
+
+function toClientBroadcastMessage(message: BroadcastMessage, version: number): ClientBroadcastMessage {
+  const deltas = [...(message.deltas ?? (message.delta ? [message.delta] : []))];
+  const roundSnapshot = asRoundSnapshot(message.roundSnapshot);
+  const gameResultSnapshot = asGameResultSnapshot(message.gameResultSnapshot);
+  if (roundSnapshot && !deltas.some((delta) => delta.scope === "game" && delta.type === "round_snapshot")) {
+    deltas.push({ scope: "game", type: "round_snapshot", snapshot: roundSnapshot });
+  }
+  if (
+    gameResultSnapshot &&
+    !deltas.some((delta) => delta.scope === "game" && delta.type === "game_result_snapshot")
+  ) {
+    deltas.push({ scope: "game", type: "game_result_snapshot", snapshot: gameResultSnapshot });
+  }
+
+  return {
+    type: "change",
+    name: message.name,
+    topic: message.topic,
+    version,
+    clientActionId: message.clientActionId,
+    ...(deltas.length > 0 ? { deltas } : {}),
+  };
 }
 
 function getAutoForfeitKey(gameSession: GameSession) {
@@ -2955,7 +2988,7 @@ export class RoomDurableObject {
 
   private async broadcastChangeMessage(message: BroadcastMessage) {
     const version = await this.nextRealtimeVersion(message.topic);
-    this.broadcast(JSON.stringify({ ...message, version } satisfies BroadcastMessage));
+    this.broadcast(JSON.stringify(toClientBroadcastMessage(message, version)));
   }
 
   private broadcast(message: string) {

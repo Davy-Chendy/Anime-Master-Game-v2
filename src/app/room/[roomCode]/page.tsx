@@ -104,7 +104,7 @@ function getBroadcastQuestionSet(result: unknown) {
 }
 
 function getBroadcastGameResultSnapshot(message: {
-  result: unknown;
+  result?: unknown;
   delta?: RealtimeDelta;
   deltas?: RealtimeDelta[];
   gameResultSnapshot?: GameResultSnapshot;

@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
@@ -279,6 +279,22 @@ type AnswerBubble = {
 
 type ResultPublishNextAction = "advanceReviewedQuestion" | "skipQuestion";
 
+type StandardScoreRowProps = {
+  playerId: string;
+  nickname: string;
+  rank: number;
+  score: number;
+  correctCount: number;
+  alreadyCorrect: boolean;
+  hasAnsweredCurrentRound: boolean;
+  hasForfeitedCurrentRound: boolean;
+  currentQuestionScoreAwarded: number;
+  buzzerStatus?: BuzzerAnswer["status"];
+  isBuzzerMode: boolean;
+  isLeadingPendingBuzzerAnswer: boolean;
+  onRowRef: (playerId: string, element: HTMLDivElement | null) => void;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -300,7 +316,15 @@ function isRoundSnapshot(value: unknown): value is RoundSnapshot {
   );
 }
 
-function getBroadcastRoundSnapshot(message: { result?: unknown; roundSnapshot?: unknown }) {
+function getRealtimeDeltas(message: { delta?: RealtimeDelta; deltas?: RealtimeDelta[] }) {
+  return message.deltas ?? (message.delta ? [message.delta] : []);
+}
+
+function getRealtimeVersion(message: { version?: number }) {
+  return typeof message.version === "number" && Number.isFinite(message.version) ? message.version : null;
+}
+
+function getLegacyBroadcastRoundSnapshot(message: { result?: unknown; roundSnapshot?: unknown }) {
   if (isRoundSnapshot(message.roundSnapshot)) {
     return message.roundSnapshot;
   }
@@ -312,19 +336,7 @@ function getBroadcastRoundSnapshot(message: { result?: unknown; roundSnapshot?: 
   return null;
 }
 
-function getRealtimeDeltas(message: { delta?: RealtimeDelta; deltas?: RealtimeDelta[] }) {
-  return message.deltas ?? (message.delta ? [message.delta] : []);
-}
-
-function getRealtimeVersion(message: { version?: number }) {
-  return typeof message.version === "number" && Number.isFinite(message.version) ? message.version : null;
-}
-
-function getRoundSnapshotFromValue(value: unknown) {
-  return isRecord(value) && isRoundSnapshot(value.roundSnapshot) ? value.roundSnapshot : null;
-}
-
-function getBroadcastGameSession(result: unknown) {
+function getLegacyBroadcastGameSession(result: unknown) {
   if (isGameSession(result)) {
     return result;
   }
@@ -334,6 +346,67 @@ function getBroadcastGameSession(result: unknown) {
   }
 
   return null;
+}
+
+const StandardScoreRow = memo(function StandardScoreRow({
+  playerId,
+  nickname,
+  rank,
+  score,
+  correctCount,
+  alreadyCorrect,
+  hasAnsweredCurrentRound,
+  hasForfeitedCurrentRound,
+  currentQuestionScoreAwarded,
+  buzzerStatus,
+  isBuzzerMode,
+  isLeadingPendingBuzzerAnswer,
+  onRowRef,
+}: StandardScoreRowProps) {
+  return (
+    <div
+      className="rounded-md bg-slate-50 px-3 py-2 text-sm"
+      ref={(element) => {
+        onRowRef(playerId, element);
+      }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 font-semibold text-slate-950">
+          #{rank} {nickname}
+        </div>
+        <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
+        <span>答对 {correctCount} 题</span>
+        {alreadyCorrect ? (
+          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
+        ) : null}
+        {currentQuestionScoreAwarded > 0 ? (
+          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
+            +{currentQuestionScoreAwarded} 分
+          </span>
+        ) : null}
+        {!alreadyCorrect && hasForfeitedCurrentRound ? (
+          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
+        ) : null}
+        {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound ? (
+          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
+        ) : null}
+        {isBuzzerMode && buzzerStatus === "pending" ? (
+          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
+            {isLeadingPendingBuzzerAnswer ? "判定中" : "排队中"}
+          </span>
+        ) : null}
+        {isBuzzerMode && buzzerStatus === "wrong" ? (
+          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
+function getRoundSnapshotFromValue(value: unknown) {
+  return isRecord(value) && isRoundSnapshot(value.roundSnapshot) ? value.roundSnapshot : null;
 }
 
 function upsertById<T extends { id: string }>(items: T[], item: T) {
@@ -574,12 +647,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
     const didApply = applyGameSession(nextGameSession, { syncClock: !serverClockRef.current });
     if (!didApply) {
-      return;
+      return false;
     }
 
     if (shouldClearRoundAnswers) {
       clearRoundAnswerState();
     }
+    return true;
   }
 
   const applyRoundSnapshot = useCallback(
@@ -625,14 +699,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
     },
     [isPresenter, playerId],
-  );
-
-  const refreshRoundData = useCallback(
-    async (targetGameSession: GameSession, knownSnapshot?: RoundSnapshot | null) => {
-      const snapshot = knownSnapshot ?? getRoundSnapshotFromValue(targetGameSession) ?? (await getRoundSnapshot(targetGameSession.id));
-      applyRoundSnapshot(snapshot);
-    },
-    [applyRoundSnapshot],
   );
 
   const catchUpRoundSnapshot = useCallback(() => {
@@ -687,6 +753,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       });
   }, [applyRoundSnapshot, onError, room.currentGameId]);
 
+  const applyLegacyRealtimeMessage = useCallback(
+    (message: { result?: unknown; roundSnapshot?: unknown }) => {
+      const pushedRoundSnapshot = getLegacyBroadcastRoundSnapshot(message);
+      if (pushedRoundSnapshot && pushedRoundSnapshot.gameSession.id === room.currentGameId) {
+        applyRoundSnapshot(pushedRoundSnapshot);
+        return "applied";
+      }
+
+      const pushedGameSession = getLegacyBroadcastGameSession(message.result);
+      if (pushedGameSession && pushedGameSession.id === room.currentGameId) {
+        return "catch-up";
+      }
+
+      return "ignored";
+    },
+    [applyRoundSnapshot, room.currentGameId],
+  );
+
   const applyRoundSnapshotFromResult = useCallback(
     (result: unknown) => {
       const snapshot = getRoundSnapshotFromValue(result);
@@ -730,6 +814,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         return nextBubbles;
       });
     }, 3200);
+  }, []);
+
+  const registerScoreRow = useCallback((targetPlayerId: string, element: HTMLDivElement | null) => {
+    scoreRowRefs.current[targetPlayerId] = element;
   }, []);
 
   useEffect(() => {
@@ -793,14 +881,182 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     };
   }, [applyRoundSnapshot, onError, room.currentGameId, room.id]);
 
+  const applyRealtimeDelta = useCallback(
+    (delta: RealtimeDelta) => {
+      if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
+        onRoomUpdatedRef.current?.(delta.room);
+        return;
+      }
+
+      if (delta.scope === "game" && delta.type === "question_label_updated") {
+        setQuestions((currentQuestions) =>
+          currentQuestions.map((question) => (question.id === delta.question.id ? delta.question : question)),
+        );
+        return;
+      }
+
+      if (delta.scope === "game" && delta.type === "round_snapshot" && delta.snapshot.gameSession.id === room.currentGameId) {
+        applyRoundSnapshot(delta.snapshot);
+        setImageLoadFailed(false);
+        setSelectedBlocks([]);
+        return;
+      }
+
+      if (delta.scope === "game" && delta.type === "game_session_updated" && delta.gameSession.id === room.currentGameId) {
+        applyGameSessionDelta(delta.gameSession);
+        setImageLoadFailed(false);
+        setSelectedBlocks([]);
+        return;
+      }
+
+      if (delta.scope === "game" && delta.type === "answer_canceled" && delta.gameSession.id === room.currentGameId) {
+        applyGameSessionDelta(delta.gameSession);
+        setAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
+        setLabelAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
+        if (delta.canceledPlayerId === playerId) {
+          setMyAnswer((currentAnswer) => (currentAnswer?.id === delta.canceledAnswerId ? null : currentAnswer));
+          setAnswerText("");
+        }
+        return;
+      }
+
+      const currentGameSession = gameSessionRef.current;
+      if (delta.scope === "game" && delta.type === "answer_submitted" && currentGameSession?.id === delta.answer.gameSessionId) {
+        if (
+          delta.answer.questionIndex === currentGameSession.currentQuestionIndex &&
+          delta.answer.revealRound === currentGameSession.currentRevealRound
+        ) {
+          setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
+          const submittedBuzzerAnswer = delta.buzzerAnswer;
+          if (submittedBuzzerAnswer) {
+            setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submittedBuzzerAnswer));
+          }
+          if (isPresenter && !isForfeitAnswer(delta.answer)) {
+            setLabelAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
+            showAnswerBubble(delta.answer);
+          }
+          if (isForfeitAnswer(delta.answer)) {
+            setBuzzerAnswers((currentAnswers) =>
+              currentAnswers.filter(
+                (answer) =>
+                  !(
+                    answer.gameSessionId === delta.answer.gameSessionId &&
+                    answer.questionIndex === delta.answer.questionIndex &&
+                    answer.revealRound === delta.answer.revealRound &&
+                    answer.playerId === delta.answer.playerId
+                  ),
+              ),
+            );
+          }
+          if (delta.answer.playerId === playerId) {
+            setMyAnswer(delta.answer);
+            if (submittedBuzzerAnswer) {
+              setMyBuzzerAnswer(submittedBuzzerAnswer);
+            }
+            if (isForfeitAnswer(delta.answer)) {
+              setMyBuzzerAnswer(null);
+            }
+          }
+        }
+        return;
+      }
+
+      if (
+        delta.scope === "game" &&
+        delta.type === "buzzer_answer_submitted" &&
+        currentGameSession?.id === delta.buzzerAnswer.gameSessionId
+      ) {
+        if (
+          delta.buzzerAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
+          delta.buzzerAnswer.revealRound === currentGameSession.currentRevealRound
+        ) {
+          setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
+          if (delta.buzzerAnswer.playerId === playerId) {
+            setMyBuzzerAnswer(delta.buzzerAnswer);
+          }
+        }
+        return;
+      }
+
+      if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
+        const didApplyGameSession = applyGameSessionDelta(delta.gameSession);
+        if (!didApplyGameSession) {
+          return;
+        }
+        if (delta.scores) {
+          setScores(delta.scores);
+        }
+        const judgedQuestionResults = delta.questionResults;
+        if (judgedQuestionResults) {
+          setQuestionResults((currentResults) =>
+            judgedQuestionResults.reduce((nextResults, questionResult) => upsertById(nextResults, questionResult), currentResults),
+          );
+        }
+        if (delta.buzzerAnswers) {
+          setBuzzerAnswers(sortBySubmittedAt(delta.buzzerAnswers));
+          const updatedOwnBuzzerAnswer = delta.buzzerAnswers.find((answer) => answer.playerId === playerId);
+          if (updatedOwnBuzzerAnswer) {
+            setMyBuzzerAnswer(updatedOwnBuzzerAnswer);
+          }
+          if (delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
+            setLabelAnswers(getCorrectLabelAnswersFromBuzzerAnswers(delta.buzzerAnswers));
+          }
+        } else {
+          setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
+          if (delta.buzzerAnswer.playerId === playerId) {
+            setMyBuzzerAnswer(delta.buzzerAnswer);
+          }
+        }
+      }
+    },
+    [applyRoundSnapshot, isPresenter, playerId, room.currentGameId, room.id, showAnswerBubble],
+  );
+
   useEffect(() => {
     if (!room.id || !room.currentGameId) {
       return;
     }
 
     let hasOpenedRealtime = false;
+    let queuedDeltas: RealtimeDelta[] = [];
+    let flushFrame: number | null = null;
 
-    return subscribeRealtimeTopic(
+    function clearQueuedRealtimeDeltas() {
+      queuedDeltas = [];
+      if (flushFrame != null) {
+        window.cancelAnimationFrame(flushFrame);
+        flushFrame = null;
+      }
+    }
+
+    function flushRealtimeDeltas() {
+      const deltas = queuedDeltas;
+      queuedDeltas = [];
+      flushFrame = null;
+
+      if (deltas.length === 0) {
+        return;
+      }
+
+      unstable_batchedUpdates(() => {
+        for (const delta of deltas) {
+          applyRealtimeDelta(delta);
+        }
+      });
+    }
+
+    function enqueueRealtimeDeltas(deltas: RealtimeDelta[]) {
+      if (deltas.length === 0) {
+        return;
+      }
+
+      queuedDeltas.push(...deltas);
+      if (flushFrame == null) {
+        flushFrame = window.requestAnimationFrame(flushRealtimeDeltas);
+      }
+    }
+
+    const unsubscribe = subscribeRealtimeTopic(
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
@@ -812,6 +1068,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
           if (missedGameRealtimeVersionRef.current) {
             gameCatchUpTargetVersionRef.current = Math.max(gameCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            clearQueuedRealtimeDeltas();
             catchUpRoundSnapshot();
             return;
           }
@@ -819,6 +1076,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           if (lastVersion != null && messageVersion > lastVersion + 1) {
             missedGameRealtimeVersionRef.current = true;
             gameCatchUpTargetVersionRef.current = Math.max(gameCatchUpTargetVersionRef.current ?? 0, messageVersion);
+            clearQueuedRealtimeDeltas();
             catchUpRoundSnapshot();
             return;
           }
@@ -827,160 +1085,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         }
 
         if (missedGameRealtimeVersionRef.current) {
+          clearQueuedRealtimeDeltas();
           catchUpRoundSnapshot();
           return;
         }
 
-        const currentGameSession = gameSessionRef.current;
-        let handled = false;
-
-        for (const delta of getRealtimeDeltas(message)) {
-          if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
-            onRoomUpdatedRef.current?.(delta.room);
-            handled = true;
-            continue;
+        const deltas = getRealtimeDeltas(message);
+        if (deltas.length > 0) {
+          enqueueRealtimeDeltas(deltas);
+        } else {
+          const legacyResult = applyLegacyRealtimeMessage(message);
+          if (legacyResult === "catch-up") {
+            clearQueuedRealtimeDeltas();
+            catchUpRoundSnapshot();
           }
-
-          if (delta.scope === "game" && delta.type === "question_label_updated") {
-            setQuestions((currentQuestions) =>
-              currentQuestions.map((question) => (question.id === delta.question.id ? delta.question : question)),
-            );
-            handled = true;
-            continue;
-          }
-
-          if (delta.scope === "game" && delta.type === "round_snapshot" && delta.snapshot.gameSession.id === room.currentGameId) {
-            applyRoundSnapshot(delta.snapshot);
-            setImageLoadFailed(false);
-            setSelectedBlocks([]);
-            handled = true;
-            continue;
-          }
-
-          if (delta.scope === "game" && delta.type === "game_session_updated" && delta.gameSession.id === room.currentGameId) {
-            applyGameSessionDelta(delta.gameSession);
-            setImageLoadFailed(false);
-            setSelectedBlocks([]);
-            handled = true;
-            continue;
-          }
-
-          if (delta.scope === "game" && delta.type === "answer_canceled" && delta.gameSession.id === room.currentGameId) {
-            applyGameSessionDelta(delta.gameSession);
-            setAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
-            setLabelAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
-            if (delta.canceledPlayerId === playerId) {
-              setMyAnswer((currentAnswer) => (currentAnswer?.id === delta.canceledAnswerId ? null : currentAnswer));
-              setAnswerText("");
-            }
-            handled = true;
-            continue;
-          }
-
-          if (delta.scope === "game" && delta.type === "answer_submitted" && currentGameSession?.id === delta.answer.gameSessionId) {
-            if (
-              delta.answer.questionIndex === currentGameSession.currentQuestionIndex &&
-              delta.answer.revealRound === currentGameSession.currentRevealRound
-            ) {
-              setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
-              const submittedBuzzerAnswer = delta.buzzerAnswer;
-              if (submittedBuzzerAnswer) {
-                setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submittedBuzzerAnswer));
-              }
-              if (isPresenter && !isForfeitAnswer(delta.answer)) {
-                setLabelAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
-                showAnswerBubble(delta.answer);
-              }
-              if (isForfeitAnswer(delta.answer)) {
-                setBuzzerAnswers((currentAnswers) =>
-                  currentAnswers.filter(
-                    (answer) =>
-                      !(
-                        answer.gameSessionId === delta.answer.gameSessionId &&
-                        answer.questionIndex === delta.answer.questionIndex &&
-                        answer.revealRound === delta.answer.revealRound &&
-                        answer.playerId === delta.answer.playerId
-                      ),
-                  ),
-                );
-              }
-              if (delta.answer.playerId === playerId) {
-                setMyAnswer(delta.answer);
-                if (submittedBuzzerAnswer) {
-                  setMyBuzzerAnswer(submittedBuzzerAnswer);
-                }
-                if (isForfeitAnswer(delta.answer)) {
-                  setMyBuzzerAnswer(null);
-                }
-              }
-            }
-            handled = true;
-            continue;
-          }
-
-          if (
-            delta.scope === "game" &&
-            delta.type === "buzzer_answer_submitted" &&
-            currentGameSession?.id === delta.buzzerAnswer.gameSessionId
-          ) {
-            if (
-              delta.buzzerAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
-              delta.buzzerAnswer.revealRound === currentGameSession.currentRevealRound
-            ) {
-              setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
-              if (delta.buzzerAnswer.playerId === playerId) {
-                setMyBuzzerAnswer(delta.buzzerAnswer);
-              }
-            }
-            handled = true;
-            continue;
-          }
-
-          if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
-            applyGameSessionDelta(delta.gameSession);
-            if (delta.scores) {
-              setScores(delta.scores);
-            }
-            const judgedQuestionResults = delta.questionResults;
-            if (judgedQuestionResults) {
-              setQuestionResults((currentResults) =>
-                judgedQuestionResults.reduce((nextResults, questionResult) => upsertById(nextResults, questionResult), currentResults),
-              );
-            }
-            if (delta.buzzerAnswers) {
-              setBuzzerAnswers(sortBySubmittedAt(delta.buzzerAnswers));
-              const updatedOwnBuzzerAnswer = delta.buzzerAnswers.find((answer) => answer.playerId === playerId);
-              if (updatedOwnBuzzerAnswer) {
-                setMyBuzzerAnswer(updatedOwnBuzzerAnswer);
-              }
-              if (delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
-                setLabelAnswers(getCorrectLabelAnswersFromBuzzerAnswers(delta.buzzerAnswers));
-              }
-            } else {
-              setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
-              if (delta.buzzerAnswer.playerId === playerId) {
-                setMyBuzzerAnswer(delta.buzzerAnswer);
-              }
-            }
-            handled = true;
-          }
-        }
-
-        if (handled) {
-          return;
-        }
-
-        const pushedRoundSnapshot = getBroadcastRoundSnapshot(message);
-        if (pushedRoundSnapshot && pushedRoundSnapshot.gameSession.id === room.currentGameId) {
-          applyRoundSnapshot(pushedRoundSnapshot);
-          return;
-        }
-
-        const pushedGameSession = getBroadcastGameSession(message.result);
-        if (pushedGameSession && pushedGameSession.id === room.currentGameId) {
-          refreshRoundData(pushedGameSession).catch((error) => {
-            onError(error instanceof Error ? error.message : "同步游戏快照失败");
-          });
         }
       },
       {
@@ -991,21 +1109,23 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           }
 
           if (!isBootstrapLoadingRef.current) {
+            clearQueuedRealtimeDeltas();
             catchUpRoundSnapshot();
           }
         },
       },
     );
+
+    return () => {
+      unsubscribe();
+      clearQueuedRealtimeDeltas();
+    };
   }, [
-    applyRoundSnapshot,
+    applyRealtimeDelta,
+    applyLegacyRealtimeMessage,
     catchUpRoundSnapshot,
-    isPresenter,
-    onError,
-    playerId,
-    refreshRoundData,
     room.currentGameId,
     room.id,
-    showAnswerBubble,
   ]);
 
   useEffect(() => {
@@ -1188,25 +1308,35 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     });
   }, [isTeamBattleMode, revealedBlockSet, teamBattleState?.phase, visibleBlockCount]);
 
-  const gamePlayers = room.players.filter((player) => player.role !== "SPECTATOR");
-  const activePlayerById = new Map(gamePlayers.map((player) => [player.id, player]));
-  const fallbackGuesserIds = room.players
-    .filter((player) => player.role !== "SPECTATOR" && player.id !== room.currentPresenterPlayerId)
-    .map((player) => player.id);
+  const gamePlayers = useMemo(() => room.players.filter((player) => player.role !== "SPECTATOR"), [room.players]);
+  const activePlayerById = useMemo(() => new Map(gamePlayers.map((player) => [player.id, player])), [gamePlayers]);
+  const fallbackGuesserIds = useMemo(
+    () =>
+      room.players
+        .filter((player) => player.role !== "SPECTATOR" && player.id !== room.currentPresenterPlayerId)
+        .map((player) => player.id),
+    [room.currentPresenterPlayerId, room.players],
+  );
   const scoringEligibleGuesserIds = gameSession?.eligiblePlayerIds ?? fallbackGuesserIds;
-  const eligibleGuesserIds = scoringEligibleGuesserIds.filter((guesserId) => activePlayerById.has(guesserId));
-  const eligibleGuesserIdSet = new Set(eligibleGuesserIds);
+  const eligibleGuesserIds = useMemo(
+    () => scoringEligibleGuesserIds.filter((guesserId) => activePlayerById.has(guesserId)),
+    [activePlayerById, scoringEligibleGuesserIds],
+  );
+  const eligibleGuesserIdSet = useMemo(() => new Set(eligibleGuesserIds), [eligibleGuesserIds]);
   const isCurrentPlayerEligibleForQuestion =
     isPresenter || (!isSpectator && (isTeamBattleMode || eligibleGuesserIdSet.has(playerId)));
-  const guessers = room.players.filter((player) => eligibleGuesserIdSet.has(player.id));
+  const guessers = useMemo(() => room.players.filter((player) => eligibleGuesserIdSet.has(player.id)), [eligibleGuesserIdSet, room.players]);
   const teamBattlePlayerTeam: TeamBattleTeam | null = teamBattleState?.teams.red.includes(playerId)
     ? "red"
     : teamBattleState?.teams.blue.includes(playerId)
       ? "blue"
       : null;
   const teamBattleActiveTeam = teamBattleState?.activeTeam ?? "red";
-  const teamBattleActiveMembers = (teamBattleState?.teams[teamBattleActiveTeam] ?? []).filter((memberId) => activePlayerById.has(memberId));
-  const teamBattleActiveMemberSet = new Set(teamBattleActiveMembers);
+  const teamBattleActiveMembers = useMemo(
+    () => (teamBattleState?.teams[teamBattleActiveTeam] ?? []).filter((memberId) => activePlayerById.has(memberId)),
+    [activePlayerById, teamBattleActiveTeam, teamBattleState?.teams],
+  );
+  const teamBattleActiveMemberSet = useMemo(() => new Set(teamBattleActiveMembers), [teamBattleActiveMembers]);
   const teamBattleCanAct = Boolean(!isPresenter && !isSpectator && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
   const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
   const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
@@ -1239,13 +1369,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     }
     return Array.from(options.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }, [teamBattleState?.guessVotes]);
-  const activeGuesserIds = eligibleGuesserIds.filter((guesserId) => !correctPlayerSet.has(guesserId));
+  const activeGuesserIds = useMemo(
+    () => eligibleGuesserIds.filter((guesserId) => !correctPlayerSet.has(guesserId)),
+    [correctPlayerSet, eligibleGuesserIds],
+  );
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
   const currentRoundForfeitPlayerSet = useMemo(
     () => new Set(answers.filter((answer) => isForfeitAnswer(answer)).map((answer) => answer.playerId)),
     [answers],
   );
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
+  const buzzerAnswerByPlayerId = useMemo(
+    () => new Map(buzzerAnswers.map((answer) => [answer.playerId, answer])),
+    [buzzerAnswers],
+  );
   const buzzerActionPlayerSet = useMemo(
     () => new Set([...Array.from(buzzerAnswerPlayerSet), ...Array.from(currentRoundForfeitPlayerSet)]),
     [buzzerAnswerPlayerSet, currentRoundForfeitPlayerSet],
@@ -1290,27 +1427,39 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const allActiveGuessersUsedRoundChance = isBuzzerMode ? allActiveGuessersUsedBuzzerChance : allActiveGuessersSubmitted;
   const hasFirstCorrectAnswer = gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0;
   const isRoundClosedForPlayerActions = isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer;
-  const scoreRows = gamePlayers
-    .filter((player) => player.id !== room.currentPresenterPlayerId)
-    .map((player) => ({
-      player,
-      score: scores.find((score) => score.playerId === player.id)?.score ?? 0,
-      correctCount: scores.find((score) => score.playerId === player.id)?.correctCount ?? 0,
-    }))
-    .sort((a, b) => b.score - a.score);
-  const teamBattleScoreRows = teamBattleState
-    ? (["red", "blue"] as const)
-        .map((team) => ({
-          team,
-          score: teamBattleState.teamScores[team],
-          members: teamBattleState.teams[team].flatMap((memberId) => {
-            const player = activePlayerById.get(memberId);
+  const scoreByPlayerId = useMemo(() => new Map(scores.map((score) => [score.playerId, score])), [scores]);
+  const scoreRows = useMemo(
+    () =>
+      gamePlayers
+        .filter((player) => player.id !== room.currentPresenterPlayerId)
+        .map((player) => {
+          const playerScore = scoreByPlayerId.get(player.id);
+          return {
+            player,
+            score: playerScore?.score ?? 0,
+            correctCount: playerScore?.correctCount ?? 0,
+          };
+        })
+        .sort((a, b) => b.score - a.score),
+    [gamePlayers, room.currentPresenterPlayerId, scoreByPlayerId],
+  );
+  const teamBattleScoreRows = useMemo(
+    () =>
+      teamBattleState
+        ? (["red", "blue"] as const)
+            .map((team) => ({
+              team,
+              score: teamBattleState.teamScores[team],
+              members: teamBattleState.teams[team].flatMap((memberId) => {
+                const player = activePlayerById.get(memberId);
 
-            return player ? [{ id: memberId, nickname: player.nickname }] : [];
-          }),
-        }))
-        .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
-    : [];
+                return player ? [{ id: memberId, nickname: player.nickname }] : [];
+              }),
+            }))
+            .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+        : [],
+    [activePlayerById, teamBattleState],
+  );
   const teamBattleActiveTone = getTeamTone(teamBattleActiveTeam);
   const teamBattlePlayerTone = teamBattlePlayerTeam ? getTeamTone(teamBattlePlayerTeam) : null;
   const teamBattlePhaseLabel = teamBattleState ? getTeamBattlePhaseLabel(teamBattleState.phase) : "";
@@ -2403,48 +2552,25 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               const alreadyCorrect = correctPlayerSet.has(player.id);
               const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
               const hasForfeitedCurrentRound = currentRoundForfeitPlayerSet.has(player.id);
-              const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
+              const buzzerAnswer = buzzerAnswerByPlayerId.get(player.id);
               const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
               return (
-                <div
-                  className="rounded-md bg-slate-50 px-3 py-2 text-sm"
+                <StandardScoreRow
+                  alreadyCorrect={alreadyCorrect}
+                  buzzerStatus={buzzerAnswer?.status}
+                  correctCount={correctCount}
+                  currentQuestionScoreAwarded={currentQuestionScoreAwarded}
+                  hasAnsweredCurrentRound={hasAnsweredCurrentRound}
+                  hasForfeitedCurrentRound={hasForfeitedCurrentRound}
+                  isBuzzerMode={isBuzzerMode}
+                  isLeadingPendingBuzzerAnswer={pendingBuzzerAnswers[0]?.id === buzzerAnswer?.id}
                   key={player.id}
-                  ref={(element) => {
-                    scoreRowRefs.current[player.id] = element;
-                  }}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0 font-semibold text-slate-950">
-                      #{index + 1} {player.nickname}
-                    </div>
-                    <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
-                    <span>答对 {correctCount} 题</span>
-                    {alreadyCorrect ? (
-                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
-                    ) : null}
-                    {currentQuestionScoreAwarded > 0 ? (
-                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
-                        +{currentQuestionScoreAwarded} 分
-                      </span>
-                    ) : null}
-                    {!alreadyCorrect && hasForfeitedCurrentRound ? (
-                      <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
-                    ) : null}
-                    {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound ? (
-                      <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
-                    ) : null}
-                    {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
-                      <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
-                        {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
-                      </span>
-                    ) : null}
-                    {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
-                      <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
-                    ) : null}
-                  </div>
-                </div>
+                  nickname={player.nickname}
+                  onRowRef={registerScoreRow}
+                  playerId={player.id}
+                  rank={index + 1}
+                  score={score}
+                />
               );
             })}
           </div>
