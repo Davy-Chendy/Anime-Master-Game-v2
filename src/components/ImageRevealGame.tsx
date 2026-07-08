@@ -299,6 +299,7 @@ type StandardScoreRowProps = {
 type CompactScoreStatus = {
   label: string;
   className: string;
+  textClassName: string;
   content: string | JSX.Element | null;
 };
 
@@ -330,7 +331,7 @@ function IconXMark(props: SVGProps<SVGSVGElement>) {
 function IconHourglass(props: SVGProps<SVGSVGElement>) {
   return (
     <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" {...props}>
-      <path d="M6 3h8M6 17h8M7 3c0 4 6 4 6 7s-6 3-6 7M13 3c0 4-6 4-6 7s6 3 6 7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M7 4h6M7 16h6M8 4l4 6-4 6M12 4l-4 6 4 6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -514,9 +515,12 @@ function getCompactScoreStatus({
   const hasWrongCurrentRound = buzzerStatus === "wrong";
 
   if (alreadyCorrect) {
+    const isLargeScoreAward = currentQuestionScoreAwarded >= 100;
+
     return {
       label: currentQuestionScoreAwarded > 0 ? `本题加 ${currentQuestionScoreAwarded} 分` : "已答对",
       className: "bg-emerald-50 text-emerald-700",
+      textClassName: currentQuestionScoreAwarded > 0 && !isLargeScoreAward ? "text-xs" : "text-[11px]",
       content:
         currentQuestionScoreAwarded > 0 ? (
           `+${currentQuestionScoreAwarded}`
@@ -530,6 +534,7 @@ function getCompactScoreStatus({
     return {
       label: "本轮已答错",
       className: "bg-rose-50 text-rose-700",
+      textClassName: "text-[11px]",
       content: <IconXMark className="h-4 w-4" />,
     };
   }
@@ -538,6 +543,7 @@ function getCompactScoreStatus({
     return {
       label: "已放弃",
       className: "bg-slate-100 text-slate-600",
+      textClassName: "text-[11px]",
       content: <IconFlag className="h-4 w-4" />,
     };
   }
@@ -546,6 +552,7 @@ function getCompactScoreStatus({
     return {
       label: isLeadingPendingBuzzerAnswer ? "判定中" : "等待判定",
       className: "bg-sky-50 text-sky-700",
+      textClassName: "text-[11px]",
       content: <IconHourglass className="h-4 w-4" />,
     };
   }
@@ -553,6 +560,7 @@ function getCompactScoreStatus({
   return {
     label: "暂无状态",
     className: "bg-transparent text-slate-300",
+    textClassName: "text-[11px]",
     content: null,
   };
 }
@@ -594,7 +602,7 @@ const CompactScoreRow = memo(function CompactScoreRow({
       </span>
       <span
         aria-label={status.label}
-        className={`grid h-5 min-w-5 justify-self-end place-items-center rounded px-0.5 text-[11px] font-bold leading-none ${status.className}`}
+        className={`grid h-5 min-w-5 justify-self-end place-items-center rounded px-0.5 font-bold leading-none ${status.textClassName} ${status.className}`}
         title={status.label}
       >
         {status.content}
