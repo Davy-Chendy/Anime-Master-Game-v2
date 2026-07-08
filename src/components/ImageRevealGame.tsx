@@ -67,7 +67,7 @@ const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
 const ROUND_PROMPT_SOUND_STORAGE_KEY = "animeMaster.roundPromptSoundEnabled";
 const ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY = "animeMaster.roundPromptSoundVolume";
 const DEFAULT_ROUND_PROMPT_SOUND_VOLUME = 80;
-const MAX_ROUND_PROMPT_SOUND_GAIN = 0.22;
+const MAX_ROUND_PROMPT_SOUND_GAIN = 0.45;
 
 function getInitialRoundPromptSoundEnabled() {
   if (typeof window === "undefined") {
@@ -128,23 +128,31 @@ function playRoundPromptSound(volume = DEFAULT_ROUND_PROMPT_SOUND_VOLUME) {
 
   const audioContext = new AudioContextConstructor();
   const startAt = audioContext.currentTime;
-  const oscillator = audioContext.createOscillator();
-  const gain = audioContext.createGain();
+  const peakGain = MAX_ROUND_PROMPT_SOUND_GAIN * normalizedVolume;
 
-  oscillator.type = "sine";
-  oscillator.frequency.setValueAtTime(880, startAt);
-  oscillator.frequency.exponentialRampToValueAtTime(1320, startAt + 0.12);
-  gain.gain.setValueAtTime(0.0001, startAt);
-  gain.gain.exponentialRampToValueAtTime(MAX_ROUND_PROMPT_SOUND_GAIN * normalizedVolume, startAt + 0.02);
-  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
+  function scheduleBeep(offset: number, startFrequency: number, endFrequency: number) {
+    const beepStartAt = startAt + offset;
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
 
-  oscillator.connect(gain);
-  gain.connect(audioContext.destination);
-  oscillator.start(startAt);
-  oscillator.stop(startAt + 0.22);
-  oscillator.addEventListener("ended", () => {
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(startFrequency, beepStartAt);
+    oscillator.frequency.exponentialRampToValueAtTime(endFrequency, beepStartAt + 0.11);
+    gain.gain.setValueAtTime(0.0001, beepStartAt);
+    gain.gain.exponentialRampToValueAtTime(peakGain, beepStartAt + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, beepStartAt + 0.16);
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    oscillator.start(beepStartAt);
+    oscillator.stop(beepStartAt + 0.18);
+  }
+
+  scheduleBeep(0, 740, 1040);
+  scheduleBeep(0.24, 880, 1320);
+  window.setTimeout(() => {
     void audioContext.close();
-  });
+  }, 600);
 }
 
 function isForfeitAnswer(answer: Answer | null | undefined) {
@@ -792,6 +800,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [isRoundPromptSoundEnabled, setIsRoundPromptSoundEnabled] = useState(getInitialRoundPromptSoundEnabled);
+  const [isRoundPromptSoundVolumeOpen, setIsRoundPromptSoundVolumeOpen] = useState(false);
   const [roundPromptSoundVolume, setRoundPromptSoundVolume] = useState(getInitialRoundPromptSoundVolume);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
@@ -1979,6 +1988,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     const nextEnabled = !isRoundPromptSoundEnabled;
     setIsRoundPromptSoundEnabled(nextEnabled);
     saveRoundPromptSoundEnabled(nextEnabled);
+
+    if (!nextEnabled) {
+      setIsRoundPromptSoundVolumeOpen(false);
+    }
 
     if (nextEnabled) {
       playRoundPromptSound(roundPromptSoundVolume);
@@ -3668,41 +3681,60 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             </section>
           </div>
 
-          <div className="mt-auto flex items-end justify-end gap-3 pt-4">
-            {isRoundPromptSoundEnabled ? (
-              <label className="grid gap-1 text-right text-xs font-semibold text-slate-600">
-                <span>音量 {roundPromptSoundVolume}%</span>
-                <input
-                  aria-label="提示音音量"
-                  className="h-2 w-28 accent-rose-500"
-                  max={100}
-                  min={0}
-                  step={5}
-                  type="range"
-                  value={roundPromptSoundVolume}
-                  onBlur={handleRoundPromptSoundVolumePreview}
-                  onChange={(event) => handleRoundPromptSoundVolumeChange(Number(event.target.value))}
-                  onKeyUp={handleRoundPromptSoundVolumePreview}
-                  onPointerUp={handleRoundPromptSoundVolumePreview}
-                />
-              </label>
-            ) : null}
-            <button
-              aria-label={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
-              aria-pressed={isRoundPromptSoundEnabled}
-              className={[
-                "inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold transition focus:outline-none focus:ring-4 focus:ring-rose-100",
-                isRoundPromptSoundEnabled
-                  ? "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
-                  : "border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50",
-              ].join(" ")}
-              title={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
-              type="button"
-              onClick={handleToggleRoundPromptSound}
-            >
-              <IconSpeaker className="h-4 w-4" />
-              <span>提示音 {isRoundPromptSoundEnabled ? "开" : "关"}</span>
-            </button>
+          <div className="mt-auto flex justify-end pt-4">
+            <div className="relative">
+              {isRoundPromptSoundEnabled && isRoundPromptSoundVolumeOpen ? (
+                <div className="absolute bottom-full right-0 z-10 mb-2 w-52 rounded-md border border-[var(--line)] bg-white p-3 text-xs font-semibold text-slate-600 shadow-lg">
+                  <label className="block">
+                    <span className="flex items-center justify-between gap-2">
+                      <span>提示音音量</span>
+                      <span>{roundPromptSoundVolume}%</span>
+                    </span>
+                    <input
+                      aria-label="提示音音量"
+                      className="mt-2 h-2 w-full accent-rose-500"
+                      max={100}
+                      min={0}
+                      step={5}
+                      type="range"
+                      value={roundPromptSoundVolume}
+                      onBlur={handleRoundPromptSoundVolumePreview}
+                      onChange={(event) => handleRoundPromptSoundVolumeChange(Number(event.target.value))}
+                      onKeyUp={handleRoundPromptSoundVolumePreview}
+                      onPointerUp={handleRoundPromptSoundVolumePreview}
+                    />
+                  </label>
+                </div>
+              ) : null}
+              <div className="inline-flex overflow-hidden rounded-md border border-[var(--line)] bg-white shadow-sm">
+                <button
+                  aria-label={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
+                  aria-pressed={isRoundPromptSoundEnabled}
+                  className={[
+                    "inline-flex h-9 items-center gap-1.5 whitespace-nowrap px-3 text-xs font-semibold transition focus:outline-none focus:ring-4 focus:ring-rose-100",
+                    isRoundPromptSoundEnabled ? "bg-rose-50 text-rose-700 hover:bg-rose-100" : "text-slate-600 hover:bg-slate-50",
+                  ].join(" ")}
+                  title={isRoundPromptSoundEnabled ? "关闭提示音" : "开启提示音"}
+                  type="button"
+                  onClick={handleToggleRoundPromptSound}
+                >
+                  <IconSpeaker className="h-4 w-4 shrink-0" />
+                  <span>提示音 {isRoundPromptSoundEnabled ? "开" : "关"}</span>
+                </button>
+                {isRoundPromptSoundEnabled ? (
+                  <button
+                    aria-expanded={isRoundPromptSoundVolumeOpen}
+                    aria-label="调整提示音音量"
+                    className="h-9 whitespace-nowrap border-l border-rose-100 bg-rose-50 px-2.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                    title="调整音量"
+                    type="button"
+                    onClick={() => setIsRoundPromptSoundVolumeOpen((isOpen) => !isOpen)}
+                  >
+                    音量
+                  </button>
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       )}
