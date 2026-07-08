@@ -1438,6 +1438,7 @@ export async function createRoom(playerId: string, nickname: string) {
       .insert({
         room_code: roomCode,
         host_player_id: playerId,
+        lobby_round_scores: DEFAULT_ROUND_SCORES,
       })
       .select()
       .single<DbRoom>();
