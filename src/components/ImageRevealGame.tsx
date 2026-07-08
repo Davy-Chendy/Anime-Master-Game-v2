@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, SVGProps } from "react";
 import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
@@ -296,6 +296,91 @@ type StandardScoreRowProps = {
   onRowRef: (playerId: string, element: HTMLDivElement | null) => void;
 };
 
+type CompactScoreStatus = {
+  label: string;
+  className: string;
+  content: string | JSX.Element | null;
+};
+
+function IconListDense(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M4 6h12M4 10h12M4 14h12" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconListDetail(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M7 5h9M7 10h9M7 15h9" strokeLinecap="round" />
+      <path d="M4 5h.01M4 10h.01M4 15h.01" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconXMark(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.2" {...props}>
+      <path d="M6 6l8 8M14 6l-8 8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconHourglass(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" {...props}>
+      <path d="M6 3h8M6 17h8M7 3c0 4 6 4 6 7s-6 3-6 7M13 3c0 4-6 4-6 7s6 3 6 7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconFlag(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M6 17V4M6 5h8l-1.5 3L14 11H6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconCheck(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.2" {...props}>
+      <path d="M5 10.5l3 3L15 6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function getCompactNameClass(nickname: string) {
+  const length = Array.from(nickname).length;
+
+  if (length <= 7) {
+    return "text-sm";
+  }
+
+  if (length <= 10) {
+    return "text-[13px]";
+  }
+
+  if (length <= 14) {
+    return "text-xs";
+  }
+
+  return "text-[11px]";
+}
+
+function getCompactScoreClass(score: number) {
+  if (Math.abs(score) >= 1000) {
+    return "text-[11px]";
+  }
+
+  if (Math.abs(score) >= 100) {
+    return "text-xs";
+  }
+
+  return "text-sm";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -408,6 +493,122 @@ const StandardScoreRow = memo(function StandardScoreRow({
   );
 });
 
+function getCompactScoreStatus({
+  alreadyCorrect,
+  hasAnsweredCurrentRound,
+  hasForfeitedCurrentRound,
+  currentQuestionScoreAwarded,
+  buzzerStatus,
+  isBuzzerMode,
+  isLeadingPendingBuzzerAnswer,
+}: Pick<
+  StandardScoreRowProps,
+  | "alreadyCorrect"
+  | "hasAnsweredCurrentRound"
+  | "hasForfeitedCurrentRound"
+  | "currentQuestionScoreAwarded"
+  | "buzzerStatus"
+  | "isBuzzerMode"
+  | "isLeadingPendingBuzzerAnswer"
+>): CompactScoreStatus {
+  const hasWrongCurrentRound = buzzerStatus === "wrong";
+
+  if (alreadyCorrect) {
+    return {
+      label: currentQuestionScoreAwarded > 0 ? `本题加 ${currentQuestionScoreAwarded} 分` : "已答对",
+      className: "bg-emerald-50 text-emerald-700",
+      content:
+        currentQuestionScoreAwarded > 0 ? (
+          `+${currentQuestionScoreAwarded}`
+        ) : (
+          <IconCheck className="h-4 w-4" />
+        ),
+    };
+  }
+
+  if (hasWrongCurrentRound) {
+    return {
+      label: "本轮已答错",
+      className: "bg-rose-50 text-rose-700",
+      content: <IconXMark className="h-4 w-4" />,
+    };
+  }
+
+  if (hasForfeitedCurrentRound) {
+    return {
+      label: "已放弃",
+      className: "bg-slate-100 text-slate-600",
+      content: <IconFlag className="h-4 w-4" />,
+    };
+  }
+
+  if ((isBuzzerMode && buzzerStatus === "pending") || hasAnsweredCurrentRound) {
+    return {
+      label: isLeadingPendingBuzzerAnswer ? "判定中" : "等待判定",
+      className: "bg-sky-50 text-sky-700",
+      content: <IconHourglass className="h-4 w-4" />,
+    };
+  }
+
+  return {
+    label: "暂无状态",
+    className: "bg-transparent text-slate-300",
+    content: null,
+  };
+}
+
+const CompactScoreRow = memo(function CompactScoreRow({
+  playerId,
+  nickname,
+  rank,
+  score,
+  alreadyCorrect,
+  hasAnsweredCurrentRound,
+  hasForfeitedCurrentRound,
+  currentQuestionScoreAwarded,
+  buzzerStatus,
+  isBuzzerMode,
+  isLeadingPendingBuzzerAnswer,
+  onRowRef,
+}: StandardScoreRowProps) {
+  const status = getCompactScoreStatus({
+    alreadyCorrect,
+    hasAnsweredCurrentRound,
+    hasForfeitedCurrentRound,
+    currentQuestionScoreAwarded,
+    buzzerStatus,
+    isBuzzerMode,
+    isLeadingPendingBuzzerAnswer,
+  });
+
+  return (
+    <div
+      className="grid h-8 grid-cols-[2ch_minmax(0,1fr)_2.75rem_3.25ch] items-center gap-1.5 rounded-md bg-slate-50 px-2 text-sm"
+      ref={(element) => {
+        onRowRef(playerId, element);
+      }}
+    >
+      <span className="text-right text-xs font-semibold tabular-nums text-slate-500">{rank}</span>
+      <span className={`min-w-0 truncate font-semibold leading-none text-slate-950 ${getCompactNameClass(nickname)}`} title={nickname}>
+        {nickname}
+      </span>
+      <span
+        aria-label={status.label}
+        className={`grid h-6 min-w-0 place-items-center rounded px-1 text-xs font-bold leading-none ${status.className}`}
+        title={status.label}
+      >
+        {status.content}
+      </span>
+      <span
+        className={`shrink-0 text-right font-bold leading-none tabular-nums text-[var(--primary)] ${getCompactScoreClass(score)}`}
+        title={`${score} 分`}
+      >
+        {score}
+      </span>
+    </div>
+  );
+});
+
 function getRoundSnapshotFromValue(value: unknown) {
   return isRecord(value) && isRoundSnapshot(value.roundSnapshot) ? value.roundSnapshot : null;
 }
@@ -489,6 +690,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isSpectatorLabelOpen, setIsSpectatorLabelOpen] = useState(false);
+  const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
@@ -2527,17 +2729,28 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
   const scorePanel = (
     <div
-      className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
+      className="flex flex-col rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)]"
       style={sidePanelHeightStyle}
     >
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-slate-900">实时积分榜</p>
-        <span className="min-w-0 max-w-[60%] truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
+      <div className="mb-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+        <p className="text-sm font-semibold text-slate-900">积分榜</p>
+        <span className="min-w-0 truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
           出题人：{presenterName}
         </span>
+        {!isTeamBattleMode ? (
+          <button
+            aria-label={isScoreboardCompact ? "切换为详细积分榜" : "切换为紧凑积分榜"}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 transition hover:bg-slate-50 hover:text-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+            title={isScoreboardCompact ? "详细积分榜" : "紧凑积分榜"}
+            type="button"
+            onClick={() => setIsScoreboardCompact((isCompact) => !isCompact)}
+          >
+            {isScoreboardCompact ? <IconListDetail className="h-4 w-4" /> : <IconListDense className="h-4 w-4" />}
+          </button>
+        ) : null}
       </div>
       {isTeamBattleMode && teamBattleState ? (
-        <>
+        <div className="min-h-0 overflow-y-auto pr-1">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm">
             <span className="font-semibold text-slate-950">我的身份</span>
             <span
@@ -2594,18 +2807,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               );
             })}
           </div>
-        </>
+        </div>
       ) : (
-        <>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+        <div className="min-h-0 overflow-y-auto pr-1">
+          <div className={isScoreboardCompact ? "grid gap-1" : "grid gap-2 sm:grid-cols-2 lg:grid-cols-1"}>
             {scoreRows.map(({ player, score, correctCount }, index) => {
               const alreadyCorrect = correctPlayerSet.has(player.id);
               const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
               const hasForfeitedCurrentRound = currentRoundForfeitPlayerSet.has(player.id);
               const buzzerAnswer = buzzerAnswerByPlayerId.get(player.id);
               const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
+              const ScoreRow = isScoreboardCompact ? CompactScoreRow : StandardScoreRow;
+
               return (
-                <StandardScoreRow
+                <ScoreRow
                   alreadyCorrect={alreadyCorrect}
                   buzzerStatus={buzzerAnswer?.status}
                   correctCount={correctCount}
@@ -2624,7 +2839,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               );
             })}
           </div>
-        </>
+        </div>
       )}
     </div>
   );
