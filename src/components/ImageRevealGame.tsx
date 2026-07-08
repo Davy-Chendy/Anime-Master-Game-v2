@@ -330,9 +330,8 @@ function IconXMark(props: SVGProps<SVGSVGElement>) {
 
 function IconHourglass(props: SVGProps<SVGSVGElement>) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
-      <path d="M6 3h8M6 17h8M7 3l6 7-6 7M13 3l-6 7 6 7" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M9 7h2l-1 1.8zM9 13h2l-1-1.8z" fill="currentColor" stroke="none" />
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" {...props}>
+      <path d="M4 2h12v2h-2l-3 4 3 4h2v2H4v-2h2l3-4-3-4H4V2zm4 2 2 2.5L12 4H8zm2 6.5L8 12h4l-2-1.5z" />
     </svg>
   );
 }
