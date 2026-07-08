@@ -1033,9 +1033,14 @@ function GameResultPanel({
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
   const [ratingValue, setRatingValue] = useState(5);
   const [isRating, setIsRating] = useState(false);
+  const [isQuestionBrowserOpen, setIsQuestionBrowserOpen] = useState(false);
 
   const playerIds = useMemo(() => getGamePlayers(room.players).map((player) => player.id), [room.players]);
   const canRateQuestionSet = room.players.find((player) => player.id === playerId)?.role === "PLAYER";
+  const questionPreviewItems = useMemo(
+    () => (questionSet?.questions ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex),
+    [questionSet?.questions],
+  );
 
   useEffect(() => {
     if (!room.id || !currentGameId) {
@@ -1211,6 +1216,21 @@ function GameResultPanel({
     });
   }, [currentGameId, playerId, questionSet?.id, room.id]);
 
+  useEffect(() => {
+    if (!isQuestionBrowserOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsQuestionBrowserOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isQuestionBrowserOpen]);
+
   async function handleRateQuestionSet() {
     if (!questionSet || !room.id) {
       return;
@@ -1351,13 +1371,23 @@ function GameResultPanel({
               {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
             </p>
           </div>
-          {isHost ? (
-            <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setIsQuestionBrowserOpen(true)}
+              disabled={questionPreviewItems.length === 0}
+            >
+              浏览题库
             </Button>
-          ) : (
-            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
-          )}
+            {isHost ? (
+              <Button className="sm:ml-auto" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
+                {isReturningToLobby ? "返回中…" : "回到房间大厅"}
+              </Button>
+            ) : (
+              <p className="text-sm font-medium text-[var(--muted)] sm:ml-auto">等待房主操作</p>
+            )}
+          </div>
         </Panel>
       </div>
 
@@ -1515,6 +1545,71 @@ function GameResultPanel({
           </div>
         )}
       </Panel>
+
+      {isQuestionBrowserOpen ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 px-4 py-6"
+          role="presentation"
+          onMouseDown={() => setIsQuestionBrowserOpen(false)}
+        >
+          <div
+            aria-modal="true"
+            className="flex max-h-[calc(100dvh-48px)] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl"
+            role="dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold text-slate-950">浏览题库</h2>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  {questionSet?.title ? `${questionSet.title} · ${questionPreviewItems.length} 题` : `${questionPreviewItems.length} 题`}
+                </p>
+              </div>
+              <button
+                aria-label="关闭浏览题库弹窗"
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-[var(--line)] text-xl leading-none text-slate-500 transition hover:bg-slate-50"
+                type="button"
+                onClick={() => setIsQuestionBrowserOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="min-h-0 overflow-y-auto px-5 py-4">
+              {questionPreviewItems.length > 0 ? (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {questionPreviewItems.map((question, index) => (
+                    <article className="overflow-hidden rounded-md border border-[var(--line)] bg-slate-50" key={question.id}>
+                      <div className="aspect-video bg-slate-950">
+                        <img
+                          alt={`第 ${index + 1} 题图片`}
+                          className="h-full w-full object-contain"
+                          loading="lazy"
+                          src={question.imageUrl}
+                        />
+                      </div>
+                      <div className="px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-bold text-slate-950">Q{index + 1}</p>
+                          {question.labelText ? (
+                            <span className="truncate text-xs font-semibold text-[var(--primary)]" title={question.labelText}>
+                              {question.labelText}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-md border border-[var(--line)] bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">
+                  当前没有可浏览的题目图片
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
