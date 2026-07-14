@@ -1804,8 +1804,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               score: teamBattleState.teamScores[team],
               members: teamBattleState.teams[team].flatMap((memberId) => {
                 const player = activePlayerById.get(memberId);
+                const hasActed =
+                  team === teamBattleState.activeTeam &&
+                  (teamBattleState.phase === "REVEAL_VOTE"
+                    ? Object.prototype.hasOwnProperty.call(teamBattleState.revealVotes, memberId)
+                    : teamBattleState.phase === "GUESS_VOTE"
+                      ? Object.prototype.hasOwnProperty.call(teamBattleState.guessVotes, memberId)
+                      : false);
 
-                return player ? [{ id: memberId, nickname: player.nickname }] : [];
+                return player ? [{ id: memberId, nickname: player.nickname, hasActed }] : [];
               }),
             }))
             .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
@@ -3001,7 +3008,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                         ].join(" ")}
                         key={member.id}
                       >
-                        <span className="block truncate font-semibold text-slate-950">{member.nickname}</span>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate font-semibold text-slate-950">{member.nickname}</span>
+                          {member.hasActed ? (
+                            <span
+                              aria-label={`${member.nickname}已行动`}
+                              className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-100 text-emerald-700"
+                              title="已行动"
+                            >
+                              <IconCheck className="h-3.5 w-3.5" />
+                            </span>
+                          ) : null}
+                        </div>
                         {member.id === playerId ? <span className="text-xs font-semibold text-[var(--muted)]">你</span> : null}
                       </div>
                     ))}
