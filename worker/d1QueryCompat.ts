@@ -17,6 +17,7 @@ type OrderBy = {
   ascending: boolean;
 };
 
+const D1_MAX_BOUND_PARAMETERS_PER_QUERY = 100;
 const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores", "team_battle_state", "lobby_round_scores"]);
 const BOOLEAN_COLUMNS = new Set(["is_host", "is_public"]);
 const UPDATED_AT_TABLES = new Set(["rooms", "question_sets", "question_set_ratings"]);
@@ -358,9 +359,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     });
 
     if (canUseBulkInsert && cleanedRecords.length > 1) {
-      const values = cleanedRecords.flatMap((record) => columns.map((column) => record[column]));
       const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
-      const placeholders = cleanedRecords.map(() => rowPlaceholder).join(", ");
       const updateGeneratedId = explicitPrimaryKeyByIndex[0];
       const updateColumns = columns.filter(
         (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
@@ -375,11 +374,21 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
                     .join(", ")}`
             }`
           : "";
-      const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
-        .map(sqlIdentifier)
-        .join(", ")}) VALUES ${placeholders}${conflict} RETURNING ${this.selectedSql()}`;
-      const result = await this.db!.prepare(sql).bind(...values).all<Record<string, unknown>>();
-      return this.shapeRows(result.results ?? []);
+      const rowsPerStatement = Math.max(1, Math.floor(D1_MAX_BOUND_PARAMETERS_PER_QUERY / columns.length));
+      const statements: D1PreparedStatement[] = [];
+
+      for (let start = 0; start < cleanedRecords.length; start += rowsPerStatement) {
+        const chunk = cleanedRecords.slice(start, start + rowsPerStatement);
+        const values = chunk.flatMap((record) => columns.map((column) => record[column]));
+        const placeholders = chunk.map(() => rowPlaceholder).join(", ");
+        const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
+          .map(sqlIdentifier)
+          .join(", ")}) VALUES ${placeholders}${conflict} RETURNING ${this.selectedSql()}`;
+        statements.push(this.db!.prepare(sql).bind(...values));
+      }
+
+      const results = await this.db!.batch<Record<string, unknown>>(statements);
+      return this.shapeRows(results.flatMap((result) => result.results ?? []));
     }
 
     for (let index = 0; index < records.length; index += 1) {
