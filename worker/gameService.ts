@@ -1534,6 +1534,33 @@ export async function getRoomWithPlayers(roomCode: string) {
   return toRoom(room, players);
 }
 
+async function getDbRoomById(roomId: string) {
+  const { data: room, error } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .maybeSingle<DbRoom>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!room) {
+    return null;
+  }
+
+  return room;
+}
+
+async function getRoomWithPlayersById(roomId: string) {
+  const room = await getDbRoomById(roomId);
+  if (!room) {
+    return null;
+  }
+
+  return toRoom(room, await getDbPlayersByRoomId(room.id));
+}
+
 async function getDbPlayersByRoomId(roomId: string) {
   assertD1Env();
 
@@ -2265,7 +2292,45 @@ export async function updateRoomGameSettings(params: {
   return toRoom(room, players);
 }
 
+async function cleanupFailedGameSession(gameSessionId: string) {
+  const { error } = await d1.from("game_sessions").delete().eq("id", gameSessionId);
+  if (error) {
+    console.error(
+      JSON.stringify({
+        event: "start_game_cleanup_failed",
+        gameSessionId,
+        error: error.message,
+      }),
+    );
+  }
+}
+
+async function getCommittedStartedGameRoom(roomId: string, gameSessionId: string) {
+  const room = await getDbRoomById(roomId);
+  if (room?.game_status !== "PLAYING" || room.current_game_id !== gameSessionId) {
+    return null;
+  }
+
+  return toRoom(room, await getDbPlayersByRoomId(room.id));
+}
+
+const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
+
+function normalizeStartRequestId(value: unknown) {
+  if (typeof value !== "string") {
+    throw new Error("页面版本已更新，请刷新后重试。");
+  }
+
+  const normalized = value.trim();
+  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(normalized)) {
+    throw new Error("开始游戏失败：请求标识无效，请刷新后重试。");
+  }
+
+  return normalized;
+}
+
 export async function startGameWithQuestionSet(params: {
+  startRequestId?: string;
   roomId: string;
   hostPlayerId: string;
   presenterPlayerId: string;
@@ -2282,9 +2347,6 @@ export async function startGameWithQuestionSet(params: {
     .select("*")
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)
-    .eq("current_presenter_player_id", params.presenterPlayerId)
-    .eq("prepared_question_set_id", params.questionSetId)
-    .eq("game_status", "QUESTION_SETUP")
     .maybeSingle<DbRoom>();
 
   if (roomError) {
@@ -2294,6 +2356,30 @@ export async function startGameWithQuestionSet(params: {
   if (!room) {
     throw new Error("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
   }
+
+  if (room.game_status === "PLAYING" && room.current_game_id) {
+    const currentGameSession = await getGameSessionById(room.current_game_id);
+    if (
+      currentGameSession?.status === "PLAYING" &&
+      currentGameSession.presenterPlayerId === params.presenterPlayerId &&
+      currentGameSession.questionSetId === params.questionSetId
+    ) {
+      return {
+        gameSession: currentGameSession,
+        room: toRoom(room, await getDbPlayersByRoomId(room.id)),
+      };
+    }
+  }
+
+  if (
+    room.current_presenter_player_id !== params.presenterPlayerId ||
+    room.prepared_question_set_id !== params.questionSetId ||
+    room.game_status !== "QUESTION_SETUP"
+  ) {
+    throw new Error("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
+  }
+
+  const gameSessionId = normalizeStartRequestId(params.startRequestId);
 
   const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
@@ -2341,34 +2427,128 @@ export async function startGameWithQuestionSet(params: {
   const teamBattleState = gameMode === "TEAM_BATTLE" ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId) : null;
   const roundScores = normalizeRoundScores(params.roundScores ?? room.lobby_round_scores, maxRevealRounds);
 
-  const { data: gameSession, error: gameSessionError } = await d1
+  const initialGameSessionValues = {
+    room_id: params.roomId,
+    question_set_id: params.questionSetId,
+    presenter_player_id: params.presenterPlayerId,
+    status: "PLAYING",
+    game_mode: gameMode,
+    current_question_index: 0,
+    current_reveal_round: 1,
+    revealed_blocks: [],
+    max_reveal_rounds: maxRevealRounds,
+    round_seconds: roundSeconds,
+    round_scores: roundScores,
+    team_battle_state: teamBattleState,
+    round_started_at: null,
+    ended_at: null,
+  };
+  const { data: insertedGameSession, error: gameSessionError } = await d1
     .from("game_sessions")
     .insert({
-      room_id: params.roomId,
-      question_set_id: params.questionSetId,
-      presenter_player_id: params.presenterPlayerId,
-      status: "PLAYING",
-      game_mode: gameMode,
-      max_reveal_rounds: maxRevealRounds,
-      round_seconds: roundSeconds,
-      round_scores: roundScores,
-      team_battle_state: teamBattleState,
+      id: gameSessionId,
+      ...initialGameSessionValues,
     })
     .select()
-    .single<DbGameSession>();
+    .maybeSingle<DbGameSession>();
 
-  if (gameSessionError) {
-    throw new Error(gameSessionError.message);
+  let gameSession = insertedGameSession;
+  if (gameSessionError || !gameSession) {
+    const { data: deletedGameSession, error: cleanupError } = await d1
+      .from("game_sessions")
+      .delete()
+      .eq("id", gameSessionId)
+      .eq("room_id", params.roomId)
+      .eq("question_set_id", params.questionSetId)
+      .eq("presenter_player_id", params.presenterPlayerId)
+      .eq("status", "PLAYING")
+      .eq("current_question_index", 0)
+      .eq("current_reveal_round", 1)
+      .eq("revealed_blocks", [])
+      .is("round_started_at", null)
+      .is("ended_at", null)
+      .select()
+      .maybeSingle<DbGameSession>();
+
+    if (cleanupError) {
+      console.error(
+        JSON.stringify({
+          event: "start_game_insert_recovery_cleanup_failed",
+          gameSessionId,
+          roomId: params.roomId,
+          insertError: gameSessionError?.message ?? "insert returned no game session",
+          cleanupError: cleanupError.message,
+        }),
+      );
+      throw new Error(gameSessionError?.message ?? cleanupError.message);
+    }
+
+    if (!deletedGameSession && isUniqueViolation(gameSessionError)) {
+      throw new Error(`${START_GAME_REQUEST_ID_CONFLICT}: 开局请求标识已过期。`);
+    }
+
+    const { data: reinsertedGameSession, error: recoveryError } = await d1
+      .from("game_sessions")
+      .insert({
+        id: gameSessionId,
+        ...initialGameSessionValues,
+      })
+      .select()
+      .maybeSingle<DbGameSession>();
+
+    let recoveredGameSession = reinsertedGameSession;
+    if (recoveryError || !recoveredGameSession) {
+      const { data: verifiedGameSession, error: verificationError } = await d1
+        .from("game_sessions")
+        .select("*")
+        .eq("id", gameSessionId)
+        .eq("room_id", params.roomId)
+        .eq("question_set_id", params.questionSetId)
+        .eq("presenter_player_id", params.presenterPlayerId)
+        .eq("status", "PLAYING")
+        .eq("current_question_index", 0)
+        .eq("current_reveal_round", 1)
+        .maybeSingle<DbGameSession>();
+
+      if (verificationError || !verifiedGameSession) {
+        if (!verificationError && isUniqueViolation(recoveryError)) {
+          throw new Error(`${START_GAME_REQUEST_ID_CONFLICT}: 开局请求标识已过期。`);
+        }
+
+        console.error(
+          JSON.stringify({
+            event: "start_game_insert_recovery_failed",
+            gameSessionId,
+            roomId: params.roomId,
+            insertError: gameSessionError?.message ?? "insert returned no game session",
+            recoveryError: recoveryError?.message ?? "recovery insert returned no game session",
+            verificationError: verificationError?.message ?? "recovered game session was not found",
+          }),
+        );
+        throw new Error(
+          gameSessionError?.message ?? recoveryError?.message ?? verificationError?.message ?? "开始游戏失败，请稍后重试。",
+        );
+      }
+
+      recoveredGameSession = verifiedGameSession;
+    }
+
+    gameSession = recoveredGameSession;
   }
 
-  await createGameParticipantSnapshot(gameSession.id, activeGamePlayers);
-
-  const eligiblePlayerIds = await createQuestionEligibilitySnapshotFromPlayers({
-    gameSessionId: gameSession.id,
-    questionIndex: gameSession.current_question_index,
-    presenterPlayerId: params.presenterPlayerId,
-    players: activeGamePlayers,
-  });
+  let eligiblePlayerIds: string[];
+  try {
+    await createGameParticipantSnapshot(gameSession.id, activeGamePlayers);
+    eligiblePlayerIds = await createQuestionEligibilitySnapshotFromPlayers({
+      gameSessionId: gameSession.id,
+      questionIndex: gameSession.current_question_index,
+      presenterPlayerId: params.presenterPlayerId,
+      players: activeGamePlayers,
+    });
+  } catch (error) {
+    await cleanupFailedGameSession(gameSession.id);
+    throw error;
+  }
   const hydratedGameSession = {
     ...toGameSession(gameSession),
     eligiblePlayerIds,
@@ -2390,17 +2570,32 @@ export async function startGameWithQuestionSet(params: {
     .maybeSingle<DbRoom>();
 
   if (updateRoomError) {
+    try {
+      const committedRoom = await getCommittedStartedGameRoom(params.roomId, gameSession.id);
+      if (committedRoom) {
+        return {
+          gameSession: hydratedGameSession,
+          room: committedRoom,
+        };
+      }
+    } catch (verificationError) {
+      console.error(
+        JSON.stringify({
+          event: "start_game_commit_verification_failed",
+          gameSessionId: gameSession.id,
+          roomId: params.roomId,
+          error: verificationError instanceof Error ? verificationError.message : String(verificationError),
+        }),
+      );
+      throw new Error(updateRoomError.message);
+    }
+
+    await cleanupFailedGameSession(gameSession.id);
     throw new Error(updateRoomError.message);
   }
 
   if (!updatedRoom) {
-    await d1
-      .from("game_sessions")
-      .update({
-        status: "GAME_RESULT",
-        ended_at: new Date().toISOString(),
-      })
-      .eq("id", gameSession.id);
+    await cleanupFailedGameSession(gameSession.id);
     throw new Error("开始游戏失败：房间状态已变化，请刷新后重试。");
   }
 
@@ -4804,9 +4999,175 @@ export async function gradeAnswersAndAdvance(params: {
   };
 }
 
+function assertExpectedQuestionIndex(value: number) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error("题目状态无效，请刷新后重试。");
+  }
+}
+
+function resolveExpectedQuestionIndex(value: number | undefined) {
+  if (value === undefined) {
+    throw new Error("页面版本已更新，请刷新后重试。");
+  }
+
+  assertExpectedQuestionIndex(value);
+  return value;
+}
+
+async function getCompletedQuestionTransitionResult(currentGameSession: DbGameSession, expectedQuestionIndex: number) {
+  const advancedToNextQuestion =
+    currentGameSession.status === "PLAYING" && currentGameSession.current_question_index === expectedQuestionIndex + 1;
+  let advancedToGameResult = false;
+  let resultRoom: Room | null = null;
+
+  if (currentGameSession.status === "GAME_RESULT" && currentGameSession.current_question_index === expectedQuestionIndex) {
+    const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
+    resultRoom = await getRoomWithPlayersById(currentGameSession.room_id);
+    advancedToGameResult =
+      expectedQuestionIndex === questions.length - 1 &&
+      resultRoom?.currentGameId === currentGameSession.id &&
+      (resultRoom.status === "GAME_RESULT" || resultRoom.status === "PLAYING");
+
+    if (advancedToGameResult && resultRoom?.status === "PLAYING") {
+      return await finishRoomAfterGameSessionEnded(currentGameSession, expectedQuestionIndex);
+    }
+  }
+
+  if (!advancedToNextQuestion && !advancedToGameResult) {
+    return null;
+  }
+
+  return {
+    gameSession: await hydrateGameSessionEligibility(toGameSession(currentGameSession)),
+    room: advancedToGameResult ? resultRoom : null,
+  };
+}
+
+async function rollbackFinishedGameSession(gameSessionId: string, expectedQuestionIndex: number) {
+  const { data, error } = await d1
+    .from("game_sessions")
+    .update({
+      status: "PLAYING",
+      ended_at: null,
+    })
+    .eq("id", gameSessionId)
+    .eq("status", "GAME_RESULT")
+    .eq("current_question_index", expectedQuestionIndex)
+    .select()
+    .maybeSingle<DbGameSession>();
+
+  if (error || !data) {
+    console.error(
+      JSON.stringify({
+        event: "finish_game_rollback_failed",
+        gameSessionId,
+        expectedQuestionIndex,
+        error: error?.message ?? "game session state changed before rollback",
+      }),
+    );
+  }
+}
+
+async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, expectedQuestionIndex: number) {
+  const { data: updatedRoom, error: roomError } = await d1
+    .from("rooms")
+    .update({
+      game_status: "GAME_RESULT",
+    })
+    .eq("id", endedGameSession.room_id)
+    .eq("current_game_id", endedGameSession.id)
+    .eq("game_status", "PLAYING")
+    .select()
+    .maybeSingle<DbRoom>();
+
+  if (updatedRoom) {
+    return {
+      gameSession: toGameSession(endedGameSession),
+      room: toRoom(updatedRoom, await getDbPlayersByRoomId(updatedRoom.id)),
+    };
+  }
+
+  let latestRoom: DbRoom | null = null;
+  try {
+    latestRoom = await getDbRoomById(endedGameSession.room_id);
+  } catch (verificationError) {
+    console.error(
+      JSON.stringify({
+        event: "finish_game_commit_verification_failed",
+        gameSessionId: endedGameSession.id,
+        roomId: endedGameSession.room_id,
+        expectedQuestionIndex,
+        error: verificationError instanceof Error ? verificationError.message : String(verificationError),
+      }),
+    );
+    if (roomError) {
+      throw new Error(roomError.message);
+    }
+    throw verificationError;
+  }
+
+  if (
+    latestRoom?.current_game_id === endedGameSession.id &&
+    latestRoom.game_status === "GAME_RESULT"
+  ) {
+    return {
+      gameSession: toGameSession(endedGameSession),
+      room: toRoom(latestRoom, await getDbPlayersByRoomId(latestRoom.id)),
+    };
+  }
+
+  if (latestRoom?.current_game_id === endedGameSession.id && latestRoom.game_status === "PLAYING") {
+    await rollbackFinishedGameSession(endedGameSession.id, expectedQuestionIndex);
+  }
+
+  if (roomError) {
+    throw new Error(roomError.message);
+  }
+  throw new Error("题目状态已变化，请刷新后重试。");
+}
+
+async function finishGameAfterQuestionTransition(currentGameSession: DbGameSession, expectedQuestionIndex: number) {
+  const { data: endedGameSession, error: endGameError } = await d1
+    .from("game_sessions")
+    .update({
+      status: "GAME_RESULT",
+      ended_at: new Date().toISOString(),
+    })
+    .eq("id", currentGameSession.id)
+    .eq("status", "PLAYING")
+    .eq("current_question_index", expectedQuestionIndex)
+    .select()
+    .maybeSingle<DbGameSession>();
+
+  if (endGameError) {
+    throw new Error(endGameError.message);
+  }
+
+  if (!endedGameSession) {
+    const { data: latestGameSession, error: latestError } = await d1
+      .from("game_sessions")
+      .select("*")
+      .eq("id", currentGameSession.id)
+      .maybeSingle<DbGameSession>();
+    if (latestError) {
+      throw new Error(latestError.message);
+    }
+    const completed = latestGameSession
+      ? await getCompletedQuestionTransitionResult(latestGameSession, expectedQuestionIndex)
+      : null;
+    if (completed) {
+      return completed;
+    }
+    throw new Error("题目状态已变化，请刷新后重试。");
+  }
+
+  return await finishRoomAfterGameSessionEnded(endedGameSession, expectedQuestionIndex);
+}
+
 export async function advanceReviewedQuestion(params: {
   gameSessionId: string;
   presenterPlayerId: string;
+  expectedQuestionIndex?: number;
 }) {
   assertD1Env();
 
@@ -4814,7 +5175,6 @@ export async function advanceReviewedQuestion(params: {
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
-    .eq("status", "PLAYING")
     .maybeSingle<DbGameSession>();
 
   if (currentError) {
@@ -4823,6 +5183,24 @@ export async function advanceReviewedQuestion(params: {
 
   if (!currentGameSession) {
     throw new Error("进入下一题失败：当前游戏不存在或已结束。");
+  }
+
+  if (currentGameSession.presenter_player_id !== params.presenterPlayerId) {
+    throw new Error("只有本局出题人可以进入下一题。");
+  }
+
+  const expectedQuestionIndex = resolveExpectedQuestionIndex(params.expectedQuestionIndex);
+  const completedTransition = await getCompletedQuestionTransitionResult(currentGameSession, expectedQuestionIndex);
+  if (completedTransition) {
+    return completedTransition;
+  }
+
+  if (currentGameSession.status !== "PLAYING") {
+    throw new Error("进入下一题失败：当前游戏不存在或已结束。");
+  }
+
+  if (currentGameSession.current_question_index !== expectedQuestionIndex) {
+    throw new Error("题目状态已变化，请刷新后重试。");
   }
 
   const { data: room, error: roomLoadError } = await d1
@@ -4854,38 +5232,7 @@ export async function advanceReviewedQuestion(params: {
   const nextQuestionIndex = currentGameSession.current_question_index + 1;
 
   if (nextQuestionIndex >= questions.length) {
-    const { data: endedGameSession, error: endGameError } = await d1
-      .from("game_sessions")
-      .update({
-        status: "GAME_RESULT",
-        ended_at: new Date().toISOString(),
-      })
-      .eq("id", currentGameSession.id)
-      .select()
-      .single<DbGameSession>();
-
-    if (endGameError) {
-      throw new Error(endGameError.message);
-    }
-
-    const { data: updatedRoom, error: roomError } = await d1
-      .from("rooms")
-      .update({
-        game_status: "GAME_RESULT",
-      })
-      .eq("id", currentGameSession.room_id)
-      .eq("current_game_id", currentGameSession.id)
-      .select()
-      .single<DbRoom>();
-
-    if (roomError) {
-      throw new Error(roomError.message);
-    }
-
-    return {
-      gameSession: toGameSession(endedGameSession),
-      room: toRoom(updatedRoom),
-    };
+    return await finishGameAfterQuestionTransition(currentGameSession, expectedQuestionIndex);
   }
 
   const eligiblePlayerIds = await createQuestionEligibilitySnapshot({
@@ -4914,11 +5261,31 @@ export async function advanceReviewedQuestion(params: {
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)
+    .eq("status", "PLAYING")
+    .eq("current_question_index", expectedQuestionIndex)
     .select()
-    .single<DbGameSession>();
+    .maybeSingle<DbGameSession>();
 
   if (error) {
     throw new Error(error.message);
+  }
+
+  if (!updatedGameSession) {
+    const { data: latestGameSession, error: latestError } = await d1
+      .from("game_sessions")
+      .select("*")
+      .eq("id", currentGameSession.id)
+      .maybeSingle<DbGameSession>();
+    if (latestError) {
+      throw new Error(latestError.message);
+    }
+    const completed = latestGameSession
+      ? await getCompletedQuestionTransitionResult(latestGameSession, expectedQuestionIndex)
+      : null;
+    if (completed) {
+      return completed;
+    }
+    throw new Error("题目状态已变化，请刷新后重试。");
   }
 
   const hydratedGameSession = {
@@ -5078,6 +5445,7 @@ export async function updateQuestionLabel(params: {
 export async function skipCurrentQuestion(params: {
   gameSessionId: string;
   presenterPlayerId: string;
+  expectedQuestionIndex?: number;
 }) {
   assertD1Env();
 
@@ -5085,8 +5453,6 @@ export async function skipCurrentQuestion(params: {
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
-    .eq("presenter_player_id", params.presenterPlayerId)
-    .eq("status", "PLAYING")
     .maybeSingle<DbGameSession>();
 
   if (currentError) {
@@ -5097,41 +5463,29 @@ export async function skipCurrentQuestion(params: {
     throw new Error("跳过题目失败：当前游戏不存在，或你不是出题人。");
   }
 
+  if (currentGameSession.presenter_player_id !== params.presenterPlayerId) {
+    throw new Error("跳过题目失败：当前游戏不存在，或你不是出题人。");
+  }
+
+  const expectedQuestionIndex = resolveExpectedQuestionIndex(params.expectedQuestionIndex);
+  const completedTransition = await getCompletedQuestionTransitionResult(currentGameSession, expectedQuestionIndex);
+  if (completedTransition) {
+    return completedTransition;
+  }
+
+  if (currentGameSession.status !== "PLAYING") {
+    throw new Error("跳过题目失败：当前游戏不存在，或你不是出题人。");
+  }
+
+  if (currentGameSession.current_question_index !== expectedQuestionIndex) {
+    throw new Error("题目状态已变化，请刷新后重试。");
+  }
+
   const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
   const nextQuestionIndex = currentGameSession.current_question_index + 1;
 
   if (nextQuestionIndex >= questions.length) {
-    const { data: endedGameSession, error: endGameError } = await d1
-      .from("game_sessions")
-      .update({
-        status: "GAME_RESULT",
-        ended_at: new Date().toISOString(),
-      })
-      .eq("id", currentGameSession.id)
-      .select()
-      .single<DbGameSession>();
-
-    if (endGameError) {
-      throw new Error(endGameError.message);
-    }
-
-    const { data: updatedRoom, error: roomError } = await d1
-      .from("rooms")
-      .update({
-        game_status: "GAME_RESULT",
-      })
-      .eq("id", currentGameSession.room_id)
-      .select()
-      .single<DbRoom>();
-
-    if (roomError) {
-      throw new Error(roomError.message);
-    }
-
-    return {
-      gameSession: toGameSession(endedGameSession),
-      room: toRoom(updatedRoom),
-    };
+    return await finishGameAfterQuestionTransition(currentGameSession, expectedQuestionIndex);
   }
 
   const eligiblePlayerIds = await createQuestionEligibilitySnapshot({
@@ -5161,11 +5515,31 @@ export async function skipCurrentQuestion(params: {
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)
+    .eq("status", "PLAYING")
+    .eq("current_question_index", expectedQuestionIndex)
     .select()
-    .single<DbGameSession>();
+    .maybeSingle<DbGameSession>();
 
   if (error) {
     throw new Error(error.message);
+  }
+
+  if (!updatedGameSession) {
+    const { data: latestGameSession, error: latestError } = await d1
+      .from("game_sessions")
+      .select("*")
+      .eq("id", currentGameSession.id)
+      .maybeSingle<DbGameSession>();
+    if (latestError) {
+      throw new Error(latestError.message);
+    }
+    const completed = latestGameSession
+      ? await getCompletedQuestionTransitionResult(latestGameSession, expectedQuestionIndex)
+      : null;
+    if (completed) {
+      return completed;
+    }
+    throw new Error("题目状态已变化，请刷新后重试。");
   }
 
   const hydratedGameSession = {

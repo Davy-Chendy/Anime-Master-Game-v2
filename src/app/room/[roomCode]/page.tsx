@@ -49,6 +49,9 @@ const statusText: Record<RoomStatus, string> = {
   GAME_RESULT: "本局结算",
 };
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const START_GAME_ATTEMPT_STORAGE_PREFIX = "anime-master:start-game-attempt:";
+const START_GAME_ATTEMPT_TTL_MS = 30 * 60 * 1000;
+const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
 const gameResultSnapshotCache = new Map<string, GameResultSnapshot>();
 
 type GameSettings = {
@@ -64,6 +67,59 @@ const defaultGameSettings: GameSettings = {
   roundSeconds: 60,
   roundScores: [5, 3, 1],
 };
+
+function createStartRequestId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `start_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+type StartGameAttempt = {
+  key: string;
+  requestId: string;
+  createdAt: number;
+};
+
+function getStoredStartGameAttempt(roomId: string): StartGameAttempt | null {
+  try {
+    const storageKey = `${START_GAME_ATTEMPT_STORAGE_PREFIX}${roomId}`;
+    const value = window.sessionStorage.getItem(storageKey);
+    if (!value) {
+      return null;
+    }
+
+    const parsed = JSON.parse(value) as { key?: unknown; requestId?: unknown; createdAt?: unknown };
+    if (
+      typeof parsed.key === "string" &&
+      typeof parsed.requestId === "string" &&
+      typeof parsed.createdAt === "number" &&
+      Date.now() - parsed.createdAt < START_GAME_ATTEMPT_TTL_MS
+    ) {
+      return { key: parsed.key, requestId: parsed.requestId, createdAt: parsed.createdAt };
+    }
+
+    window.sessionStorage.removeItem(storageKey);
+  } catch {
+    // sessionStorage may be unavailable in restricted browsing modes.
+  }
+
+  return null;
+}
+
+function storeStartGameAttempt(roomId: string, attempt: StartGameAttempt | null) {
+  try {
+    const storageKey = `${START_GAME_ATTEMPT_STORAGE_PREFIX}${roomId}`;
+    if (attempt) {
+      window.sessionStorage.setItem(storageKey, JSON.stringify(attempt));
+    } else {
+      window.sessionStorage.removeItem(storageKey);
+    }
+  } catch {
+    // The in-memory ref still preserves retries while this page remains mounted.
+  }
+}
 
 function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
   const rawMaxRevealRounds =
@@ -1646,10 +1702,20 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
   const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
   const settingsUpdateSeqRef = useRef(0);
+  const startGameAttemptRef = useRef<StartGameAttempt | null>(null);
   const lastRoomRealtimeVersionRef = useRef<number | null>(null);
   const missedRoomRealtimeVersionRef = useRef(false);
   const roomCatchUpTargetVersionRef = useRef<number | null>(null);
   const [gameSettings, setGameSettings] = useState<GameSettings>(defaultGameSettings);
+
+  useEffect(() => {
+    if (room?.status !== "QUESTION_SETUP") {
+      startGameAttemptRef.current = null;
+      if (room?.id) {
+        storeStartGameAttempt(room.id, null);
+      }
+    }
+  }, [room?.id, room?.status]);
 
   useEffect(() => {
     if (!error) {
@@ -2212,20 +2278,63 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       return;
     }
 
+    const roomId = room.id;
+    const presenterPlayerId = room.currentPresenterPlayerId;
+    const questionSetId = room.preparedQuestionSetId;
+
     setIsStartingGame(true);
     setError("");
 
     try {
-      const started = await startGameWithQuestionSet({
-        roomId: room.id,
-        hostPlayerId: playerId,
-        presenterPlayerId: room.currentPresenterPlayerId,
-        questionSetId: room.preparedQuestionSetId,
-        gameMode: gameSettings.gameMode,
-        maxRevealRounds: gameSettings.maxRevealRounds,
-        roundSeconds: gameSettings.roundSeconds,
-        roundScores: gameSettings.roundScores,
-      });
+      const startAttemptKey = JSON.stringify([
+        roomId,
+        presenterPlayerId,
+        questionSetId,
+      ]);
+      if (!startGameAttemptRef.current) {
+        startGameAttemptRef.current = getStoredStartGameAttempt(roomId);
+      }
+      if (startGameAttemptRef.current?.key !== startAttemptKey) {
+        startGameAttemptRef.current = {
+          key: startAttemptKey,
+          requestId: createStartRequestId(),
+          createdAt: Date.now(),
+        };
+        storeStartGameAttempt(roomId, startGameAttemptRef.current);
+      }
+
+      const requestStart = (startRequestId: string) =>
+        startGameWithQuestionSet({
+          startRequestId,
+          roomId,
+          hostPlayerId: playerId,
+          presenterPlayerId,
+          questionSetId,
+          gameMode: gameSettings.gameMode,
+          maxRevealRounds: gameSettings.maxRevealRounds,
+          roundSeconds: gameSettings.roundSeconds,
+          roundScores: gameSettings.roundScores,
+        });
+
+      let started: Awaited<ReturnType<typeof requestStart>>;
+      try {
+        started = await requestStart(startGameAttemptRef.current.requestId);
+      } catch (startError) {
+        if (!(startError instanceof Error) || !startError.message.includes(START_GAME_REQUEST_ID_CONFLICT)) {
+          throw startError;
+        }
+
+        startGameAttemptRef.current = {
+          key: startAttemptKey,
+          requestId: createStartRequestId(),
+          createdAt: Date.now(),
+        };
+        storeStartGameAttempt(roomId, startGameAttemptRef.current);
+        started = await requestStart(startGameAttemptRef.current.requestId);
+      }
+
+      startGameAttemptRef.current = null;
+      storeStartGameAttempt(roomId, null);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...started.room, players: currentRoom.players } : started.room));
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "开始游戏失败，请稍后重试");

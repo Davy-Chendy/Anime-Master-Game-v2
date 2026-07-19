@@ -200,6 +200,7 @@ export const updateRoomGameSettings = (params: {
 }) => rpc<Room>("updateRoomGameSettings", params);
 
 export const startGameWithQuestionSet = (params: {
+  startRequestId: string;
   roomId: string;
   hostPlayerId: string;
   presenterPlayerId: string;
@@ -344,7 +345,11 @@ export const gradeAnswersAndAdvance = (params: {
   correctPlayerIds: string[];
 }) => rpc<{ gameSession: GameSession; room: Room | null; newlyScoredPlayerIds: string[] }>("gradeAnswersAndAdvance", params);
 
-export const advanceReviewedQuestion = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+export const advanceReviewedQuestion = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+}) =>
   rpc<{ gameSession: GameSession; room: Room | null }>("advanceReviewedQuestion", params);
 
 export const updateQuestionLabel = (params: {
@@ -356,7 +361,11 @@ export const updateQuestionLabel = (params: {
   answerId?: string | null;
 }) => rpc<Question>("updateQuestionLabel", params);
 
-export const skipCurrentQuestion = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+export const skipCurrentQuestion = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+}) =>
   rpc<{ gameSession: GameSession; room: Room | null }>("skipCurrentQuestion", params);
 
 export const endCurrentGameEarly = (params: { gameSessionId: string; presenterPlayerId: string }) =>

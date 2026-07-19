@@ -2671,6 +2671,8 @@ export class RoomDurableObject {
 
   private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer, receivedAtMs = Date.now()): Promise<void> {
     let clientActionId: string | undefined;
+    let actionName: string | undefined;
+    let actionTopic: string | undefined;
     try {
       const payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as {
         type?: string;
@@ -2679,6 +2681,7 @@ export class RoomDurableObject {
         clientActionId?: string;
       };
       clientActionId = payload.clientActionId;
+      actionName = payload.name;
 
       if (payload.type === "ping") {
         socket.send(JSON.stringify({ type: "pong" }));
@@ -2692,6 +2695,7 @@ export class RoomDurableObject {
 
       const isMutation = MUTATION_NAMES.has(payload.name);
       const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+      actionTopic = socketAttachment?.topic;
       logRpcInvocation({ transport: "websocket", name: payload.name, isMutation, localTopic: socketAttachment?.topic });
 
       const actionKey = isMutation && payload.clientActionId ? `${payload.name}:${payload.clientActionId}` : "";
@@ -2783,6 +2787,16 @@ export class RoomDurableObject {
 
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult }));
     } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "game_rpc_error",
+          transport: "websocket",
+          name: actionName ?? null,
+          topic: actionTopic ?? null,
+          clientActionId: clientActionId ?? null,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
       socket.send(
         JSON.stringify({
           type: "action_result",

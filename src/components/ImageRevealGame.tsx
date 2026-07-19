@@ -2740,6 +2740,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     const skipped = await skipCurrentQuestion({
       gameSessionId: gameSession.id,
       presenterPlayerId: playerId,
+      expectedQuestionIndex: gameSession.currentQuestionIndex,
     });
     applyRoundSnapshotFromResult(skipped) || applyGameSession(skipped.gameSession);
     setImageLoadFailed(false);
@@ -2806,6 +2807,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     const advanced = await advanceReviewedQuestion({
       gameSessionId: gameSession.id,
       presenterPlayerId: playerId,
+      expectedQuestionIndex: gameSession.currentQuestionIndex,
     });
     applyRoundSnapshotFromResult(advanced) || applyGameSession(advanced.gameSession);
     setImageLoadFailed(false);
