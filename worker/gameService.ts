@@ -991,9 +991,7 @@ async function createQuestionEligibilitySnapshot(params: {
   questionIndex: number;
   presenterPlayerId: string;
 }) {
-  const players = await getCurrentRoomGamePlayers(params.roomId);
-  await createGameParticipantSnapshot(params.gameSessionId, players);
-  const eligiblePlayerIds = players.filter((player) => player.id !== params.presenterPlayerId).map((player) => player.id);
+  const eligiblePlayerIds = await getCurrentRoomEligiblePlayerIds(params.roomId, params.presenterPlayerId);
 
   return await insertQuestionEligibilitySnapshot({
     gameSessionId: params.gameSessionId,
@@ -1636,6 +1634,15 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   }
 
   const nextPlayers = await getDbPlayersByRoomId(room.id);
+  const joinedPlayer = nextPlayers.find((player) => player.id === playerId);
+  if (
+    room.game_status === "PLAYING" &&
+    room.current_game_id &&
+    joinedPlayer &&
+    isGamePlayer(joinedPlayer)
+  ) {
+    await createGameParticipantSnapshot(room.current_game_id, [joinedPlayer]);
+  }
 
   return {
     room: toRoom(room, nextPlayers),
