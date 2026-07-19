@@ -1802,6 +1802,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             .map((team) => ({
               team,
               score: teamBattleState.teamScores[team],
+              previousTurnAction:
+                (teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE") &&
+                teamBattleState.previousTurnAction?.team === team
+                  ? teamBattleState.previousTurnAction
+                  : null,
               members: teamBattleState.teams[team].flatMap((memberId) => {
                 const player = activePlayerById.get(memberId);
                 const hasActed =
@@ -2960,7 +2965,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         ) : null}
       </div>
       {isTeamBattleMode && teamBattleState ? (
-        <div className="min-h-0 overflow-y-auto pr-1">
+        <div className="flex min-h-0 flex-1 flex-col">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm">
             <span className="font-semibold text-slate-950">我的身份</span>
             <span
@@ -2975,31 +2980,40 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             </span>
           </div>
           <p className="mb-2 text-xs font-semibold text-[var(--muted)]">队伍</p>
-          <div className="grid gap-2">
-            {teamBattleScoreRows.map((row, index) => {
+          <div className="grid gap-2 lg:min-h-0 lg:flex-1 lg:grid-rows-2">
+            {teamBattleScoreRows.map((row) => {
               const isActiveTeam = teamBattleState.activeTeam === row.team;
               const tone = getTeamTone(row.team);
 
               return (
                 <div
                   className={[
-                    "rounded-md border px-3 py-3 text-sm",
+                    "flex min-h-0 flex-col overflow-hidden rounded-md border px-3 py-3 text-sm",
                     tone.panel,
                     isActiveTeam ? `ring-2 ${tone.ring}` : "",
                   ].join(" ")}
                   key={row.team}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-[var(--muted)]">#{row.rank}</p>
-                      <p className={["font-bold", tone.text].join(" ")}>
-                        {getTeamName(row.team)}
-                        {isActiveTeam ? " · 行动中" : ""}
-                      </p>
-                    </div>
-                    <span className="text-xl font-bold text-slate-950">{row.score}</span>
+                    <p className={["min-w-0 font-bold", tone.text].join(" ")}>
+                      {getTeamName(row.team)}
+                      {isActiveTeam ? " · 行动中" : ""}
+                    </p>
+                    <span className="text-xl font-bold text-[var(--primary)]">{row.score}</span>
                   </div>
-                  <div className="mt-3 grid gap-2">
+                  {row.previousTurnAction ? (
+                    <p className="mt-2 shrink-0 break-words text-xs font-semibold leading-5 text-slate-700">
+                      {row.previousTurnAction.type === "skip" ? (
+                        "上轮：选择不猜"
+                      ) : (
+                        <>
+                          上轮：猜「<span className="font-bold text-slate-950">{row.previousTurnAction.answerText}</span>」 · 猜错
+                        </>
+                      )}
+                    </p>
+                  ) : null}
+                  <div className="my-3 h-px shrink-0 bg-slate-900/10" />
+                  <div className="grid min-h-0 gap-2 lg:flex-1 lg:auto-rows-max lg:overflow-y-auto lg:pr-1">
                     {row.members.map((member) => (
                       <div
                         className={[

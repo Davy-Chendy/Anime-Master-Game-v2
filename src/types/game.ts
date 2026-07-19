@@ -20,6 +20,17 @@ export type TeamBattleGuessVote = {
   answerText?: string;
 };
 
+export type TeamBattlePreviousTurnAction =
+  | {
+      team: TeamBattleTeam;
+      type: "skip";
+    }
+  | {
+      team: TeamBattleTeam;
+      type: "guess";
+      answerText: string;
+    };
+
 export type TeamBattleState = {
   teams: Record<TeamBattleTeam, string[]>;
   initialTeams?: Record<TeamBattleTeam, string[]>;
@@ -32,6 +43,7 @@ export type TeamBattleState = {
   voteDeadlineAt?: string | null;
   revealVotes: Record<string, number[]>;
   guessVotes: Record<string, TeamBattleGuessVote>;
+  previousTurnAction?: TeamBattlePreviousTurnAction | null;
   pendingGuess?: {
     team: TeamBattleTeam;
     answerText: string;

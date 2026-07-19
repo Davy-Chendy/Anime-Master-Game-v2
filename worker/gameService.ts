@@ -27,6 +27,7 @@ import type {
   RoundSnapshot,
   Room,
   TeamBattleGuessVote,
+  TeamBattlePreviousTurnAction,
   TeamBattleState,
   TeamBattleTeam,
 } from "../src/types/game";
@@ -297,6 +298,7 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     voteDeadlineAt: typeof record.voteDeadlineAt === "string" ? record.voteDeadlineAt : null,
     revealVotes: normalizeRevealVotes(record.revealVotes),
     guessVotes: normalizeGuessVotes(record.guessVotes),
+    previousTurnAction: normalizePreviousTurnAction(record.previousTurnAction),
     pendingGuess:
       record.pendingGuess &&
       typeof record.pendingGuess === "object" &&
@@ -313,6 +315,27 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     },
     message: typeof record.message === "string" ? record.message : null,
   };
+}
+
+function normalizePreviousTurnAction(value: unknown): TeamBattlePreviousTurnAction | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as { team?: unknown; type?: unknown; answerText?: unknown };
+  if (record.team !== "red" && record.team !== "blue") {
+    return null;
+  }
+
+  if (record.type === "skip") {
+    return { team: record.team, type: "skip" };
+  }
+
+  if (record.type === "guess" && typeof record.answerText === "string" && record.answerText.trim()) {
+    return { team: record.team, type: "guess", answerText: record.answerText.trim() };
+  }
+
+  return null;
 }
 
 function normalizeTeamMemberNames(value: unknown) {
@@ -404,6 +427,7 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    previousTurnAction: null,
     pendingGuess: null,
     teamScores: previousScores ?? { red: 0, blue: 0 },
     message: "红队先手，请投票选择要打开的方块。",
@@ -475,6 +499,7 @@ async function resetTeamBattleStateForQuestion(
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    previousTurnAction: null,
     pendingGuess: null,
     teamScores: state.teamScores,
     message: newGuessers.length > 0
@@ -4467,6 +4492,10 @@ export async function finalizeTeamBattleVote(params: {
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
+      previousTurnAction: {
+        team: state.activeTeam,
+        type: "skip",
+      },
       pendingGuess: null,
       turnNumber: state.turnNumber + 1,
       message:
@@ -4554,6 +4583,11 @@ export async function judgeTeamBattleGuess(params: {
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
+      previousTurnAction: {
+        team: state.pendingGuess.team,
+        type: "guess",
+        answerText: state.pendingGuess.answerText,
+      },
       pendingGuess: null,
       turnNumber: state.turnNumber + 1,
       message:
