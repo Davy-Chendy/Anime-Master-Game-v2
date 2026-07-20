@@ -90,6 +90,15 @@ type TeamBattleVoteAlarmState = {
   attempts?: number;
 };
 
+type GameRpcErrorLogContext = {
+  roomId?: string | null;
+  gameSessionId?: string | null;
+  questionIndex?: number | null;
+  expectedQuestionIndex?: number | null;
+  playerCount?: number | null;
+  eligiblePlayerCount?: number | null;
+};
+
 const ACTION_RESULT_TTL_MS = 10_000;
 const ROUND_SNAPSHOT_CACHE_TTL_MS = 1_000;
 const BOOTSTRAP_SNAPSHOT_CACHE_TTL_MS = 2_000;
@@ -120,6 +129,18 @@ const ROOM_CLEANUP_IDLE_MS = 48 * 60 * 60 * 1000;
 const ROOM_CLEANUP_MAX_ROOMS_PER_RUN = 50;
 const ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN = 100;
 const ROOM_CLEANUP_SQL_CHUNK_SIZE = 50;
+const RPC_LOG_ID_MAX_LENGTH = 160;
+const RPC_LOG_NAME_MAX_LENGTH = 120;
+const RPC_LOG_ERROR_MAX_LENGTH = 4000;
+const GAME_SESSION_ID_STRING_ARG_NAMES = new Set([
+  "getGameBootstrapSnapshot",
+  "getGameResultSnapshot",
+  "getGameSessionById",
+  "getLeaderboardForGameSession",
+  "getPlayerScores",
+  "getQuestionResultsForGameSession",
+  "getRoundSnapshot",
+]);
 const DEFAULT_REMOTE_IMAGE_PROXY_CANDIDATES = [
   "https://corsproxy.io/?url=",
   "https://api.allorigins.win/raw?url=",
@@ -510,6 +531,77 @@ function getResultGameSession(result: unknown) {
     return asGameSession(result.gameSession) ?? asGameSession(result);
   }
   return null;
+}
+
+function sanitizeLogString(value: unknown, maxLength: number) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function getRoomIdFromTopic(topic: string | null | undefined) {
+  const normalizedTopic = sanitizeLogString(topic, RPC_LOG_ID_MAX_LENGTH);
+  return normalizedTopic?.startsWith("room:") ? normalizedTopic.slice("room:".length) || null : null;
+}
+
+function getSafeInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function getGameRpcArgumentLogContext(name: string | undefined, args: unknown[]): GameRpcErrorLogContext {
+  const firstArg = args[0];
+  if (isRecord(firstArg)) {
+    return {
+      roomId: sanitizeLogString(firstArg.roomId, RPC_LOG_ID_MAX_LENGTH),
+      gameSessionId:
+        sanitizeLogString(firstArg.gameSessionId, RPC_LOG_ID_MAX_LENGTH) ??
+        (name === "startGameWithQuestionSet" ? sanitizeLogString(firstArg.startRequestId, RPC_LOG_ID_MAX_LENGTH) : null),
+      questionIndex: getSafeInteger(firstArg.questionIndex),
+      expectedQuestionIndex: getSafeInteger(firstArg.expectedQuestionIndex),
+    };
+  }
+
+  if (typeof firstArg === "string" && name && GAME_SESSION_ID_STRING_ARG_NAMES.has(name)) {
+    return {
+      gameSessionId: sanitizeLogString(firstArg, RPC_LOG_ID_MAX_LENGTH),
+    };
+  }
+
+  return {};
+}
+
+function getGameSessionEligiblePlayerCount(gameSession: GameSession | null | undefined) {
+  if (!gameSession?.eligiblePlayerIds) {
+    return null;
+  }
+
+  return new Set(gameSession.eligiblePlayerIds).size;
+}
+
+function getRoomPlayerCount(room: Room | null | undefined) {
+  if (!room || room.players.length === 0) {
+    return null;
+  }
+
+  return room.players.filter((player) => player.role !== "SPECTATOR").length;
+}
+
+function getErrorLogDetails(error: unknown) {
+  const errorRecord = isRecord(error) ? error : null;
+  const errorCode = errorRecord?.code;
+
+  return {
+    error: sanitizeLogString(error instanceof Error ? error.message : String(error), RPC_LOG_ERROR_MAX_LENGTH),
+    errorName: sanitizeLogString(error instanceof Error ? error.name : typeof error, RPC_LOG_NAME_MAX_LENGTH),
+    errorCode:
+      typeof errorCode === "string" || typeof errorCode === "number"
+        ? sanitizeLogString(String(errorCode), RPC_LOG_NAME_MAX_LENGTH)
+        : null,
+    errorStack: sanitizeLogString(error instanceof Error ? error.stack : null, RPC_LOG_ERROR_MAX_LENGTH),
+  };
 }
 
 function getAutoForfeitGameSession(result: unknown, roundSnapshot: RoundSnapshot | null) {
@@ -2228,6 +2320,7 @@ export class RoomDurableObject {
   private readonly bootstrapSnapshotReadInflight = new Map<string, Promise<GameBootstrapSnapshot>>();
   private readonly gameResultSnapshotReadInflight = new Map<string, Promise<GameResultSnapshot>>();
   private readonly roundSnapshotCacheGeneration = new Map<string, number>();
+  private readonly roomPlayerCountByTopic = new Map<string, number>();
   private actionQueue: Promise<void> = Promise.resolve();
   private r2UploadQueue: Promise<void> = Promise.resolve();
   private realtimeVersionQueue: Promise<void> = Promise.resolve();
@@ -2237,6 +2330,118 @@ export class RoomDurableObject {
   private nextRoundSnapshotCacheCleanupAt: number | null = null;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
+
+  private rememberRoomPlayerCount(topic: string | null | undefined, result: unknown) {
+    const normalizedTopic = sanitizeLogString(topic, RPC_LOG_ID_MAX_LENGTH);
+    const playerCount = getRoomPlayerCount(getResultRoom(result));
+    if (normalizedTopic && playerCount != null) {
+      this.roomPlayerCountByTopic.set(normalizedTopic, playerCount);
+    }
+  }
+
+  private getCachedGameSessionForLog(gameSessionId: string | null | undefined) {
+    if (!gameSessionId) {
+      return null;
+    }
+
+    return this.getCachedRoundSnapshot(gameSessionId)?.gameSession ??
+      this.getCachedBootstrapSnapshot(gameSessionId)?.gameSession ??
+      this.getCachedGameResultSnapshot(gameSessionId)?.gameSession ??
+      null;
+  }
+
+  private getGameRpcErrorLogContext(
+    name: string | undefined,
+    args: unknown[],
+    topic: string | null | undefined,
+    knownContext: GameRpcErrorLogContext = {},
+  ): GameRpcErrorLogContext {
+    const argumentContext = getGameRpcArgumentLogContext(name, args);
+    const gameSessionId = knownContext.gameSessionId ?? argumentContext.gameSessionId ?? null;
+    const cachedGameSession = this.getCachedGameSessionForLog(gameSessionId);
+    const normalizedTopic = sanitizeLogString(topic, RPC_LOG_ID_MAX_LENGTH);
+    const roomPlayerCount = normalizedTopic ? this.roomPlayerCountByTopic.get(normalizedTopic) ?? null : null;
+    const eligiblePlayerCount = getGameSessionEligiblePlayerCount(cachedGameSession);
+
+    return {
+      roomId:
+        knownContext.roomId ??
+        argumentContext.roomId ??
+        cachedGameSession?.roomId ??
+        getRoomIdFromTopic(normalizedTopic),
+      gameSessionId: gameSessionId ?? cachedGameSession?.id ?? null,
+      questionIndex:
+        knownContext.questionIndex ??
+        cachedGameSession?.currentQuestionIndex ??
+        argumentContext.questionIndex ??
+        null,
+      expectedQuestionIndex: knownContext.expectedQuestionIndex ?? argumentContext.expectedQuestionIndex ?? null,
+      playerCount: knownContext.playerCount ?? roomPlayerCount ?? null,
+      eligiblePlayerCount: knownContext.eligiblePlayerCount ?? eligiblePlayerCount ?? null,
+    };
+  }
+
+  private enrichGameRpcErrorLogContext(
+    current: GameRpcErrorLogContext,
+    result: unknown,
+    roundSnapshot: RoundSnapshot | null,
+    topic: string | null | undefined,
+  ) {
+    const room = getResultRoom(result);
+    const gameSession = roundSnapshot?.gameSession ?? getResultGameSession(result);
+    const roomPlayerCount = getRoomPlayerCount(room);
+    const eligiblePlayerCount = getGameSessionEligiblePlayerCount(gameSession);
+    this.rememberRoomPlayerCount(topic, result);
+
+    return {
+      roomId: room?.id ?? gameSession?.roomId ?? current.roomId ?? getRoomIdFromTopic(topic),
+      gameSessionId: gameSession?.id ?? current.gameSessionId ?? null,
+      questionIndex: gameSession?.currentQuestionIndex ?? current.questionIndex ?? null,
+      expectedQuestionIndex: current.expectedQuestionIndex ?? null,
+      playerCount: roomPlayerCount ?? current.playerCount ?? null,
+      eligiblePlayerCount: eligiblePlayerCount ?? current.eligiblePlayerCount ?? null,
+    } satisfies GameRpcErrorLogContext;
+  }
+
+  private logGameRpcError(params: {
+    name?: string;
+    args?: unknown[];
+    topic?: string | null;
+    clientActionId?: string;
+    receivedAtMs?: number;
+    context?: GameRpcErrorLogContext;
+    error: unknown;
+  }) {
+    try {
+      const context = this.getGameRpcErrorLogContext(params.name, params.args ?? [], params.topic, params.context);
+      console.error(
+        JSON.stringify({
+          event: "game_rpc_error",
+          transport: "websocket",
+          name: sanitizeLogString(params.name, RPC_LOG_NAME_MAX_LENGTH),
+          topic: sanitizeLogString(params.topic, RPC_LOG_ID_MAX_LENGTH),
+          doId: sanitizeLogString(this.state.id.toString(), RPC_LOG_ID_MAX_LENGTH),
+          roomId: sanitizeLogString(context.roomId, RPC_LOG_ID_MAX_LENGTH),
+          gameSessionId: sanitizeLogString(context.gameSessionId, RPC_LOG_ID_MAX_LENGTH),
+          questionIndex: context.questionIndex ?? null,
+          expectedQuestionIndex: context.expectedQuestionIndex ?? null,
+          playerCount: context.playerCount ?? null,
+          eligiblePlayerCount: context.eligiblePlayerCount ?? null,
+          clientActionId: sanitizeLogString(params.clientActionId, RPC_LOG_ID_MAX_LENGTH),
+          durationMs:
+            typeof params.receivedAtMs === "number" && Number.isFinite(params.receivedAtMs)
+              ? Math.max(0, Date.now() - params.receivedAtMs)
+              : null,
+          ...getErrorLogDetails(params.error),
+        }),
+      );
+    } catch (loggingError) {
+      logAuxiliaryFailure("game_rpc_error_logging_failed", loggingError, {
+        name: sanitizeLogString(params.name, RPC_LOG_NAME_MAX_LENGTH),
+        topic: sanitizeLogString(params.topic, RPC_LOG_ID_MAX_LENGTH),
+      });
+    }
+  }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -2272,6 +2477,7 @@ export class RoomDurableObject {
       }
 
       try {
+        this.rememberRoomPlayerCount(parsedMessage.topic, parsedMessage.result);
         this.invalidateRoundSnapshotCachesForMutation(parsedMessage.name, parsedMessage.result);
         const gameResultSnapshot = getBroadcastGameResultSnapshot(parsedMessage);
         if (gameResultSnapshot) {
@@ -2351,7 +2557,10 @@ export class RoomDurableObject {
       const localTopic = request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER);
       return await handleRpc(request, this.env, {
         localTopic,
-        localBroadcast: (message) => this.broadcastChangeMessage(message),
+        localBroadcast: (message) => {
+          this.rememberRoomPlayerCount(message.topic, message.result);
+          return this.broadcastChangeMessage(message);
+        },
         localCacheGameResult: (snapshot) => this.cacheGameResultSnapshot(snapshot),
         localInvalidateRoundSnapshots: (gameSessionId) => this.invalidateRoundSnapshotCaches(gameSessionId),
         localScheduleAutoForfeit: (message) => this.updateAutoForfeitSchedule(message.result, message.roundSnapshot, message.topic),
@@ -2467,6 +2676,8 @@ export class RoomDurableObject {
   }
 
   private async handleRoundSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
+    const receivedAtMs = Date.now();
+    let ownsInflightRead = false;
     try {
       const cachedRoundSnapshot = this.getCachedRoundSnapshot(gameSessionId);
       if (cachedRoundSnapshot) {
@@ -2476,6 +2687,7 @@ export class RoomDurableObject {
 
       let snapshotPromise = this.roundSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
+        ownsInflightRead = true;
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
         const cacheGeneration = this.getRoundSnapshotCacheGeneration(gameSessionId);
         snapshotPromise = this.loadRoundSnapshotForRead(
@@ -2501,6 +2713,17 @@ export class RoomDurableObject {
       const snapshot = await snapshotPromise;
       socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
     } catch (error) {
+      if (ownsInflightRead) {
+        const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        this.logGameRpcError({
+          name: "getRoundSnapshot",
+          args: [gameSessionId],
+          topic: socketAttachment?.topic,
+          clientActionId,
+          receivedAtMs,
+          error,
+        });
+      }
       socket.send(
         JSON.stringify({
           type: "action_result",
@@ -2549,6 +2772,8 @@ export class RoomDurableObject {
   }
 
   private async handleBootstrapSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
+    const receivedAtMs = Date.now();
+    let ownsInflightRead = false;
     try {
       const cachedSnapshot = this.getCachedBootstrapSnapshot(gameSessionId);
       if (cachedSnapshot) {
@@ -2558,6 +2783,7 @@ export class RoomDurableObject {
 
       let snapshotPromise = this.bootstrapSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
+        ownsInflightRead = true;
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
         const cacheGeneration = this.getRoundSnapshotCacheGeneration(gameSessionId);
         snapshotPromise = this.loadBootstrapSnapshotForRead(
@@ -2583,6 +2809,17 @@ export class RoomDurableObject {
       const snapshot = await snapshotPromise;
       socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
     } catch (error) {
+      if (ownsInflightRead) {
+        const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        this.logGameRpcError({
+          name: "getGameBootstrapSnapshot",
+          args: [gameSessionId],
+          topic: socketAttachment?.topic,
+          clientActionId,
+          receivedAtMs,
+          error,
+        });
+      }
       socket.send(JSON.stringify({ type: "action_result", clientActionId, error: toUserErrorMessage(error) }));
     }
   }
@@ -2626,6 +2863,8 @@ export class RoomDurableObject {
   }
 
   private async handleGameResultSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
+    const receivedAtMs = Date.now();
+    let ownsInflightRead = false;
     try {
       const cachedSnapshot = this.getCachedGameResultSnapshot(gameSessionId);
       if (cachedSnapshot) {
@@ -2635,6 +2874,7 @@ export class RoomDurableObject {
 
       let snapshotPromise = this.gameResultSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
+        ownsInflightRead = true;
         snapshotPromise = this.loadGameResultSnapshotForRead(gameSessionId);
         this.gameResultSnapshotReadInflight.set(gameSessionId, snapshotPromise);
         void snapshotPromise.then(
@@ -2654,6 +2894,17 @@ export class RoomDurableObject {
       const snapshot = await snapshotPromise;
       socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
     } catch (error) {
+      if (ownsInflightRead) {
+        const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+        this.logGameRpcError({
+          name: "getGameResultSnapshot",
+          args: [gameSessionId],
+          topic: socketAttachment?.topic,
+          clientActionId,
+          receivedAtMs,
+          error,
+        });
+      }
       socket.send(JSON.stringify({ type: "action_result", clientActionId, error: toUserErrorMessage(error) }));
     }
   }
@@ -2670,9 +2921,12 @@ export class RoomDurableObject {
   }
 
   private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer, receivedAtMs = Date.now()): Promise<void> {
+    const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
     let clientActionId: string | undefined;
     let actionName: string | undefined;
-    let actionTopic: string | undefined;
+    const actionTopic = socketAttachment?.topic;
+    let actionArgs: unknown[] = [];
+    let actionLogContext: GameRpcErrorLogContext = {};
     try {
       const payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as {
         type?: string;
@@ -2682,6 +2936,7 @@ export class RoomDurableObject {
       };
       clientActionId = payload.clientActionId;
       actionName = payload.name;
+      actionArgs = payload.args ?? [];
 
       if (payload.type === "ping") {
         socket.send(JSON.stringify({ type: "pong" }));
@@ -2694,8 +2949,7 @@ export class RoomDurableObject {
       }
 
       const isMutation = MUTATION_NAMES.has(payload.name);
-      const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
-      actionTopic = socketAttachment?.topic;
+      actionLogContext = this.getGameRpcErrorLogContext(payload.name, actionArgs, actionTopic);
       logRpcInvocation({ transport: "websocket", name: payload.name, isMutation, localTopic: socketAttachment?.topic });
 
       const actionKey = isMutation && payload.clientActionId ? `${payload.name}:${payload.clientActionId}` : "";
@@ -2730,7 +2984,9 @@ export class RoomDurableObject {
 
       const { deltas, gameResultSnapshot, roundSnapshot, responseResult, topic } = await runWithGameDatabase(this.env, async () => {
         const result = await callGameFunction(payload.name ?? "", payload.args ?? [], receivedAtMs);
+        actionLogContext = this.enrichGameRpcErrorLogContext(actionLogContext, result, null, actionTopic);
         const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
+        actionLogContext = this.enrichGameRpcErrorLogContext(actionLogContext, result, nextRoundSnapshot, actionTopic);
         const nextGameResultSnapshot = await getGameResultSnapshotForMutation(payload.name ?? "", result);
         const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
         const nextTopic = isMutation
@@ -2749,6 +3005,12 @@ export class RoomDurableObject {
           topic: nextTopic,
         };
       });
+      actionLogContext = this.enrichGameRpcErrorLogContext(
+        actionLogContext,
+        responseResult,
+        roundSnapshot,
+        topic ?? actionTopic,
+      );
       this.invalidateRoundSnapshotCachesForMutation(payload.name ?? "", responseResult);
       if (gameResultSnapshot) {
         await this.cacheGameResultSnapshot(gameResultSnapshot);
@@ -2787,16 +3049,15 @@ export class RoomDurableObject {
 
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult }));
     } catch (error) {
-      console.error(
-        JSON.stringify({
-          event: "game_rpc_error",
-          transport: "websocket",
-          name: actionName ?? null,
-          topic: actionTopic ?? null,
-          clientActionId: clientActionId ?? null,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
+      this.logGameRpcError({
+        name: actionName,
+        args: actionArgs,
+        topic: actionTopic,
+        clientActionId,
+        receivedAtMs,
+        context: actionLogContext,
+        error,
+      });
       socket.send(
         JSON.stringify({
           type: "action_result",
