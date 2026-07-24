@@ -948,33 +948,30 @@ export function QuestionSetUploader({
                           {item.description}
                         </p>
                       ) : null}
-                      <p className="mt-1 text-xs text-[var(--muted)]">
-                        {item.imageCount} 题 · {Number(item.ratingAvg).toFixed(1)} 分（{item.ratingCount} 人评分）· 开局 {item.playCount} 次
-                      </p>
-                    </div>
-                    <div className="flex min-w-0 items-center justify-between gap-3 md:shrink-0 md:justify-end">
-                      <p
-                        className="min-w-0 truncate whitespace-nowrap text-xs text-[var(--muted)] md:text-right"
-                        title={`创建于 ${formatQuestionSetCreatedAt(item)} · ${getQuestionSetUploaderName(item)}上传`}
-                      >
-                        创建于 {formatQuestionSetCreatedAt(item)} ·{" "}
-                        <span className="inline-block max-w-24 truncate align-bottom lg:max-w-40" title={getQuestionSetUploaderName(item)}>
-                          {getQuestionSetUploaderName(item)}上传
+                      <p className="mt-1 flex min-w-0 items-baseline gap-x-4 text-xs">
+                        <span className="shrink-0 text-slate-600">
+                          {item.imageCount} 题 · {Number(item.ratingAvg).toFixed(1)} 分（{item.ratingCount} 评）· 开局 {item.playCount} 次
+                        </span>
+                        <span
+                          className="min-w-0 truncate text-slate-500"
+                          title={`${formatQuestionSetCreatedAt(item)} · 上传者 ${getQuestionSetUploaderName(item)}`}
+                        >
+                          {formatQuestionSetCreatedAt(item)} · 上传者 {getQuestionSetUploaderName(item)}
                         </span>
                       </p>
-                      <div className="flex shrink-0 gap-2">
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          onClick={() => handlePreviewCommunitySet(item)}
-                          disabled={loadingCommunityPreviewId === item.id}
-                        >
-                          {loadingCommunityPreviewId === item.id ? "加载中…" : "预览"}
-                        </Button>
-                        <Button type="button" onClick={() => handleSelectCommunitySet(item)}>
-                          选择
-                        </Button>
-                      </div>
+                    </div>
+                    <div className="flex shrink-0 self-end gap-2 md:self-auto">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => handlePreviewCommunitySet(item)}
+                        disabled={loadingCommunityPreviewId === item.id}
+                      >
+                        {loadingCommunityPreviewId === item.id ? "加载中…" : "预览"}
+                      </Button>
+                      <Button type="button" onClick={() => handleSelectCommunitySet(item)}>
+                        选择
+                      </Button>
                     </div>
                   </div>
                 </div>
