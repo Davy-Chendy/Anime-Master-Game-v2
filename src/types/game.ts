@@ -97,6 +97,31 @@ export type DbPlayer = {
 
 export type QuestionSetSource = "uploaded" | "community";
 
+export type CommunityQuestionSetSort = "latest" | "rating" | "plays";
+
+export type CommunityQuestionSetSummary = {
+  id: string;
+  title: string;
+  description?: string | null;
+  createdByPlayerId: string;
+  createdByNickname?: string | null;
+  source: QuestionSetSource;
+  isPublic: boolean;
+  imageCount: number;
+  ratingAvg: number;
+  ratingCount: number;
+  playCount: number;
+  createdAt: string;
+  updatedAt?: string | null;
+};
+
+export type CommunityQuestionSetPage = {
+  items: CommunityQuestionSetSummary[];
+  total: number | null;
+  hasMore: boolean;
+  nextOffset: number;
+};
+
 export type QuestionSet = {
   id: string;
   title: string;
@@ -109,6 +134,7 @@ export type QuestionSet = {
   imageCount: number;
   ratingAvg: number;
   ratingCount: number;
+  playCount: number;
   createdAt: string;
   updatedAt?: string | null;
   questions?: Question[];
@@ -179,6 +205,7 @@ export type GameSession = {
   teamBattleState?: TeamBattleState | null;
   createdAt: string;
   endedAt?: string | null;
+  completedNormallyAt?: string | null;
 };
 
 export type Answer = {
@@ -319,6 +346,7 @@ export type DbQuestionSet = {
   image_count: number;
   rating_avg: number;
   rating_count: number;
+  play_count: number;
   created_at: string;
   updated_at?: string | null;
 };
@@ -353,6 +381,7 @@ export type DbGameSession = {
   round_started_at: string | null;
   created_at: string;
   ended_at: string | null;
+  completed_normally_at?: string | null;
 };
 
 export type DbAnswer = {

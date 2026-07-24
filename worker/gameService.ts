@@ -4,6 +4,9 @@ import { createD1QueryClient } from "./d1QueryCompat";
 import type {
   Answer,
   BuzzerAnswer,
+  CommunityQuestionSetPage,
+  CommunityQuestionSetSort,
+  CommunityQuestionSetSummary,
   DbAnswer,
   DbBuzzerAnswer,
   DbGameSession,
@@ -198,6 +201,7 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
     imageCount: questionSet.image_count,
     ratingAvg: questionSet.rating_avg,
     ratingCount: questionSet.rating_count,
+    playCount: questionSet.play_count ?? 0,
     createdAt: questionSet.created_at,
     updatedAt: questionSet.updated_at,
     questions: questions.map(toQuestion),
@@ -255,6 +259,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     teamBattleState,
     createdAt: gameSession.created_at,
     endedAt: gameSession.ended_at,
+    completedNormallyAt: gameSession.completed_normally_at ?? null,
   };
 }
 
@@ -2159,31 +2164,137 @@ export async function getQuestionSetById(questionSetId: string) {
   return toQuestionSet(questionSet, questions);
 }
 
-export async function getCommunityQuestionSets(sort: "latest" | "rating" = "latest") {
+const COMMUNITY_QUESTION_SET_PAGE_SIZE = 24;
+const COMMUNITY_QUESTION_SET_MAX_PAGE_SIZE = 30;
+const COMMUNITY_QUESTION_SET_SEARCH_COLUMNS = ["title", "description", "created_by_nickname"];
+const COMMUNITY_QUESTION_SET_SUMMARY_COLUMNS = [
+  "id",
+  "title",
+  "description",
+  "created_by_player_id",
+  "created_by_nickname",
+  "source",
+  "is_public",
+  "image_count",
+  "rating_avg",
+  "rating_count",
+  "play_count",
+  "created_at",
+  "updated_at",
+].join(",");
+
+function normalizeCommunityQuestionSetSort(value: unknown): CommunityQuestionSetSort {
+  return value === "rating" || value === "plays" ? value : "latest";
+}
+
+function normalizeCommunityQuestionSetSearch(value: unknown) {
+  return typeof value === "string" ? value.trim().slice(0, 100) : "";
+}
+
+function getCommunityQuestionSetSearchTerms(search: string) {
+  return search.split(/\s+/).filter(Boolean).slice(0, 5);
+}
+
+function buildCommunityQuestionSetQuery(searchTerms: string[]) {
+  let query = d1.from("question_sets").eq("is_public", true);
+  for (const term of searchTerms) {
+    query = query.containsAny(COMMUNITY_QUESTION_SET_SEARCH_COLUMNS, term);
+  }
+  return query;
+}
+
+export async function getCommunityQuestionSets(params: {
+  sort?: CommunityQuestionSetSort;
+  search?: string;
+  offset?: number;
+  limit?: number;
+  includeTotal?: boolean;
+} = {}): Promise<CommunityQuestionSetPage> {
   assertD1Env();
 
-  let query = d1.from("question_sets").select("*").eq("is_public", true);
+  const sort = normalizeCommunityQuestionSetSort(params.sort);
+  const searchTerms = getCommunityQuestionSetSearchTerms(normalizeCommunityQuestionSetSearch(params.search));
+  const offset = Math.max(0, Math.floor(Number(params.offset) || 0));
+  const limit = Math.max(
+    1,
+    Math.min(COMMUNITY_QUESTION_SET_MAX_PAGE_SIZE, Math.floor(Number(params.limit) || COMMUNITY_QUESTION_SET_PAGE_SIZE)),
+  );
+  let query = buildCommunityQuestionSetQuery(searchTerms).select(COMMUNITY_QUESTION_SET_SUMMARY_COLUMNS);
 
   if (sort === "rating") {
-    query = query.order("rating_avg", { ascending: false }).order("rating_count", { ascending: false });
+    query = query
+      .order("rating_avg", { ascending: false })
+      .order("rating_count", { ascending: false })
+      .order("created_at", { ascending: false });
+  } else if (sort === "plays") {
+    query = query.order("play_count", { ascending: false }).order("created_at", { ascending: false });
   } else {
     query = query.order("created_at", { ascending: false });
   }
+  query = query.order("id", { ascending: false });
 
-  const { data, error } = await query.limit(30).returns<DbQuestionSet[]>();
+  const pagePromise = query.limit(limit + 1).offset(offset).returns<DbQuestionSet[]>();
+  const countPromise = params.includeTotal === false
+    ? Promise.resolve({ data: null, error: null })
+    : buildCommunityQuestionSetQuery(searchTerms).count().single<{ count: number }>();
+  const [{ data, error }, { data: countRow, error: countError }] = await Promise.all([pagePromise, countPromise]);
 
   if (error) {
     throw new Error(error.message);
   }
+  if (countError) {
+    throw new Error(countError.message);
+  }
 
-  const questionSets = await Promise.all(
-    (data ?? []).map(async (questionSet) => {
-      const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
-      return toQuestionSet(questionSet, questions);
-    }),
-  );
+  const rows = data ?? [];
+  const hasMore = rows.length > limit;
+  const items = rows.slice(0, limit).map(toCommunityQuestionSetSummary);
 
-  return questionSets;
+  return {
+    items,
+    total: countRow?.count ?? null,
+    hasMore,
+    nextOffset: offset + items.length,
+  };
+}
+
+function toCommunityQuestionSetSummary(questionSet: DbQuestionSet): CommunityQuestionSetSummary {
+  return {
+    id: questionSet.id,
+    title: questionSet.title,
+    description: questionSet.description,
+    createdByPlayerId: questionSet.created_by_player_id,
+    createdByNickname: questionSet.created_by_nickname ?? null,
+    source: questionSet.source,
+    isPublic: questionSet.is_public,
+    imageCount: questionSet.image_count,
+    ratingAvg: questionSet.rating_avg,
+    ratingCount: questionSet.rating_count,
+    playCount: questionSet.play_count ?? 0,
+    createdAt: questionSet.created_at,
+    updatedAt: questionSet.updated_at,
+  };
+}
+
+export async function getCommunityQuestionSetDetail(questionSetId: string) {
+  assertD1Env();
+
+  const { data: questionSet, error } = await d1
+    .from("question_sets")
+    .select("*")
+    .eq("id", questionSetId)
+    .eq("is_public", true)
+    .maybeSingle<DbQuestionSet>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!questionSet) {
+    return null;
+  }
+
+  const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+  return toQuestionSet(questionSet, questions);
 }
 
 export async function prepareQuestionSetForStart(params: {
@@ -3126,6 +3237,14 @@ export async function getGameResultSnapshot(gameSessionId: string): Promise<Game
   const gameSession = await getGameSessionById(gameSessionId);
   if (!gameSession) {
     throw new Error("加载结算快照失败：游戏不存在。");
+  }
+
+  if (gameSession.status === "GAME_RESULT" && gameSession.completedNormallyAt) {
+    await recordCompletedQuestionSetPlay({
+      gameSessionId: gameSession.id,
+      questionSetId: gameSession.questionSetId,
+      completedAt: gameSession.completedNormallyAt,
+    });
   }
 
   const [leaderboard, questionSet, questionResults] = await Promise.all([
@@ -5024,11 +5143,12 @@ async function getCompletedQuestionTransitionResult(currentGameSession: DbGameSe
     const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
     resultRoom = await getRoomWithPlayersById(currentGameSession.room_id);
     advancedToGameResult =
+      Boolean(currentGameSession.completed_normally_at) &&
       expectedQuestionIndex === questions.length - 1 &&
       resultRoom?.currentGameId === currentGameSession.id &&
       (resultRoom.status === "GAME_RESULT" || resultRoom.status === "PLAYING");
 
-    if (advancedToGameResult && resultRoom?.status === "PLAYING") {
+    if (advancedToGameResult && resultRoom) {
       return await finishRoomAfterGameSessionEnded(currentGameSession, expectedQuestionIndex);
     }
   }
@@ -5049,6 +5169,7 @@ async function rollbackFinishedGameSession(gameSessionId: string, expectedQuesti
     .update({
       status: "PLAYING",
       ended_at: null,
+      completed_normally_at: null,
     })
     .eq("id", gameSessionId)
     .eq("status", "GAME_RESULT")
@@ -5081,6 +5202,11 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     .maybeSingle<DbRoom>();
 
   if (updatedRoom) {
+    await recordCompletedQuestionSetPlay({
+      gameSessionId: endedGameSession.id,
+      questionSetId: endedGameSession.question_set_id,
+      completedAt: endedGameSession.completed_normally_at,
+    });
     return {
       gameSession: toGameSession(endedGameSession),
       room: toRoom(updatedRoom, await getDbPlayersByRoomId(updatedRoom.id)),
@@ -5110,6 +5236,11 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     latestRoom?.current_game_id === endedGameSession.id &&
     latestRoom.game_status === "GAME_RESULT"
   ) {
+    await recordCompletedQuestionSetPlay({
+      gameSessionId: endedGameSession.id,
+      questionSetId: endedGameSession.question_set_id,
+      completedAt: endedGameSession.completed_normally_at,
+    });
     return {
       gameSession: toGameSession(endedGameSession),
       room: toRoom(latestRoom, await getDbPlayersByRoomId(latestRoom.id)),
@@ -5126,12 +5257,37 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
   throw new Error("题目状态已变化，请刷新后重试。");
 }
 
+async function recordCompletedQuestionSetPlay(params: {
+  gameSessionId: string;
+  questionSetId: string;
+  completedAt?: string | null;
+}) {
+  if (!params.completedAt) {
+    throw new Error("题库尚未正常完成，不能记录开局次数。");
+  }
+
+  const { error } = await d1.from("completed_question_set_plays").insert(
+    {
+      game_session_id: params.gameSessionId,
+      question_set_id: params.questionSetId,
+      completed_at: params.completedAt,
+    },
+    { onConflict: "game_session_id", ignoreDuplicates: true },
+  );
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 async function finishGameAfterQuestionTransition(currentGameSession: DbGameSession, expectedQuestionIndex: number) {
+  const completedAt = new Date().toISOString();
   const { data: endedGameSession, error: endGameError } = await d1
     .from("game_sessions")
     .update({
       status: "GAME_RESULT",
-      ended_at: new Date().toISOString(),
+      ended_at: completedAt,
+      completed_normally_at: completedAt,
     })
     .eq("id", currentGameSession.id)
     .eq("status", "PLAYING")

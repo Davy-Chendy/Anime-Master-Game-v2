@@ -1,6 +1,6 @@
 "use client";
 
-import { DragEvent, useMemo, useRef, useState } from "react";
+import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import {
   filesToUploadableImages,
@@ -13,12 +13,21 @@ import {
 import {
   createQuestionSetFromUrlText,
   createUploadedQuestionSet,
+  getCommunityQuestionSetDetail,
   getCommunityQuestionSets,
   parseImageUrlsText,
   parseQuestionImportText,
   prepareQuestionSetForStart,
 } from "@/lib/cloudflareRooms";
-import type { FailedQuestionUrlImport, PreparedQuestionUrlImport, QuestionSet, QuestionUrlImportInput, Room } from "@/types/game";
+import type {
+  CommunityQuestionSetSort,
+  CommunityQuestionSetSummary,
+  FailedQuestionUrlImport,
+  PreparedQuestionUrlImport,
+  QuestionSet,
+  QuestionUrlImportInput,
+  Room,
+} from "@/types/game";
 
 type QuestionSetUploaderProps = {
   room: Room;
@@ -31,9 +40,9 @@ type QuestionSetUploaderProps = {
 };
 
 type SetupMode = "upload" | "urlText" | "community";
-type CommunitySort = "latest" | "rating";
 const maxUploadImageCount = 120;
 const maxUploadImageBytes = 20 * 1024 * 1024;
+const communityPageSize = 24;
 
 type BrowserFileSystemFileHandle = {
   kind: "file";
@@ -115,11 +124,11 @@ function getDraftQuestionSetTitle(room: Room) {
   return `房间 ${room.code} 临时题库`;
 }
 
-function getQuestionSetUploaderName(questionSet: QuestionSet) {
+function getQuestionSetUploaderName(questionSet: Pick<QuestionSet, "createdByNickname">) {
   return questionSet.createdByNickname?.trim() || "未知上传者";
 }
 
-function formatQuestionSetPublishedAt(questionSet: QuestionSet) {
+function formatQuestionSetCreatedAt(questionSet: Pick<QuestionSet, "createdAt">) {
   const publishedAt = new Date(questionSet.createdAt);
 
   if (Number.isNaN(publishedAt.getTime())) {
@@ -131,6 +140,12 @@ function formatQuestionSetPublishedAt(questionSet: QuestionSet) {
   const day = String(publishedAt.getDate()).padStart(2, "0");
 
   return `${year}/${month}/${day}`;
+}
+
+function isQuestionSetDetail(
+  questionSet: QuestionSet | CommunityQuestionSetSummary | null,
+): questionSet is QuestionSet {
+  return Boolean(questionSet && ("questions" in questionSet || "imageUrlsText" in questionSet));
 }
 
 function formatBytes(bytes: number) {
@@ -189,6 +204,9 @@ export function QuestionSetUploader({
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const jsonlInputRef = useRef<HTMLInputElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const communityRequestIdRef = useRef(0);
+  const communityPreviewRequestIdRef = useRef(0);
+  const communityDetailCacheRef = useRef(new Map<string, QuestionSet>());
   const [mode, setMode] = useState<SetupMode>("upload");
   const [urlText, setUrlText] = useState("");
   const [items, setItems] = useState<UploadableImage[]>([]);
@@ -197,18 +215,23 @@ export function QuestionSetUploader({
   const [isUploading, setIsUploading] = useState(false);
   const [isCreatingFromText, setIsCreatingFromText] = useState(false);
   const [isLoadingCommunity, setIsLoadingCommunity] = useState(false);
-  const [communitySort, setCommunitySort] = useState<CommunitySort>("latest");
-  const [communitySets, setCommunitySets] = useState<QuestionSet[]>([]);
+  const [communitySort, setCommunitySort] = useState<CommunityQuestionSetSort>("latest");
+  const [communitySets, setCommunitySets] = useState<CommunityQuestionSetSummary[]>([]);
   const [communitySearch, setCommunitySearch] = useState("");
+  const [communityTotal, setCommunityTotal] = useState<number | null>(null);
+  const [communityHasMore, setCommunityHasMore] = useState(false);
+  const [communityNextOffset, setCommunityNextOffset] = useState(0);
+  const [loadingCommunityPreviewId, setLoadingCommunityPreviewId] = useState<string | null>(null);
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
   const [isConfirmingQuestionSet, setIsConfirmingQuestionSet] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
   const [results, setResults] = useState<R2UploadItemResult[]>([]);
-  const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
+  const [questionSet, setQuestionSet] = useState<QuestionSet | CommunityQuestionSetSummary | null>(null);
   const configStatus = getR2UploadConfigStatus();
 
-  const previewUrls = useMemo(() => getQuestionSetUrls(questionSet), [questionSet]);
-  const previewItems = useMemo(() => getQuestionSetPreviewItems(questionSet), [questionSet]);
+  const detailedQuestionSet = isQuestionSetDetail(questionSet) ? questionSet : null;
+  const previewUrls = useMemo(() => getQuestionSetUrls(detailedQuestionSet), [detailedQuestionSet]);
+  const previewItems = useMemo(() => getQuestionSetPreviewItems(detailedQuestionSet), [detailedQuestionSet]);
   const importPreview = useMemo(() => {
     try {
       const importItems = parseQuestionImportText(urlText);
@@ -227,22 +250,18 @@ export function QuestionSetUploader({
   }, [urlText]);
   const urlsTextForPreview = previewUrls.join("\n");
   const progressPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
-  const filteredCommunitySets = useMemo(() => {
-    const terms = communitySearch
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean);
 
-    if (terms.length === 0) {
-      return communitySets;
+  useEffect(() => {
+    if (mode !== "community") {
+      return;
     }
 
-    return communitySets.filter((item) => {
-      const searchableText = `${item.title} ${item.description ?? ""} ${item.createdByNickname ?? ""}`.toLowerCase();
-      return terms.every((term) => searchableText.includes(term));
-    });
-  }, [communitySearch, communitySets]);
+    const timer = window.setTimeout(() => {
+      void handleLoadCommunitySets({ sort: communitySort, search: communitySearch, append: false });
+    }, communitySearch.trim() ? 300 : 0);
+
+    return () => window.clearTimeout(timer);
+  }, [communitySearch, communitySort, mode]);
 
   function clearError() {
     onClearError?.();
@@ -259,7 +278,7 @@ export function QuestionSetUploader({
     setResults([]);
   }
 
-  async function markQuestionSetReady(selectedQuestionSet: QuestionSet) {
+  async function markQuestionSetReady(selectedQuestionSet: Pick<QuestionSet, "id">) {
     if (!room.id) {
       return;
     }
@@ -283,9 +302,10 @@ export function QuestionSetUploader({
   function switchMode(nextMode: SetupMode) {
     setMode(nextMode);
     clearError();
-
-    if (nextMode === "community" && communitySets.length === 0 && !isLoadingCommunity) {
-      handleLoadCommunitySets();
+    if (nextMode !== "community") {
+      communityPreviewRequestIdRef.current += 1;
+      setLoadingCommunityPreviewId(null);
+      setPreviewingCommunitySet(null);
     }
   }
 
@@ -571,21 +591,94 @@ export function QuestionSetUploader({
     }
   }
 
-  async function handleLoadCommunitySets(nextSort = communitySort) {
+  async function handleLoadCommunitySets(params: {
+    sort?: CommunityQuestionSetSort;
+    search?: string;
+    append?: boolean;
+  } = {}) {
+    const sort = params.sort ?? communitySort;
+    const search = params.search ?? communitySearch;
+    const append = params.append ?? false;
+    const requestId = communityRequestIdRef.current + 1;
+    communityRequestIdRef.current = requestId;
     clearError();
     setIsLoadingCommunity(true);
+    if (!append) {
+      setCommunityTotal(null);
+    }
 
     try {
-      const questionSets = await getCommunityQuestionSets(nextSort);
-      setCommunitySets(questionSets);
+      const page = await getCommunityQuestionSets({
+        sort,
+        search,
+        offset: append ? communityNextOffset : 0,
+        limit: communityPageSize,
+        includeTotal: !append,
+      });
+      if (communityRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      setCommunitySets((current) => {
+        if (!append) {
+          return page.items;
+        }
+        const existingIds = new Set(current.map((item) => item.id));
+        return [...current, ...page.items.filter((item) => !existingIds.has(item.id))];
+      });
+      if (page.total !== null) {
+        setCommunityTotal(page.total);
+      }
+      setCommunityHasMore(page.hasMore);
+      setCommunityNextOffset(page.nextOffset);
     } catch (error) {
+      if (communityRequestIdRef.current !== requestId) {
+        return;
+      }
       onError(error instanceof Error ? error.message : "加载社区题库失败");
     } finally {
-      setIsLoadingCommunity(false);
+      if (communityRequestIdRef.current === requestId) {
+        setIsLoadingCommunity(false);
+      }
     }
   }
 
-  async function handleSelectCommunitySet(selectedQuestionSet: QuestionSet) {
+  async function handlePreviewCommunitySet(questionSetSummary: CommunityQuestionSetSummary) {
+    const requestId = communityPreviewRequestIdRef.current + 1;
+    communityPreviewRequestIdRef.current = requestId;
+    const cachedDetail = communityDetailCacheRef.current.get(questionSetSummary.id);
+    if (cachedDetail) {
+      setLoadingCommunityPreviewId(null);
+      setPreviewingCommunitySet(cachedDetail);
+      clearError();
+      return;
+    }
+
+    clearError();
+    setLoadingCommunityPreviewId(questionSetSummary.id);
+    try {
+      const detail = await getCommunityQuestionSetDetail(questionSetSummary.id);
+      if (communityPreviewRequestIdRef.current !== requestId) {
+        return;
+      }
+      if (!detail) {
+        throw new Error("题库已取消公开或不存在");
+      }
+      communityDetailCacheRef.current.set(questionSetSummary.id, detail);
+      setPreviewingCommunitySet(detail);
+    } catch (error) {
+      if (communityPreviewRequestIdRef.current !== requestId) {
+        return;
+      }
+      onError(error instanceof Error ? error.message : "加载题库预览失败");
+    } finally {
+      if (communityPreviewRequestIdRef.current === requestId) {
+        setLoadingCommunityPreviewId(null);
+      }
+    }
+  }
+
+  async function handleSelectCommunitySet(selectedQuestionSet: QuestionSet | CommunityQuestionSetSummary) {
     setQuestionSet(selectedQuestionSet);
     clearError();
     scrollToPreview();
@@ -796,12 +889,22 @@ export function QuestionSetUploader({
 
         {mode === "community" ? (
           <div className="space-y-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="font-semibold text-slate-950">社区题库</p>
+              <p className="text-sm text-[var(--muted)]">
+                {communityTotal === null
+                  ? "正在统计题库…"
+                  : communitySearch.trim()
+                    ? `找到 ${communityTotal} 套题库`
+                    : `共 ${communityTotal} 套`}
+              </p>
+            </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
               <label className="block flex-1">
                 <span className="mb-2 block text-sm font-medium text-slate-900">搜索题库</span>
                 <input
                   className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  placeholder="标题或简介"
+                  placeholder="搜索标题、简介或上传者"
                   value={communitySearch}
                   onChange={(event) => setCommunitySearch(event.target.value)}
                 />
@@ -812,50 +915,86 @@ export function QuestionSetUploader({
                   className="h-11 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
                   value={communitySort}
                   onChange={(event) => {
-                    const nextSort = event.target.value as CommunitySort;
+                    const nextSort = event.target.value as CommunityQuestionSetSort;
                     setCommunitySort(nextSort);
-                    handleLoadCommunitySets(nextSort);
                   }}
                 >
                   <option value="latest">最新</option>
                   <option value="rating">评分最高</option>
+                  <option value="plays">开局最多</option>
                 </select>
-                <Button className="h-11" type="button" variant="secondary" onClick={() => handleLoadCommunitySets()} disabled={isLoadingCommunity}>
+                <Button
+                  className="h-11"
+                  type="button"
+                  variant="secondary"
+                  onClick={() => handleLoadCommunitySets({ append: false })}
+                  disabled={isLoadingCommunity}
+                >
                   {isLoadingCommunity ? "加载中…" : "刷新"}
                 </Button>
               </div>
             </div>
             <div className="grid max-h-[54vh] gap-3 overflow-y-auto pr-1">
-              {filteredCommunitySets.map((item) => (
+              {communitySets.map((item) => (
                 <div
                   className="rounded-md border border-[var(--line)] bg-white p-3 text-left transition hover:border-rose-300 hover:bg-rose-50"
                   key={item.id}
                 >
-                  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                    <div className="min-w-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
                       <p className="truncate font-semibold text-slate-950">{item.title}</p>
-                      <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">{item.description || "暂无简介"}</p>
-                      <p className="mt-2 text-xs text-[var(--muted)]">
-                        上传者：{getQuestionSetUploaderName(item)} · 发布时间：{formatQuestionSetPublishedAt(item)} · {item.imageCount} 张 ·{" "}
-                        {Number(item.ratingAvg).toFixed(1)} 分 · {item.ratingCount} 人评分
+                      <p className="mt-1 min-h-10 line-clamp-2 text-sm leading-5 text-[var(--muted)]">
+                        {item.description || "暂无简介"}
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
-                      <Button type="button" variant="secondary" onClick={() => setPreviewingCommunitySet(item)}>
-                        预览
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => handlePreviewCommunitySet(item)}
+                        disabled={loadingCommunityPreviewId === item.id}
+                      >
+                        {loadingCommunityPreviewId === item.id ? "加载中…" : "预览"}
                       </Button>
                       <Button type="button" onClick={() => handleSelectCommunitySet(item)}>
                         选择
                       </Button>
                     </div>
                   </div>
+                  <div className="mt-3 flex flex-col gap-1 border-t border-slate-100 pt-3 text-xs text-[var(--muted)] sm:flex-row sm:items-center sm:justify-between">
+                    <p>
+                      {item.imageCount} 题 · {Number(item.ratingAvg).toFixed(1)} 分（{item.ratingCount} 人评分）· 题库开局 {item.playCount} 次
+                    </p>
+                    <p className="min-w-0 sm:max-w-[45%] sm:text-right">
+                      创建于 {formatQuestionSetCreatedAt(item)} ·{" "}
+                      <span className="inline-block max-w-40 truncate align-bottom" title={getQuestionSetUploaderName(item)}>
+                        {getQuestionSetUploaderName(item)}上传
+                      </span>
+                    </p>
+                  </div>
                 </div>
               ))}
               {!isLoadingCommunity && communitySets.length === 0 ? (
-                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">暂无社区题库</p>
+                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">
+                  {communitySearch.trim() ? "没有匹配的题库" : "暂无社区题库"}
+                </p>
               ) : null}
-              {!isLoadingCommunity && communitySets.length > 0 && filteredCommunitySets.length === 0 ? (
-                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">没有匹配的题库</p>
+              {communitySets.length > 0 ? (
+                <div className="flex flex-col items-center gap-2 py-1">
+                  {communityTotal !== null ? (
+                    <p className="text-xs text-[var(--muted)]">已显示 {communitySets.length} / {communityTotal} 套</p>
+                  ) : null}
+                  {communityHasMore ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => handleLoadCommunitySets({ append: true })}
+                      disabled={isLoadingCommunity}
+                    >
+                      {isLoadingCommunity ? "加载中…" : "加载更多"}
+                    </Button>
+                  ) : null}
+                </div>
               ) : null}
             </div>
           </div>
@@ -870,8 +1009,9 @@ export function QuestionSetUploader({
                 <p className="text-lg font-semibold text-slate-950">{previewingCommunitySet.title}</p>
                 <p className="mt-1 text-sm text-[var(--muted)]">{previewingCommunitySet.description || "暂无简介"}</p>
                 <p className="mt-2 text-xs text-[var(--muted)]">
-                  上传者：{getQuestionSetUploaderName(previewingCommunitySet)}，发布时间：{formatQuestionSetPublishedAt(previewingCommunitySet)}，
-                  {previewingCommunitySet.imageCount} 张，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，{previewingCommunitySet.ratingCount} 人评分
+                  {previewingCommunitySet.imageCount} 题，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，
+                  {previewingCommunitySet.ratingCount} 人评分，题库开局 {previewingCommunitySet.playCount} 次，创建于{" "}
+                  {formatQuestionSetCreatedAt(previewingCommunitySet)}，{getQuestionSetUploaderName(previewingCommunitySet)}上传
                 </p>
               </div>
               <div className="flex shrink-0 gap-2">

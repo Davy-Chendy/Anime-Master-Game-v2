@@ -10,7 +10,8 @@ type QueryResult<T = unknown> = {
 
 type Filter =
   | { kind: "eq"; column: string; value: unknown }
-  | { kind: "is"; column: string; value: null };
+  | { kind: "is"; column: string; value: null }
+  | { kind: "containsAny"; columns: string[]; value: string };
 
 type OrderBy = {
   column: string;
@@ -164,7 +165,9 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private filters: Filter[] = [];
   private orderBys: OrderBy[] = [];
   private maxRows: number | null = null;
+  private offsetRows = 0;
   private selectedColumns: string[] | null = null;
+  private countMode = false;
   private payload: Record<string, unknown> | Record<string, unknown>[] | null = null;
   private conflictColumns: string[] = [];
   private ignoreDuplicates = false;
@@ -225,6 +228,15 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     return this;
   }
 
+  containsAny(columns: string[], value: string) {
+    const normalizedColumns = Array.from(new Set(columns.map((column) => column.trim()).filter(Boolean)));
+    const normalizedValue = value.trim();
+    if (normalizedColumns.length > 0 && normalizedValue) {
+      this.filters.push({ kind: "containsAny", columns: normalizedColumns, value: normalizedValue });
+    }
+    return this;
+  }
+
   order(column: string, options?: { ascending?: boolean }) {
     this.orderBys.push({ column, ascending: options?.ascending ?? true });
     return this;
@@ -232,6 +244,17 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
 
   limit(value: number) {
     this.maxRows = value;
+    return this;
+  }
+
+  offset(value: number) {
+    this.offsetRows = Math.max(0, Math.floor(value));
+    return this;
+  }
+
+  count() {
+    this.countMode = true;
+    this.selectedColumns = null;
     return this;
   }
 
@@ -265,6 +288,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       if (filter.kind === "is") {
         return `${sqlIdentifier(filter.column)} IS NULL`;
       }
+      if (filter.kind === "containsAny") {
+        return `(${filter.columns
+          .map((column) => {
+            params.push(filter.value);
+            return `INSTR(LOWER(COALESCE(${sqlIdentifier(column)}, '')), LOWER(?)) > 0`;
+          })
+          .join(" OR ")})`;
+      }
       params.push(normalizeValue(filter.column, filter.value));
       return `${sqlIdentifier(filter.column)} = ?`;
     });
@@ -283,7 +314,10 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 
   private limitSql() {
-    return this.maxRows == null ? "" : ` LIMIT ${Math.max(0, Math.floor(this.maxRows))}`;
+    if (this.maxRows == null) {
+      return this.offsetRows > 0 ? ` LIMIT -1 OFFSET ${this.offsetRows}` : "";
+    }
+    return ` LIMIT ${Math.max(0, Math.floor(this.maxRows))} OFFSET ${this.offsetRows}`;
   }
 
   private async execute(): Promise<QueryResult<T>> {
@@ -336,6 +370,9 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 
   private selectedSql() {
+    if (this.countMode) {
+      return 'COUNT(*) AS "count"';
+    }
     return this.selectedColumns?.length ? this.selectedColumns.map(sqlIdentifier).join(", ") : "*";
   }
 

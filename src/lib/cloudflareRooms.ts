@@ -4,6 +4,8 @@ import { callGameRpc } from "@/lib/cloudflareClient";
 import type {
   Answer,
   BuzzerAnswer,
+  CommunityQuestionSetPage,
+  CommunityQuestionSetSort,
   DbRoom,
   GameBootstrapSnapshot,
   GameMode,
@@ -181,8 +183,16 @@ export const createQuestionSetFromUrlText = (params: {
 export const getQuestionSetById = (questionSetId: string) =>
   rpc<QuestionSet | null>("getQuestionSetById", questionSetId);
 
-export const getCommunityQuestionSets = (sort: "latest" | "rating" = "latest") =>
-  rpc<QuestionSet[]>("getCommunityQuestionSets", sort);
+export const getCommunityQuestionSets = (params: {
+  sort?: CommunityQuestionSetSort;
+  search?: string;
+  offset?: number;
+  limit?: number;
+  includeTotal?: boolean;
+} = {}) => rpc<CommunityQuestionSetPage>("getCommunityQuestionSets", params);
+
+export const getCommunityQuestionSetDetail = (questionSetId: string) =>
+  rpc<QuestionSet | null>("getCommunityQuestionSetDetail", questionSetId);
 
 export const prepareQuestionSetForStart = (params: {
   roomId: string;
