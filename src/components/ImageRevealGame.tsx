@@ -2930,6 +2930,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           ? "个人 · 顺位得分模式"
           : "团队 · 对抗模式";
   const revealedBlocksCardValue = `${visibleRevealedBlockCount} / ${visibleBlockCount} 格`;
+  const correctPlayersCardValue = `${correctPlayerSet.size} / ${scoringEligibleGuesserIds.length} 人`;
   const teamBattleScoreCardValue = teamBattleState
     ? `红队 ${teamBattleState.teamScores.red} : ${teamBattleState.teamScores.blue} 蓝队`
     : "";
@@ -3813,8 +3814,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               <p className="mt-1 text-lg font-semibold text-slate-950">{scoreCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">已打开</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">{revealedBlocksCardValue}</p>
+              <p className="text-[var(--muted)]">本题答对</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{correctPlayersCardValue}</p>
             </div>
           </>
         )}
