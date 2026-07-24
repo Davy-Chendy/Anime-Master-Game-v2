@@ -940,37 +940,42 @@ export function QuestionSetUploader({
                   className="rounded-md border border-[var(--line)] bg-white p-3 text-left transition hover:border-rose-300 hover:bg-rose-50"
                   key={item.id}
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-3">
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-semibold text-slate-950">{item.title}</p>
-                      <p className="mt-1 min-h-10 line-clamp-2 text-sm leading-5 text-[var(--muted)]">
-                        {item.description || "暂无简介"}
+                      {item.description?.trim() ? (
+                        <p className="mt-1 truncate text-sm leading-5 text-[var(--muted)]" title={item.description}>
+                          {item.description}
+                        </p>
+                      ) : null}
+                      <p className="mt-1 text-xs text-[var(--muted)]">
+                        {item.imageCount} 题 · {Number(item.ratingAvg).toFixed(1)} 分（{item.ratingCount} 人评分）· 开局 {item.playCount} 次
                       </p>
                     </div>
-                    <div className="flex shrink-0 flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={() => handlePreviewCommunitySet(item)}
-                        disabled={loadingCommunityPreviewId === item.id}
+                    <div className="flex min-w-0 items-center justify-between gap-3 md:shrink-0 md:justify-end">
+                      <p
+                        className="min-w-0 truncate whitespace-nowrap text-xs text-[var(--muted)] md:text-right"
+                        title={`创建于 ${formatQuestionSetCreatedAt(item)} · ${getQuestionSetUploaderName(item)}上传`}
                       >
-                        {loadingCommunityPreviewId === item.id ? "加载中…" : "预览"}
-                      </Button>
-                      <Button type="button" onClick={() => handleSelectCommunitySet(item)}>
-                        选择
-                      </Button>
+                        创建于 {formatQuestionSetCreatedAt(item)} ·{" "}
+                        <span className="inline-block max-w-24 truncate align-bottom lg:max-w-40" title={getQuestionSetUploaderName(item)}>
+                          {getQuestionSetUploaderName(item)}上传
+                        </span>
+                      </p>
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => handlePreviewCommunitySet(item)}
+                          disabled={loadingCommunityPreviewId === item.id}
+                        >
+                          {loadingCommunityPreviewId === item.id ? "加载中…" : "预览"}
+                        </Button>
+                        <Button type="button" onClick={() => handleSelectCommunitySet(item)}>
+                          选择
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                  <div className="mt-3 flex flex-col gap-1 border-t border-slate-100 pt-3 text-xs text-[var(--muted)] sm:flex-row sm:items-center sm:justify-between">
-                    <p>
-                      {item.imageCount} 题 · {Number(item.ratingAvg).toFixed(1)} 分（{item.ratingCount} 人评分）· 题库开局 {item.playCount} 次
-                    </p>
-                    <p className="min-w-0 sm:max-w-[45%] sm:text-right">
-                      创建于 {formatQuestionSetCreatedAt(item)} ·{" "}
-                      <span className="inline-block max-w-40 truncate align-bottom" title={getQuestionSetUploaderName(item)}>
-                        {getQuestionSetUploaderName(item)}上传
-                      </span>
-                    </p>
                   </div>
                 </div>
               ))}
@@ -1007,10 +1012,10 @@ export function QuestionSetUploader({
             <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-start">
               <div>
                 <p className="text-lg font-semibold text-slate-950">{previewingCommunitySet.title}</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">{previewingCommunitySet.description || "暂无简介"}</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">{previewingCommunitySet.description?.trim() || "暂无简介"}</p>
                 <p className="mt-2 text-xs text-[var(--muted)]">
                   {previewingCommunitySet.imageCount} 题，评分 {Number(previewingCommunitySet.ratingAvg).toFixed(2)} / 5，
-                  {previewingCommunitySet.ratingCount} 人评分，题库开局 {previewingCommunitySet.playCount} 次，创建于{" "}
+                  {previewingCommunitySet.ratingCount} 人评分，开局 {previewingCommunitySet.playCount} 次，创建于{" "}
                   {formatQuestionSetCreatedAt(previewingCommunitySet)}，{getQuestionSetUploaderName(previewingCommunitySet)}上传
                 </p>
               </div>
