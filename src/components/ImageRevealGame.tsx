@@ -3510,32 +3510,30 @@ export function ImageRevealGame({
                       />
                     </span>
                   </button>
-                  {!isQuestionReviewing ? <div className="my-3 h-px bg-[var(--line)]" /> : null}
+                  <div className="my-3 h-px bg-[var(--line)]" />
                 </>
               ) : null}
 
-              {!isQuestionReviewing ? (
-                <>
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-semibold text-slate-950">正确答案</p>
-                    <Button
-                      className="h-9 min-w-16 px-3"
-                      type="button"
-                      variant="secondary"
-                      onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
-                    >
-                      {isSpectatorLabelOpen ? "隐藏" : "展开"}
-                    </Button>
-                  </div>
-                  {isSpectatorLabelOpen ? (
-                    <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
-                      {currentQuestionLabel || "暂无"}
-                    </p>
-                  ) : (
-                    <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
-                  )}
-                </>
-              ) : null}
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-semibold text-slate-950">正确答案</p>
+                {!isQuestionReviewing ? (
+                  <Button
+                    className="h-9 min-w-16 px-3"
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
+                  >
+                    {isSpectatorLabelOpen ? "隐藏" : "展开"}
+                  </Button>
+                ) : null}
+              </div>
+              {isQuestionReviewing || isSpectatorLabelOpen ? (
+                <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
+                  {currentQuestionLabel || "暂无"}
+                </p>
+              ) : (
+                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
+              )}
             </section>
           ) : null}
         </div>
