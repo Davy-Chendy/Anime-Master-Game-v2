@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, SVGProps } from "react";
+import type { CSSProperties, ReactNode, SVGProps } from "react";
 import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
@@ -50,6 +50,7 @@ type ImageRevealGameProps = {
   playerId: string;
   isPresenter: boolean;
   isSpectator?: boolean;
+  footerActions?: ReactNode;
   onError: (message: string) => void;
   onRoomUpdated?: (room: Room) => void;
 };
@@ -861,7 +862,15 @@ function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageE
   }
 }
 
-export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = false, onError, onRoomUpdated }: ImageRevealGameProps) {
+export function ImageRevealGame({
+  room,
+  playerId,
+  isPresenter,
+  isSpectator = false,
+  footerActions,
+  onError,
+  onRoomUpdated,
+}: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
@@ -893,6 +902,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isPublishingBeforeResult, setIsPublishingBeforeResult] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
+  const [reviewedQuestionIndex, setReviewedQuestionIndex] = useState<number | null>(null);
+  const [reviewImageLoadFailed, setReviewImageLoadFailed] = useState(false);
   const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
@@ -920,6 +931,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
   const roundPromptSoundControlsRef = useRef<HTMLDivElement | null>(null);
+  const previousReviewTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const previousReviewCloseRef = useRef<HTMLButtonElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
   const roundSnapshotFetchRef = useRef<{
     gameSessionId: string;
@@ -1609,6 +1622,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   }, [gameSession?.roundSeconds, gameSession?.roundStartedAt]);
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
+  const previousQuestionIndex = gameSession && gameSession.currentQuestionIndex > 0 ? gameSession.currentQuestionIndex - 1 : null;
+  const previousQuestion = previousQuestionIndex == null ? null : questions[previousQuestionIndex] ?? null;
+  const reviewedQuestion = reviewedQuestionIndex == null ? null : questions[reviewedQuestionIndex] ?? null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
   const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
   const revealGrid = getRevealGridConfig(isPortraitImage);
@@ -1737,6 +1753,46 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
+
+  useEffect(() => {
+    if (reviewedQuestionIndex == null) {
+      return;
+    }
+
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusFrame = window.requestAnimationFrame(() => previousReviewCloseRef.current?.focus());
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setReviewedQuestionIndex(null);
+      }
+
+      if (event.key === "Tab") {
+        event.preventDefault();
+        previousReviewCloseRef.current?.focus();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      previousReviewTriggerRef.current?.focus();
+    };
+  }, [reviewedQuestionIndex]);
+
+  function handleOpenPreviousQuestionReview(event: React.MouseEvent<HTMLButtonElement>) {
+    if (isTeamBattleMode || previousQuestionIndex == null || !previousQuestion) {
+      return;
+    }
+
+    previousReviewTriggerRef.current = event.currentTarget;
+    setReviewImageLoadFailed(false);
+    setReviewedQuestionIndex(previousQuestionIndex);
+  }
 
   useEffect(() => {
     setSelectedBlocks((currentBlocks) => {
@@ -3036,12 +3092,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     }
   }
 
+  const fallbackFooterActions = footerActions ? (
+    <div className="flex flex-wrap items-center justify-end gap-3">{footerActions}</div>
+  ) : null;
+
   if (isLoading) {
-    return <p className="text-sm text-[var(--muted)]">正在加载当前题目…</p>;
+    return (
+      <div className="space-y-4">
+        <p className="text-sm text-[var(--muted)]">正在加载当前题目…</p>
+        {fallbackFooterActions}
+      </div>
+    );
   }
 
   if (!gameSession || !currentQuestion) {
-    return <p className="text-sm text-red-700">没有找到当前游戏题目</p>;
+    return (
+      <div className="space-y-4">
+        <p className="text-sm text-red-700">没有找到当前游戏题目</p>
+        {fallbackFooterActions}
+      </div>
+    );
   }
 
   const currentPlayerName = room.players.find((player) => player.id === playerId)?.nickname ?? "未设置昵称";
@@ -4007,6 +4077,90 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
         {actionPanel}
       </div>
+
+      {!isTeamBattleMode || footerActions ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {!isTeamBattleMode ? (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!previousQuestion}
+              title={previousQuestion ? `回顾第 ${previousQuestionIndex! + 1} 题` : "暂无上题"}
+              onClick={handleOpenPreviousQuestionReview}
+            >
+              回顾上题
+            </Button>
+          ) : null}
+          {footerActions ? <div className="ml-auto flex flex-wrap items-center justify-end gap-3">{footerActions}</div> : null}
+        </div>
+      ) : null}
+
+      {reviewedQuestion && reviewedQuestionIndex != null && canRenderPortal
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/55 px-4 py-6"
+              role="presentation"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) {
+                  setReviewedQuestionIndex(null);
+                }
+              }}
+            >
+              <div
+                aria-describedby="previous-question-review-description"
+                aria-labelledby="previous-question-review-title"
+                aria-modal="true"
+                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl"
+                role="dialog"
+              >
+                <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
+                  <div>
+                    <p className="text-lg font-semibold text-slate-950" id="previous-question-review-title">
+                      上一题回顾 · 第 {reviewedQuestionIndex + 1} 题
+                    </p>
+                    <p className="mt-1 text-sm text-[var(--muted)]" id="previous-question-review-description">
+                      当前题仍在进行，倒计时不会暂停
+                    </p>
+                  </div>
+                  <button
+                    className="shrink-0 rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+                    ref={previousReviewCloseRef}
+                    type="button"
+                    onClick={() => setReviewedQuestionIndex(null)}
+                  >
+                    关闭
+                  </button>
+                </div>
+
+                <div className="min-h-0 overflow-y-auto px-5 py-5">
+                  <div className="grid min-h-48 place-items-center overflow-hidden rounded-md bg-slate-950">
+                    {reviewImageLoadFailed ? (
+                      <div className="px-4 py-16 text-center text-white">
+                        <p className="font-semibold">图片加载失败</p>
+                        <p className="mt-2 text-sm text-slate-300">可能是图片链接失效或当前网络异常</p>
+                      </div>
+                    ) : (
+                      <img
+                        alt={`第 ${reviewedQuestionIndex + 1} 题原图`}
+                        className="max-h-[60vh] w-full object-contain"
+                        src={reviewedQuestion.imageUrl}
+                        onError={() => setReviewImageLoadFailed(true)}
+                      />
+                    )}
+                  </div>
+
+                  <div className="mt-4 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3">
+                    <p className="text-xs font-semibold text-[var(--muted)]">正确答案</p>
+                    <p className="mt-1 break-words text-lg font-semibold text-slate-950">
+                      {reviewedQuestion.labelText?.trim() || "本题未填写答案"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {(isPresenter || isSpectator) && currentQuestion && isRevealPreviewOpen && canRenderPortal
         ? createPortal(

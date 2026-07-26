@@ -2456,22 +2456,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             playerId={playerId}
             isPresenter={isCurrentPresenter}
             isSpectator={isCurrentSpectator}
-            onError={setError}
-            onRoomUpdated={(nextRoom) =>
-              setRoom((currentRoom) =>
-                currentRoom
-                  ? {
-                      ...currentRoom,
-                      ...nextRoom,
-                      players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
-                    }
-                  : nextRoom,
-              )
-            }
-          />
-          {isHost || !isCurrentPresenter ? (
-            <div className="flex flex-wrap justify-end gap-3">
-              {isHost ? (
+            footerActions={
+              isHost ? (
                 <>
                   <Button
                     type="button"
@@ -2485,13 +2471,25 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
                     {isCancelingRound ? "取消中…" : "取消本局"}
                   </Button>
                 </>
-              ) : (
+              ) : !isCurrentPresenter ? (
                 <Button type="button" variant="secondary" onClick={handleExitRoom} disabled={isLeavingRoom}>
                   {isLeavingRoom ? "退出中…" : "退出房间"}
                 </Button>
-              )}
-            </div>
-          ) : null}
+              ) : null
+            }
+            onError={setError}
+            onRoomUpdated={(nextRoom) =>
+              setRoom((currentRoom) =>
+                currentRoom
+                  ? {
+                      ...currentRoom,
+                      ...nextRoom,
+                      players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
+                    }
+                  : nextRoom,
+              )
+            }
+          />
         </main>
       ) : shouldShowLobby ? (
         <div className="grid items-stretch gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
