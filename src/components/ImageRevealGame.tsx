@@ -644,13 +644,15 @@ const StandardScoreRow = memo(function StandardScoreRow({
       {showSpectatorAnswer ? (
         <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
           <span className="shrink-0">答对 {correctCount} 题</span>
-          <span
-            aria-label={spectatorAnswerLabel}
-            className={`flex min-w-0 flex-1 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
-            title={spectatorAnswerLabel}
-          >
-            <span className="min-w-0 truncate">{spectatorAnswerText}</span>
-            {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
+          <span className="flex min-w-0 flex-1 items-center">
+            <span
+              aria-label={spectatorAnswerLabel}
+              className={`inline-flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
+              title={spectatorAnswerLabel}
+            >
+              <span className="min-w-0 truncate">{spectatorAnswerText}</span>
+              {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
+            </span>
           </span>
           {currentQuestionScoreAwarded > 0 ? (
             <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
@@ -3409,22 +3411,33 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
               {!isTeamBattleMode ? (
                 <>
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-semibold text-slate-950">玩家回答</p>
-                    <button
-                      aria-pressed={isSpectatorAnswerViewEnabled}
+                  <button
+                    aria-checked={isSpectatorAnswerViewEnabled}
+                    aria-label="在详细积分榜显示玩家答案"
+                    className="flex w-full items-center justify-between gap-3 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2"
+                    role="switch"
+                    type="button"
+                    onClick={() => setIsSpectatorAnswerViewEnabled((isEnabled) => !isEnabled)}
+                  >
+                    <span className="min-w-0">
+                      <span className="block font-semibold text-slate-950">玩家回答</span>
+                      <span className="mt-0.5 block text-xs font-medium text-[var(--muted)]">在详细积分榜显示答案</span>
+                    </span>
+                    <span
+                      aria-hidden="true"
                       className={[
-                        "h-9 min-w-16 rounded-md px-3 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200",
-                        isSpectatorAnswerViewEnabled
-                          ? "bg-slate-900 text-white hover:bg-slate-800"
-                          : "border border-[var(--line)] bg-white text-[var(--foreground)] hover:bg-slate-50",
+                        "relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200",
+                        isSpectatorAnswerViewEnabled ? "bg-slate-900" : "bg-slate-200",
                       ].join(" ")}
-                      type="button"
-                      onClick={() => setIsSpectatorAnswerViewEnabled((isEnabled) => !isEnabled)}
                     >
-                      {isSpectatorAnswerViewEnabled ? "隐藏" : "显示"}
-                    </button>
-                  </div>
+                      <span
+                        className={[
+                          "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-out",
+                          isSpectatorAnswerViewEnabled ? "translate-x-5" : "translate-x-0",
+                        ].join(" ")}
+                      />
+                    </span>
+                  </button>
                   {!isQuestionReviewing ? <div className="my-3 h-px bg-[var(--line)]" /> : null}
                 </>
               ) : null}
