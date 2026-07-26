@@ -1566,6 +1566,32 @@ async function getRoomWithPlayersById(roomId: string) {
   return toRoom(room, await getDbPlayersByRoomId(room.id));
 }
 
+export async function getDeadlineStateForRoomId(roomId: string) {
+  const room = await getDbRoomById(roomId);
+  if (!room) {
+    return { room: null, gameSession: null };
+  }
+
+  const gameSession = room.current_game_id ? await getGameSessionById(room.current_game_id) : null;
+  return {
+    room: toRoom(room),
+    gameSession,
+  };
+}
+
+export async function getRoomIdForGameSession(gameSessionId: string) {
+  const { data, error } = await d1
+    .from("game_sessions")
+    .select("room_id")
+    .eq("id", gameSessionId)
+    .maybeSingle<Pick<DbGameSession, "room_id">>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  return data?.room_id ?? null;
+}
+
 async function getDbPlayersByRoomId(roomId: string) {
   assertD1Env();
 
