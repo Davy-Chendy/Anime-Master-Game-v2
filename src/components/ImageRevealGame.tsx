@@ -531,7 +531,7 @@ function getSpectatorAnswerDisplay(params: {
     return { text, status: "pending", label: `${nickname}回答：${text}，${pendingLabel}` };
   }
 
-  return { text: "—", status: "unanswered", label: `${nickname}本轮尚未回答` };
+  return { text: "", status: "unanswered", label: `${nickname}本轮尚未回答` };
 }
 
 function getSpectatorAnswerTone(status: SpectatorAnswerStatus) {
@@ -645,14 +645,16 @@ const StandardScoreRow = memo(function StandardScoreRow({
         <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
           <span className="shrink-0">答对 {correctCount} 题</span>
           <span className="flex min-w-0 flex-1 items-center">
-            <span
-              aria-label={spectatorAnswerLabel}
-              className={`inline-flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
-              title={spectatorAnswerLabel}
-            >
-              <span className="min-w-0 truncate">{spectatorAnswerText}</span>
-              {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
-            </span>
+            {spectatorAnswerStatus !== "unanswered" ? (
+              <span
+                aria-label={spectatorAnswerLabel}
+                className={`inline-flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
+                title={spectatorAnswerLabel}
+              >
+                <span className="min-w-0 truncate">{spectatorAnswerText}</span>
+                {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
+              </span>
+            ) : null}
           </span>
           {currentQuestionScoreAwarded > 0 ? (
             <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
