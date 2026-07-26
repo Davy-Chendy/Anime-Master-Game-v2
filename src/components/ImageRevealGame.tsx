@@ -2339,6 +2339,31 @@ export function ImageRevealGame({
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人打开图片";
   let standardTaskTone = "border-slate-200 bg-white";
+  let spectatorTaskTitle = isQuestionReviewing ? "本题复盘" : "玩家视角";
+  let spectatorTaskDetail = isQuestionReviewing ? "等待切换下一题" : "按住 V 可临时查看原图";
+
+  if (!isTeamBattleMode) {
+    if (isQuestionReviewing) {
+      spectatorTaskTitle = "本题复盘";
+      spectatorTaskDetail = "等待切换下一题";
+    } else if (!hasRoundStarted) {
+      spectatorTaskTitle = "等待揭图";
+      spectatorTaskDetail = "出题人正在选格";
+    } else if (!isRoundClosedForPlayerActions) {
+      spectatorTaskTitle = isBuzzerMode ? "抢答中" : "作答中";
+      spectatorTaskDetail = `${standardSubmittedCount}/${standardTotalCount} ${isBuzzerMode ? "已抢答" : "已提交"}`;
+    } else if (hasPendingJudgement) {
+      spectatorTaskTitle = "判定中";
+      spectatorTaskDetail = isWaitingForBuzzerQueueStability
+        ? isBuzzerMode
+          ? "正在确认抢答顺序"
+          : "正在确认提交顺序"
+        : `${pendingJudgementCount} 人待判定`;
+    } else {
+      spectatorTaskTitle = "本轮结束";
+      spectatorTaskDetail = `等待出题人${standardSettleActionText}`;
+    }
+  }
 
   if (!isTeamBattleMode && !isQuestionReviewing) {
     if (isPresenter) {
@@ -3471,12 +3496,11 @@ export function ImageRevealGame({
                 </span>
               ) : null}
             </div>
-            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">
-              {isQuestionReviewing ? "本题复盘" : "玩家视角"}
-            </p>
-            <p className="mt-1 text-sm font-medium text-[var(--muted)]">
-              {isQuestionReviewing ? "等待切换下一题" : "按住 V 可临时查看原图"}
-            </p>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{spectatorTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{spectatorTaskDetail}</p>
+            {!isTeamBattleMode && !isQuestionReviewing ? (
+              <p className="mt-3 text-xs font-medium text-[var(--muted)]">按住 V 可临时查看原图</p>
+            ) : null}
           </section>
 
           {!isQuestionReviewing || !isTeamBattleMode ? (
