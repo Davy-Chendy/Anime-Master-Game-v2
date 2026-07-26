@@ -371,7 +371,19 @@ type StandardScoreRowProps = {
   buzzerStatus?: BuzzerAnswer["status"];
   isBuzzerMode: boolean;
   isLeadingPendingBuzzerAnswer: boolean;
+  showSpectatorAnswer: boolean;
+  spectatorAnswerText: string;
+  spectatorAnswerStatus: SpectatorAnswerStatus;
+  spectatorAnswerLabel: string;
   onRowRef: (playerId: string, element: HTMLDivElement | null) => void;
+};
+
+type SpectatorAnswerStatus = "correct" | "wrong" | "pending" | "forfeit" | "unanswered";
+
+type SpectatorAnswerDisplay = {
+  text: string;
+  status: SpectatorAnswerStatus;
+  label: string;
 };
 
 type CompactScoreStatus = {
@@ -475,6 +487,73 @@ function getCompetitionRankByScore<T extends { score: number }>(rows: T[], index
   return previousRow && previousRow.score === rows[index].score ? getCompetitionRankByScore(rows, index - 1) : index + 1;
 }
 
+function getSpectatorAnswerDisplay(params: {
+  nickname: string;
+  alreadyCorrect: boolean;
+  currentAnswer?: Answer;
+  correctAnswer?: Answer;
+  buzzerAnswer?: BuzzerAnswer;
+  hasForfeitedCurrentRound: boolean;
+  isBuzzerMode: boolean;
+  isLeadingPendingBuzzerAnswer: boolean;
+}): SpectatorAnswerDisplay {
+  const {
+    nickname,
+    alreadyCorrect,
+    currentAnswer,
+    correctAnswer,
+    buzzerAnswer,
+    hasForfeitedCurrentRound,
+    isBuzzerMode,
+    isLeadingPendingBuzzerAnswer,
+  } = params;
+
+  if (alreadyCorrect || buzzerAnswer?.status === "correct") {
+    const text = correctAnswer?.answerText ?? buzzerAnswer?.answerText ?? currentAnswer?.answerText ?? "—";
+    return { text, status: "correct", label: `${nickname}回答：${text}，判定正确` };
+  }
+
+  if (hasForfeitedCurrentRound) {
+    return { text: "放弃", status: "forfeit", label: `${nickname}本轮已放弃` };
+  }
+
+  if (buzzerAnswer?.status === "wrong") {
+    return {
+      text: buzzerAnswer.answerText,
+      status: "wrong",
+      label: `${nickname}回答：${buzzerAnswer.answerText}，判定错误`,
+    };
+  }
+
+  if (buzzerAnswer?.status === "pending" || currentAnswer) {
+    const text = buzzerAnswer?.answerText ?? currentAnswer?.answerText ?? "—";
+    const pendingLabel = isLeadingPendingBuzzerAnswer ? "判定中" : isBuzzerMode ? "排队中" : "待判定";
+    return { text, status: "pending", label: `${nickname}回答：${text}，${pendingLabel}` };
+  }
+
+  return { text: "—", status: "unanswered", label: `${nickname}本轮尚未回答` };
+}
+
+function getSpectatorAnswerTone(status: SpectatorAnswerStatus) {
+  if (status === "correct") {
+    return "bg-emerald-50 text-emerald-700";
+  }
+
+  if (status === "wrong") {
+    return "bg-rose-50 text-rose-700";
+  }
+
+  if (status === "pending") {
+    return "bg-sky-50 text-sky-700";
+  }
+
+  if (status === "forfeit") {
+    return "bg-slate-200 text-slate-700";
+  }
+
+  return "bg-transparent text-slate-400";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -541,6 +620,10 @@ const StandardScoreRow = memo(function StandardScoreRow({
   buzzerStatus,
   isBuzzerMode,
   isLeadingPendingBuzzerAnswer,
+  showSpectatorAnswer,
+  spectatorAnswerText,
+  spectatorAnswerStatus,
+  spectatorAnswerLabel,
   onRowRef,
 }: StandardScoreRowProps) {
   const hasWrongCurrentRound = buzzerStatus === "wrong";
@@ -558,31 +641,50 @@ const StandardScoreRow = memo(function StandardScoreRow({
         </div>
         <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
-        <span>答对 {correctCount} 题</span>
-        {alreadyCorrect ? (
-          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
-        ) : null}
-        {currentQuestionScoreAwarded > 0 ? (
-          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
-            +{currentQuestionScoreAwarded} 分
+      {showSpectatorAnswer ? (
+        <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
+          <span className="shrink-0">答对 {correctCount} 题</span>
+          <span
+            aria-label={spectatorAnswerLabel}
+            className={`flex min-w-0 flex-1 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
+            title={spectatorAnswerLabel}
+          >
+            <span className="min-w-0 truncate">{spectatorAnswerText}</span>
+            {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
           </span>
-        ) : null}
-        {!alreadyCorrect && hasForfeitedCurrentRound ? (
-          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
-        ) : null}
-        {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound && !hasWrongCurrentRound ? (
-          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
-        ) : null}
-        {isBuzzerMode && buzzerStatus === "pending" ? (
-          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
-            {isLeadingPendingBuzzerAnswer ? "判定中" : "排队中"}
-          </span>
-        ) : null}
-        {!alreadyCorrect && hasWrongCurrentRound ? (
-          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
-        ) : null}
-      </div>
+          {currentQuestionScoreAwarded > 0 ? (
+            <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
+              +{currentQuestionScoreAwarded} 分
+            </span>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
+          <span>答对 {correctCount} 题</span>
+          {alreadyCorrect ? (
+            <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
+          ) : null}
+          {currentQuestionScoreAwarded > 0 ? (
+            <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
+              +{currentQuestionScoreAwarded} 分
+            </span>
+          ) : null}
+          {!alreadyCorrect && hasForfeitedCurrentRound ? (
+            <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
+          ) : null}
+          {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound && !hasWrongCurrentRound ? (
+            <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
+          ) : null}
+          {isBuzzerMode && buzzerStatus === "pending" ? (
+            <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
+              {isLeadingPendingBuzzerAnswer ? "判定中" : "排队中"}
+            </span>
+          ) : null}
+          {!alreadyCorrect && hasWrongCurrentRound ? (
+            <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 });
@@ -791,6 +893,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isSpectatorLabelOpen, setIsSpectatorLabelOpen] = useState(false);
+  const [isSpectatorAnswerViewEnabled, setIsSpectatorAnswerViewEnabled] = useState(false);
   const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [isRoundPromptSoundEnabled, setIsRoundPromptSoundEnabled] = useState(getInitialRoundPromptSoundEnabled);
@@ -988,11 +1091,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         setAnswers(sortBySubmittedAt(snapshot.answers));
         setBuzzerAnswers(sortBySubmittedAt(snapshot.buzzerAnswers));
 
-        if (isPresenter) {
+        if (isPresenter || isSpectator) {
           setLabelAnswers(sortBySubmittedAt(snapshot.labelAnswers.filter((answer) => !isForfeitAnswer(answer))));
-          setMyBuzzerAnswer(null);
         } else {
           setLabelAnswers([]);
+        }
+
+        if (isPresenter) {
+          setMyBuzzerAnswer(null);
+        } else {
           setMyAnswer(snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
           setMyBuzzerAnswer(snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
         }
@@ -1016,7 +1123,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       setMyAnswer(isPresenter ? null : snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
       setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
     },
-    [isPresenter, playerId],
+    [isPresenter, isSpectator, playerId],
   );
 
   const catchUpRoundSnapshot = useCallback(() => {
@@ -1141,6 +1248,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   useEffect(() => {
     setCanRenderPortal(true);
   }, []);
+
+  useEffect(() => {
+    if (!isSpectator) {
+      setIsSpectatorAnswerViewEnabled(false);
+    }
+  }, [isSpectator]);
 
   useLayoutEffect(() => {
     const element = imageDisplayRef.current;
@@ -1718,9 +1831,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     [correctPlayerSet, eligibleGuesserIds],
   );
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
+  const currentRoundAnswerByPlayerId = useMemo(
+    () => new Map(answers.filter((answer) => !isForfeitAnswer(answer)).map((answer) => [answer.playerId, answer])),
+    [answers],
+  );
   const currentRoundForfeitPlayerSet = useMemo(
     () => new Set(answers.filter((answer) => isForfeitAnswer(answer)).map((answer) => answer.playerId)),
     [answers],
+  );
+  const correctAnswerByPlayerId = useMemo(
+    () => new Map(labelAnswers.map((answer) => [answer.playerId, answer])),
+    [labelAnswers],
   );
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
   const buzzerAnswerByPlayerId = useMemo(
@@ -2944,6 +3065,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const sidePanelHeightStyle = {
     "--image-display-height": imageDisplayHeight ? `${imageDisplayHeight}px` : "78vh",
   } as CSSProperties;
+  const showSpectatorAnswersInScoreboard =
+    isSpectator && isSpectatorAnswerViewEnabled && !isScoreboardCompact && !isTeamBattleMode;
 
   const scorePanel = (
     <div
@@ -3055,6 +3178,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               const hasForfeitedCurrentRound = currentRoundForfeitPlayerSet.has(player.id);
               const buzzerAnswer = buzzerAnswerByPlayerId.get(player.id);
               const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
+              const isLeadingPendingBuzzerAnswer = pendingBuzzerAnswers[0]?.id === buzzerAnswer?.id;
+              const spectatorAnswer = showSpectatorAnswersInScoreboard
+                ? getSpectatorAnswerDisplay({
+                    nickname: player.nickname,
+                    alreadyCorrect,
+                    currentAnswer: currentRoundAnswerByPlayerId.get(player.id),
+                    correctAnswer: correctAnswerByPlayerId.get(player.id),
+                    buzzerAnswer,
+                    hasForfeitedCurrentRound,
+                    isBuzzerMode,
+                    isLeadingPendingBuzzerAnswer,
+                  })
+                : null;
               const ScoreRow = isScoreboardCompact ? CompactScoreRow : StandardScoreRow;
 
               return (
@@ -3066,13 +3202,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                   hasAnsweredCurrentRound={hasAnsweredCurrentRound}
                   hasForfeitedCurrentRound={hasForfeitedCurrentRound}
                   isBuzzerMode={isBuzzerMode}
-                  isLeadingPendingBuzzerAnswer={pendingBuzzerAnswers[0]?.id === buzzerAnswer?.id}
+                  isLeadingPendingBuzzerAnswer={isLeadingPendingBuzzerAnswer}
                   key={player.id}
                   nickname={player.nickname}
                   onRowRef={registerScoreRow}
                   playerId={player.id}
                   rank={rank}
                   score={score}
+                  showSpectatorAnswer={showSpectatorAnswersInScoreboard}
+                  spectatorAnswerLabel={spectatorAnswer?.label ?? ""}
+                  spectatorAnswerStatus={spectatorAnswer?.status ?? "unanswered"}
+                  spectatorAnswerText={spectatorAnswer?.text ?? ""}
                 />
               );
             })}
@@ -3265,26 +3405,52 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             </p>
           </section>
 
-          {!isQuestionReviewing ? (
+          {!isQuestionReviewing || !isTeamBattleMode ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <div className="flex items-center justify-between gap-3">
-                <p className="font-semibold text-slate-950">正确答案</p>
-                <Button
-                  className="h-9 px-3"
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
-                >
-                  {isSpectatorLabelOpen ? "隐藏" : "展开"}
-                </Button>
-              </div>
-              {isSpectatorLabelOpen ? (
-                <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
-                  {currentQuestionLabel || "暂无"}
-                </p>
-              ) : (
-                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
-              )}
+              {!isTeamBattleMode ? (
+                <>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-semibold text-slate-950">玩家回答</p>
+                    <button
+                      aria-pressed={isSpectatorAnswerViewEnabled}
+                      className={[
+                        "h-9 min-w-16 rounded-md px-3 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200",
+                        isSpectatorAnswerViewEnabled
+                          ? "bg-slate-900 text-white hover:bg-slate-800"
+                          : "border border-[var(--line)] bg-white text-[var(--foreground)] hover:bg-slate-50",
+                      ].join(" ")}
+                      type="button"
+                      onClick={() => setIsSpectatorAnswerViewEnabled((isEnabled) => !isEnabled)}
+                    >
+                      {isSpectatorAnswerViewEnabled ? "隐藏" : "显示"}
+                    </button>
+                  </div>
+                  {!isQuestionReviewing ? <div className="my-3 h-px bg-[var(--line)]" /> : null}
+                </>
+              ) : null}
+
+              {!isQuestionReviewing ? (
+                <>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-semibold text-slate-950">正确答案</p>
+                    <Button
+                      className="h-9 min-w-16 px-3"
+                      type="button"
+                      variant="secondary"
+                      onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
+                    >
+                      {isSpectatorLabelOpen ? "隐藏" : "展开"}
+                    </Button>
+                  </div>
+                  {isSpectatorLabelOpen ? (
+                    <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
+                      {currentQuestionLabel || "暂无"}
+                    </p>
+                  ) : (
+                    <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
+                  )}
+                </>
+              ) : null}
             </section>
           ) : null}
         </div>
