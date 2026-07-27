@@ -30,6 +30,28 @@ const FINAL_PROJECTION_LIMIT_BYTES = 1024 * 1024;
 const FINAL_PROJECTION_RESERVE_BYTES = 400 * 1024;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const ALL_REVEALED_BLOCKS = Array.from({ length: 45 }, (_, index) => index);
+const QUESTION_SCOPED_MUTATION_NAMES = new Set([
+  "confirmRevealBlocks",
+  "submitAnswer",
+  "submitForfeitAnswer",
+  "cancelForfeitAnswer",
+  "submitBuzzerAnswer",
+  "judgeBuzzerAnswer",
+  "setAnswerJudgements",
+  "markPendingRoundAnswersWrong",
+  "settleBuzzerRound",
+  "autoForfeitExpiredRound",
+  "gradeAnswersAndAdvance",
+  "submitTeamBattleRevealVote",
+  "submitTeamBattleGuessVote",
+  "finalizeTeamBattleVote",
+  "judgeTeamBattleGuess",
+  "revealTeamBattleAnswer",
+  "advanceReviewedQuestion",
+  "skipCurrentQuestion",
+  "endCurrentGameEarly",
+  "updateQuestionLabel",
+]);
 
 type CutoverState = "initializing" | "active" | "ended";
 type CheckpointTrigger =
@@ -298,15 +320,17 @@ export class RoomAuthorityVNext {
     const current = this.aggregate ?? this.readAggregate();
     if (!current || current.gameId !== bootstrap.gameSession.id) throw new Error("authority vNext 开局 cutover 标记缺失。");
     const players = bootstrap.players.map((player) => ({ ...player, roomId: bootstrap.room.id }));
-    const scores = players
-      .filter((player) => player.role === "PLAYER")
+    const participatingPlayers = players.filter(
+      (player) => player.role === "PLAYER" && player.id !== bootstrap.gameSession.presenterPlayerId,
+    );
+    const scores = participatingPlayers
       .map((player) => ({ id: `${bootstrap.gameSession.id}:${player.id}`, gameSessionId: bootstrap.gameSession.id, playerId: player.id, score: 0, correctCount: 0 }));
     const aggregate: VNextAggregate = {
       ...current,
       cutoverState: "active",
       room: { ...bootstrap.room, players },
       players,
-      gameParticipants: players.filter((player) => player.role === "PLAYER").map((player) => ({ ...player, role: "PLAYER" })),
+      gameParticipants: participatingPlayers.map((player) => ({ ...player, role: "PLAYER" })),
       questionSet: bootstrap.questionSet,
       questions: bootstrap.questions.slice().sort((a, b) => a.orderIndex - b.orderIndex),
       gameSession: { ...bootstrap.gameSession, eligiblePlayerIds: bootstrap.gameSession.eligiblePlayerIds ?? this.eligiblePlayers(players, bootstrap.gameSession.presenterPlayerId) },
@@ -394,12 +418,15 @@ export class RoomAuthorityVNext {
     this.recentActions.clear();
   }
 
-  getSnapshot(): RoundSnapshot {
+  getSnapshot(nowMs = Date.now()): RoundSnapshot {
     const aggregate = this.requireActiveOrEnded();
+    const participantIds = this.participantIds(aggregate);
+    const gameSession = clone(aggregate.gameSession!);
+    gameSession.serverNow = nowIso(nowMs);
     return {
-      gameSession: clone(aggregate.gameSession!),
-      scores: clone(aggregate.scores),
-      questionResults: clone(aggregate.questionResults),
+      gameSession,
+      scores: clone(aggregate.scores.filter((score) => participantIds.has(score.playerId))),
+      questionResults: clone(aggregate.questionResults.filter((result) => participantIds.has(result.playerId))),
       answers: clone(aggregate.answers),
       labelAnswers: clone(aggregate.answers.filter((answer) => answer.answerText !== FORFEIT_ANSWER_TEXT)),
       buzzerAnswers: clone(aggregate.buzzerAnswers).sort(compareBuzzer),
@@ -411,18 +438,26 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActiveOrEnded();
     const params = isRecord(args[0]) ? args[0] : {};
     const session = aggregate.gameSession!;
+    const nowMs = Date.now();
     switch (name) {
-      case "getGameSessionById": return clone(session);
+      case "getGameSessionById": {
+        const currentSession = clone(session);
+        currentSession.serverNow = nowIso(nowMs);
+        return currentSession;
+      }
       case "getQuestionsByQuestionSetId": return clone(aggregate.questions);
-      case "getRoundSnapshot": return this.getSnapshot();
-      case "getGameBootstrapSnapshot": return { gameSession: clone(session), questions: clone(aggregate.questions), roundSnapshot: this.getSnapshot() } satisfies GameBootstrapSnapshot;
-      case "getPlayerScores": return clone(aggregate.scores);
+      case "getRoundSnapshot": return this.getSnapshot(nowMs);
+      case "getGameBootstrapSnapshot": {
+        const roundSnapshot = this.getSnapshot(nowMs);
+        return { gameSession: clone(roundSnapshot.gameSession), questions: clone(aggregate.questions), roundSnapshot } satisfies GameBootstrapSnapshot;
+      }
+      case "getPlayerScores": return clone(aggregate.scores.filter((score) => this.participantIds(aggregate).has(score.playerId)));
       case "getLeaderboardForGameSession": return this.leaderboard();
       case "getGameResultSnapshot": return this.gameResultSnapshot();
       case "getRoomWithPlayers": return clone(aggregate.room ?? null);
       case "getPlayersByRoomId": return clone(aggregate.players);
-      case "getQuestionResultsForQuestion": return clone(aggregate.questionResults.filter((result) => result.questionIndex === Number(params.questionIndex)));
-      case "getQuestionResultsForGameSession": return clone(aggregate.finalQuestionResults ?? aggregate.questionResults);
+      case "getQuestionResultsForQuestion": return clone(aggregate.questionResults.filter((result) => this.participantIds(aggregate).has(result.playerId) && result.questionIndex === Number(params.questionIndex)));
+      case "getQuestionResultsForGameSession": return clone((aggregate.finalQuestionResults ?? aggregate.questionResults).filter((result) => this.participantIds(aggregate).has(result.playerId)));
       case "getAnswersForQuestion": return clone(aggregate.answers.filter((answer) => answer.questionIndex === Number(params.questionIndex)));
       case "getAnswersForQuestionRound": return clone(aggregate.answers.filter((answer) => answer.questionIndex === Number(params.questionIndex) && answer.revealRound === Number(params.revealRound)));
       case "getAnswerForPlayerRound": return clone(aggregate.answers.find((answer) => answer.questionIndex === Number(params.questionIndex) && answer.revealRound === Number(params.revealRound) && answer.playerId === params.playerId) ?? null);
@@ -488,7 +523,9 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActiveOrEnded();
     const session = aggregate.gameSession!;
     const payload = action.payload;
-    if (action.questionIndex !== session.currentQuestionIndex) throw new TerminalMutationError("题目已切换，本次操作未生效。");
+    if (QUESTION_SCOPED_MUTATION_NAMES.has(action.name) && action.questionIndex !== session.currentQuestionIndex) {
+      throw new TerminalMutationError("题目已切换，本次操作未生效。");
+    }
     const payloadActor = getActionActor(payload);
     if (payloadActor && payloadActor !== action.actorId) throw new Error("操作身份与 actorId 不一致。");
     let outcome: VNextMutationOutcome;
@@ -518,6 +555,7 @@ export class RoomAuthorityVNext {
       case "kickPlayerFromRoom": outcome = this.leaveRoom(action, getString(action.payload.targetPlayerId) ?? ""); break;
       case "updatePlayerRole": outcome = this.updatePlayerRole(action); break;
       case "dissolveRoom": outcome = this.dissolveRoom(action); break;
+      case "cancelCurrentRound": outcome = this.cancelCurrentRound(action); break;
       case "returnRoomToLobby": outcome = this.returnRoomToLobby(action); break;
       default: throw new TerminalMutationError(`authority vNext 不支持操作 ${action.name}。`);
     }
@@ -542,7 +580,7 @@ export class RoomAuthorityVNext {
     session.serverNow = session.roundStartedAt;
     const runAtMs = action.serverReceivedAtMs + session.roundSeconds * 1000 + 3000;
     aggregate.deadline = { kind: "round", gameId: session.id, questionIndex: session.currentQuestionIndex, phaseKey: `round:${session.currentRevealRound}`, runAtMs };
-    return this.publicSessionOutcome(session, "phase-boundary", true);
+    return this.directSessionOutcome(session, "phase-boundary", true);
   }
 
   private submitAnswer(action: VNextPendingMutation): VNextMutationOutcome {
@@ -739,7 +777,7 @@ export class RoomAuthorityVNext {
       if (session.currentRevealRound < session.maxRevealRounds) session.currentRevealRound += 1;
       else session.revealedBlocks = ALL_REVEALED_BLOCKS;
     }
-    if (session.gameMode !== "ROUND_REVEAL") session.roundStartedAt = null;
+    session.roundStartedAt = null;
     aggregate.deadline = null;
     return this.publicSessionOutcome(session, "phase-boundary", true);
   }
@@ -791,7 +829,7 @@ export class RoomAuthorityVNext {
     state.revealVotes[action.actorId] = selected;
     state.revealBlockCount = blockCount;
     this.maybeStartVoteDeadline(state, team, action.serverReceivedAtMs);
-    return this.publicSessionOutcome(session, undefined, Boolean(state.voteDeadlineAt));
+    return this.directSessionOutcome(session, undefined, Boolean(state.voteDeadlineAt));
   }
 
   private teamGuessVote(action: VNextPendingMutation): VNextMutationOutcome {
@@ -803,7 +841,7 @@ export class RoomAuthorityVNext {
     if (vote.type === "guess" && !vote.answerText) throw new TerminalMutationError("请输入要猜的答案。");
     state.guessVotes[action.actorId] = vote;
     this.maybeStartVoteDeadline(state, team, action.serverReceivedAtMs);
-    return this.publicSessionOutcome(session, undefined, Boolean(state.voteDeadlineAt));
+    return this.directSessionOutcome(session, undefined, Boolean(state.voteDeadlineAt));
   }
 
   private finalizeTeamVote(action: VNextPendingMutation): VNextMutationOutcome {
@@ -943,7 +981,9 @@ export class RoomAuthorityVNext {
     }
     this.prepareFinalResultsFromArchives();
     const snapshot = this.gameResultSnapshot();
-    return { data: { gameSession: clone(session), room: clone(aggregate.room) }, provisional: true, publicDeltas: [{ scope: "game", type: "game_result_snapshot", snapshot }], presenterDeltas: [], playerDeltas: [], forceCheckpoint: "game-end", archiveQuestion: true, deadlineChanged: true };
+    const publicDeltas: RealtimeDelta[] = [{ scope: "game", type: "game_result_snapshot", snapshot }];
+    if (aggregate.room) publicDeltas.push({ scope: "room", type: "room_updated", room: clone(aggregate.room) });
+    return { data: { gameSession: clone(session), room: clone(aggregate.room) }, provisional: true, publicDeltas, presenterDeltas: [], playerDeltas: [], forceCheckpoint: "game-end", archiveQuestion: true, deadlineChanged: true };
   }
 
   private updateQuestionLabel(action: VNextPendingMutation): VNextMutationOutcome {
@@ -972,17 +1012,22 @@ export class RoomAuthorityVNext {
     if (role === "PLAYER") this.ensurePlayerScore(player.id);
     if (aggregate.room) aggregate.room.players = aggregate.players;
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room!) };
-    return { data: clone(aggregate.room), provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [] };
+    return { data: { room: clone(aggregate.room), error: null, errorCode: null }, provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [] };
   }
 
   private leaveRoom(action: VNextPendingMutation, targetPlayerId: string): VNextMutationOutcome {
-    const aggregate = this.requireActive();
+    const aggregate = this.requireActiveOrEnded();
     if (!targetPlayerId) throw new TerminalMutationError("目标玩家无效。");
     if (action.name === "kickPlayerFromRoom" && aggregate.room?.hostPlayerId !== action.actorId) throw new TerminalMutationError("只有房主可以移出玩家。");
     aggregate.players = aggregate.players.filter((player) => player.id !== targetPlayerId);
     if (aggregate.room) {
       aggregate.room.players = aggregate.players;
-      if (aggregate.room.hostPlayerId === targetPlayerId && aggregate.players[0]) {
+      if (!aggregate.players.length) {
+        aggregate.room = undefined;
+        aggregate.dissolved = true;
+        aggregate.cutoverState = "ended";
+        aggregate.deadline = null;
+      } else if (aggregate.room.hostPlayerId === targetPlayerId) {
         aggregate.room.hostPlayerId = aggregate.players[0].id;
         aggregate.players.forEach((player) => { player.isHost = player.id === aggregate.room!.hostPlayerId; });
       }
@@ -1004,7 +1049,15 @@ export class RoomAuthorityVNext {
       }
     }
     const delta: RealtimeDelta = aggregate.room ? { scope: "room", type: "room_updated", room: clone(aggregate.room) } : { scope: "room", type: "room_dissolved", roomId: aggregate.roomId };
-    return { data: clone(aggregate.room), provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [], ...(aggregate.deadline === null ? { deadlineChanged: true } : {}) };
+    return {
+      data: aggregate.room ? clone(aggregate.room) : null,
+      provisional: true,
+      publicDeltas: [delta],
+      presenterDeltas: [],
+      playerDeltas: [],
+      ...(aggregate.dissolved ? { forceCheckpoint: "game-end" as const } : aggregate.cutoverState === "ended" ? { forceCheckpoint: "projection" as const } : {}),
+      ...(aggregate.deadline === null ? { deadlineChanged: true } : {}),
+    };
   }
 
   private updatePlayerRole(action: VNextPendingMutation): VNextMutationOutcome {
@@ -1022,9 +1075,12 @@ export class RoomAuthorityVNext {
 
   private ensurePlayerScore(playerId: string) {
     const aggregate = this.requireActive();
+    if (playerId === aggregate.gameSession?.presenterPlayerId) return;
     const player = aggregate.players.find((item) => item.id === playerId);
     if (player) {
-      aggregate.gameParticipants ??= aggregate.players.filter((item) => item.role === "PLAYER").map((item) => ({ ...item, role: "PLAYER" }));
+      aggregate.gameParticipants ??= aggregate.players
+        .filter((item) => item.role === "PLAYER" && item.id !== aggregate.gameSession?.presenterPlayerId)
+        .map((item) => ({ ...item, role: "PLAYER" }));
       const participant = aggregate.gameParticipants.find((item) => item.id === playerId);
       if (participant) Object.assign(participant, { nickname: player.nickname, role: "PLAYER", lastSeenAt: player.lastSeenAt });
       else aggregate.gameParticipants.push({ ...player, role: "PLAYER" });
@@ -1053,6 +1109,20 @@ export class RoomAuthorityVNext {
     aggregate.room.status = "LOBBY";
     aggregate.room.currentGameId = null;
     aggregate.room.currentPresenterPlayerId = null;
+    aggregate.cutoverState = "ended";
+    aggregate.deadline = null;
+    const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room) };
+    return { data: clone(aggregate.room), provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [], forceCheckpoint: "projection", deadlineChanged: true };
+  }
+
+  private cancelCurrentRound(action: VNextPendingMutation): VNextMutationOutcome {
+    const aggregate = this.requireActive();
+    if (aggregate.room?.hostPlayerId !== action.actorId) throw new TerminalMutationError("只有房主可以取消当前游戏。");
+    if (!aggregate.room) throw new TerminalMutationError("房间已经解散。");
+    aggregate.room.status = "LOBBY";
+    aggregate.room.currentGameId = null;
+    aggregate.room.currentPresenterPlayerId = null;
+    aggregate.room.preparedQuestionSetId = null;
     aggregate.cutoverState = "ended";
     aggregate.deadline = null;
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room) };
@@ -1233,7 +1303,7 @@ export class RoomAuthorityVNext {
         if (game.dissolved) {
           statements.push(this.d1.prepare("DELETE FROM rooms WHERE id=?").bind(game.roomId));
         } else {
-          if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET game_status=?,current_game_id=?,updated_at=? WHERE id=?").bind(game.room.status, game.room.currentGameId ?? null, nowIso(), game.room.id));
+          if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_game_id=?,updated_at=? WHERE id=?").bind(game.room.hostPlayerId, game.room.status, game.room.currentGameId ?? null, nowIso(), game.room.id));
           statements.push(this.d1.prepare("DELETE FROM players WHERE room_id=?").bind(game.roomId));
           if (game.players.length) {
             const players = game.players.map((player) => ({ ...player, joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt, lastSeenAt: player.lastSeenAt ?? nowIso() }));
@@ -1284,7 +1354,10 @@ export class RoomAuthorityVNext {
   private mergeProjectionOutbox(aggregate: VNextAggregate) {
     const existing = this.state.storage.sql.exec<{ payload_json: string }>("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
     const payload = existing ? JSON.parse(existing.payload_json) as { games: Array<Record<string, unknown>> } : { games: [] };
-    const game = { roomId: aggregate.roomId, dissolved: aggregate.dissolved, room: aggregate.room, players: aggregate.players, participants: aggregate.gameParticipants ?? aggregate.players.filter((player) => player.role === "PLAYER"), questions: aggregate.questions, gameSession: aggregate.gameSession, scores: aggregate.scores, questionResults: aggregate.finalQuestionResults ?? aggregate.questionResults };
+    const participantIds = this.participantIds(aggregate);
+    const participants = (aggregate.gameParticipants ?? aggregate.players)
+      .filter((player) => participantIds.has(player.id));
+    const game = { roomId: aggregate.roomId, dissolved: aggregate.dissolved, room: aggregate.room, players: aggregate.players, participants, questions: aggregate.questions, gameSession: aggregate.gameSession, scores: aggregate.scores.filter((score) => participantIds.has(score.playerId)), questionResults: (aggregate.finalQuestionResults ?? aggregate.questionResults).filter((result) => participantIds.has(result.playerId)) };
     payload.games = [...payload.games.filter((item) => (item.gameSession as { id?: string } | undefined)?.id !== aggregate.gameId), game];
     const payloadJson = JSON.stringify(payload);
     if (new TextEncoder().encode(payloadJson).byteLength > FINAL_PROJECTION_LIMIT_BYTES) throw new Error("authority vNext 最终投影队列已满，请等待长期结果同步后再开始下一局。");
@@ -1409,8 +1482,15 @@ export class RoomAuthorityVNext {
 
   private leaderboard(): LeaderboardEntry[] {
     const aggregate = this.requireActiveOrEnded();
-    const names = new Map(aggregate.players.map((player) => [player.id, player.nickname]));
-    const sorted = aggregate.scores.map((score) => ({ playerId: score.playerId, nickname: names.get(score.playerId) ?? "玩家", score: score.score, correctCount: score.correctCount })).sort((a, b) => b.score - a.score || b.correctCount - a.correctCount || a.nickname.localeCompare(b.nickname));
+    const names = new Map([
+      ...(aggregate.gameParticipants ?? []).map((player) => [player.id, player.nickname] as const),
+      ...aggregate.players.map((player) => [player.id, player.nickname] as const),
+    ]);
+    const participantIds = this.participantIds(aggregate);
+    const sorted = aggregate.scores
+      .filter((score) => participantIds.has(score.playerId))
+      .map((score) => ({ playerId: score.playerId, nickname: names.get(score.playerId) ?? "玩家", score: score.score, correctCount: score.correctCount }))
+      .sort((a, b) => b.score - a.score || b.correctCount - a.correctCount || a.nickname.localeCompare(b.nickname));
     let previousScore: number | null = null;
     let previousRank = 0;
     return sorted.map((item, index) => {
@@ -1423,11 +1503,27 @@ export class RoomAuthorityVNext {
 
   private gameResultSnapshot(): GameResultSnapshot {
     const aggregate = this.requireActiveOrEnded();
-    return { gameSession: clone(aggregate.gameSession!), leaderboard: clone(aggregate.finalLeaderboard ?? this.leaderboard()), questionSet: clone(aggregate.questionSet ?? null), questionResults: clone(aggregate.finalQuestionResults ?? aggregate.questionResults) };
+    const participantIds = this.participantIds(aggregate);
+    const questionSet = aggregate.questionSet
+      ? { ...aggregate.questionSet, questions: clone(aggregate.questions) }
+      : null;
+    return { gameSession: clone(aggregate.gameSession!), leaderboard: clone(this.leaderboard()), questionSet, questionResults: clone((aggregate.finalQuestionResults ?? aggregate.questionResults).filter((result) => participantIds.has(result.playerId))) };
+  }
+
+  private participantIds(aggregate: VNextAggregate) {
+    return new Set(
+      (aggregate.gameParticipants ?? aggregate.players)
+        .filter((player) => player.role === "PLAYER" && player.id !== aggregate.gameSession?.presenterPlayerId)
+        .map((player) => player.id),
+    );
   }
 
   private publicSessionOutcome(session: GameSession, forceCheckpoint?: CheckpointTrigger, deadlineChanged = false): VNextMutationOutcome {
     return { data: { gameSession: clone(session) }, provisional: true, publicDeltas: [{ scope: "game", type: "game_session_updated", gameSession: clone(session) }], presenterDeltas: [], playerDeltas: [], forceCheckpoint, deadlineChanged };
+  }
+
+  private directSessionOutcome(session: GameSession, forceCheckpoint?: CheckpointTrigger, deadlineChanged = false): VNextMutationOutcome {
+    return { ...this.publicSessionOutcome(session, forceCheckpoint, deadlineChanged), data: clone(session) };
   }
 
   private terminalError(message: string): VNextMutationOutcome {

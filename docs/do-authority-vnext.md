@@ -36,10 +36,11 @@
 - `clientSeq == lastSeen+1` 才应用；更小为 duplicate/replay，更大为明确 out-of-order 拒绝。
 - 合法 envelope 的业务终止拒绝会消费 seq、进入 dirty committedSeq 流并返回 terminal rejection；语法/身份/乱序拒绝不消费。
 - terminal rejection 在 durable ACK 前仍留 Outbox；重连重放返回同一拒绝，checkpoint 后才按 committed seq 清除。
-- `gameId`、题号、phase 不匹配时拒绝；最近 actionId 集合最多 512 项，按插入顺序淘汰。
+- `gameId` 不匹配时拒绝；题目级 mutation 的题号、phase 不匹配时拒绝，加入/退出/角色/踢人/解散/取消本局/返回大厅等房间级 mutation 不受题号约束；最近 actionId 集合最多 512 项，按插入顺序淘汰。
 - 普通答案：Outbox→DO 验证→分配 `serverReceivedAt/orderToken`→内存/Attachment→provisional ACK→仅主持人 answer delta。
 - 普通判定：Outbox→DO 验证→内存/主持人 Attachment→目标玩家及主持人 judgement delta→provisional ACK。
 - checkpoint 后发送 `checkpoint_committed(version, committedSeqByActor)`；客户端仅删除 `clientSeq <= committedSeq`。
+- 客户端收到 durable ACK 时还必须原子推进对应 actor 的 IndexedDB 序号水位；HTTP vNext mutation 的响应也携带已提交序号提示，并在 RPC 返回页面前完成本地同步，避免两条连接乱序时与 Outbox 分配出相同 `clientSeq`。
 - 握手确认当前持久化 gameId 后，客户端丢弃其他已结束 gameId 的 Outbox；旧局 envelope 在 vNext DO 明确拒绝，绝不回落 legacy。
 - snapshot 仅用于加入、刷新、重连和版本缺口恢复；普通 mutation 不构建完整 snapshot。
 
@@ -67,9 +68,12 @@
 
 ## 广播与稳定窗口
 
-- answer 正文只发主持人；judgement 立即发目标玩家和主持人；公开状态才广播全房。
+- answer 正文只发主持人；3秒稳定窗口内隐藏正文，窗口结束后立即显示并启用判定；judgement 立即发目标玩家和主持人；公开状态才广播全房。
+- Worker 转发 WebSocket 到 Room DO 时必须保留 `playerId` 查询参数；Attachment 连接身份不得依赖该连接先发送 mutation 才补全。
 - 同一 payload 只 stringify 一次；普通 delta 目标小于1KB，目标玩家反馈不做延迟批处理。
-- 3秒稳定窗口使用服务端绝对时间；`orderToken=serverReceivedAtMs:actorId:clientSeq` 构成可恢复全序，主持人可立即看 provisional 排序。
+- 3秒稳定窗口使用服务端绝对时间；`orderToken=serverReceivedAtMs:actorId:clientSeq` 构成可恢复全序，窗口结束由一次性 UI 定时器触发重绘，不参与保活或持久化。
+- 恢复/补拉 snapshot 的 `serverNow` 必须使用快照生成时刻，不能复用持久化的轮次开始时刻；客户端不得被旧 snapshot 向后校时。
+- `serverNow` 仅用于校时，不作为业务状态版本；公开 delta 顺序使用 realtime version，状态位置使用题号/轮次/轮次开始标识。
 - 最终顺序在后续真实事件或 deadline 锁定，并先 checkpoint 后广播。
 
 ## Alarm 规则
@@ -84,6 +88,7 @@
 ## D1 最终投影
 
 - 游戏结束 checkpoint 同时 UPSERT 唯一最终 projection outbox row，然后立即 best-effort 批量投影。
+- 结算快照中的 `questionSet.questions` 必须来自 authority 聚合的最新 `questions`，确保本局填写的正确答案无需等待 D1 投影即可在题库浏览中显示。
 - 单行 outbox payload 是按 gameId 去重的有界聚合批次；新局结束只合并、不覆盖尚未成功的旧局结果。
 - payload 上限1MiB并为下一局最坏聚合预留400KiB；接近上限时先同步排空，仍失败才禁止下一局，绝不覆盖/丢弃旧结果。
 - D1 临时失败不回滚已结束游戏；小 outbox 不阻止下一局，后续真实事件继续重试且不设置投影 Alarm。
@@ -105,8 +110,9 @@
 - TEAM_BATTLE 成员离开时移除 teams/votes/memberNames；activeTeam 空则切换可行动队并清 votes/pending/deadline。
 - `advanceReviewedQuestion/skip/end/return/dissolve` 归档当前题并强制 checkpoint；切题重建 eligibility 和模式初始状态。
 - 四模式均测试前置条件、aggregate 字段、delta、deadline、计分、放弃/批判/切题，以及 legacy/vNext 等价结果。
-- active vNext 期间加入/离开/踢人/角色变化只更新 DO aggregate；下一题 eligibility 从 aggregate roster 一次计算。
-- 本局首次成为 PLAYER 时进入只增不减的参赛者快照；离房或转观众不删除历史参赛身份，最终排行榜投影仍保留其成绩。
+- active vNext 期间加入/离开/踢人/角色变化只更新 DO aggregate；ended vNext 允许玩家退出并立即 checkpoint/投影房间 roster；下一题 eligibility 从 aggregate roster 一次计算。
+- vNext 房间 mutation 必须保持原公开 RPC 返回契约；`joinRoom` 成功仍返回 `{ room, error, errorCode }`，不能以裸 `Room` 破坏调用方判断。
+- 本局首次成为非出题人的 PLAYER 时进入只增不减的参赛者快照；出题人和从未参赛的观战者不得进入积分、逐题结果、排行榜或参赛者投影，离房或参赛后转观众不删除历史参赛身份。
 - 游戏中不投影 D1 roster；结束/回大厅时连同房间长期索引批量投影。房间码发现可读 D1 索引，但实时 roster 必须从 DO 恢复 snapshot 获取。
 
 ## v7 迁移验收

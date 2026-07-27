@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { RoomGameAuthority } from "../worker/roomGameAuthority";
 import { ATTACHMENT_BUDGET_BYTES, RoomAuthorityVNext, type VNextMutationEnvelope, type VNextSocketAttachment } from "../worker/roomAuthorityVNext";
+import { getBuzzerAnswerStabilityDelayMs, getRemainingSeconds, isBuzzerAnswerReadyForJudging, isGameSessionPositionStale, shouldAcceptServerClock } from "../src/components/ImageRevealGame";
 import type { GameSession, Player, Question, QuestionSet, Room } from "../src/types/game";
 
 class Cursor<T extends Record<string, unknown>> {
@@ -391,7 +392,8 @@ test("late join and PLAYER role promotion receive scores on the next question", 
   const late = socketFor(state, "late");
   const p0 = socketFor(state, "p0");
   const now = Date.now();
-  authority.handleMutation(late, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), now);
+  const joined = authority.handleMutation(late, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), now);
+  assert.deepEqual(joined.data, { room: authority.getAggregate()?.room, error: null, errorCode: null });
   authority.handleMutation(host, envelope("host", 1, "updatePlayerRole", { targetPlayerId: "p0", role: "SPECTATOR" }), now + 1);
   authority.getAggregate()!.scores = authority.getAggregate()!.scores.filter((score) => score.playerId !== "p0");
   delete authority.getAggregate()!.scoreBaseline.p0;
@@ -433,6 +435,55 @@ test("confirm reveal requires a newly revealed block", () => {
   assert.match(result.error ?? "", /尚未打开/);
 });
 
+test("direct GameSession mutations preserve their public RPC response contract", () => {
+  const { state, authority } = createAuthority(2);
+  const host = socketFor(state, "host");
+  const p0 = socketFor(state, "p0");
+  const now = Date.now();
+  const opened = authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  assert.equal((opened.data as GameSession).id, authority.getAggregate()?.gameSession?.id);
+  assert.equal("gameSession" in (opened.data as Record<string, unknown>), false);
+
+  const session = authority.getAggregate()!.gameSession!;
+  session.roundStartedAt = null;
+  session.gameMode = "TEAM_BATTLE";
+  session.teamBattleState = {
+    teams: { red: ["p0"], blue: ["p1"] }, initialTeams: { red: ["p0"], blue: ["p1"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  const revealed = authority.handleMutation(p0, envelope("p0", 1, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [2], revealBlockCount: 45 }), now + 1);
+  assert.equal((revealed.data as GameSession).id, session.id);
+  assert.equal("gameSession" in (revealed.data as Record<string, unknown>), false);
+
+  session.teamBattleState.phase = "GUESS_VOTE";
+  session.teamBattleState.voteDeadlineAt = null;
+  const guessed = authority.handleMutation(p0, envelope("p0", 2, "submitTeamBattleGuessVote", { playerId: "p0", vote: { type: "skip" } }), now + 2);
+  assert.equal((guessed.data as GameSession).id, session.id);
+  assert.equal("gameSession" in (guessed.data as Record<string, unknown>), false);
+});
+
+test("cancel current round persistently releases vNext for the next game", async () => {
+  const { authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.room!.preparedQuestionSetId = "set-1";
+  aggregate.deadline = { kind: "round", gameId: "g1", questionIndex: 0, phaseKey: "round:1", runAtMs: Date.now() + 10_000 };
+  const canceled = authority.handleMutation(null, envelope("host", 1, "cancelCurrentRound", { roomId: "r1", hostPlayerId: "host" }), Date.now());
+  assert.equal(canceled.forceCheckpoint, "projection");
+  assert.equal(authority.getAggregate()?.cutoverState, "ended");
+  assert.equal(authority.getAggregate()?.deadline, null);
+  assert.deepEqual(canceled.data, {
+    ...aggregate.room,
+    status: "LOBBY",
+    currentGameId: null,
+    currentPresenterPlayerId: null,
+    preparedQuestionSetId: null,
+  });
+  await authority.forceCheckpoint(canceled.forceCheckpoint!);
+  authority.beginStart("r1", "g2", { startRequestId: "g2" });
+  assert.equal(authority.getAggregate()?.gameId, "g2");
+  assert.equal(authority.getAggregate()?.cutoverState, "initializing");
+});
+
 test("FIRST_CORRECT judgement locks the question for review", async () => {
   const { state, authority } = createAuthority(2);
   const aggregate = authority.getAggregate()!;
@@ -460,6 +511,306 @@ test("RANKED settlement advances only after all chances are resolved", () => {
   authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 3012);
   assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 2);
   assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null);
+});
+
+test("ROUND_REVEAL settlement returns to block selection before the next round", () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const now = Date.now();
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  authority.handleMutation(player, envelope("p0", 1, "submitAnswer", { playerId: "p0", answerText: "wrong" }), now + 10);
+  authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", {
+    presenterPlayerId: "host",
+    judgements: [{ buzzerAnswerId: "p0:1:submitAnswer:b", isCorrect: false }],
+  }), now + 3010);
+
+  const settled = authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 3011);
+  assert.equal(settled.error, undefined);
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 2);
+  assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null);
+  assert.equal(authority.getDeadline(), null);
+
+  const reopened = authority.handleMutation(host, envelope("host", 4, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [2] }), now + 3012);
+  assert.equal(reopened.error, undefined);
+  assert.ok(authority.getAggregate()?.gameSession?.roundStartedAt);
+});
+
+test("game completion broadcasts both final results and GAME_RESULT room state", () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+
+  const resultDelta = ended.publicDeltas.find((delta) => delta.type === "game_result_snapshot");
+  const roomDelta = ended.publicDeltas.find((delta) => delta.type === "room_updated");
+  assert.equal(resultDelta?.type, "game_result_snapshot");
+  assert.equal(roomDelta?.type, "room_updated");
+  if (roomDelta?.type === "room_updated") {
+    assert.equal(roomDelta.room.status, "GAME_RESULT");
+    assert.equal(roomDelta.room.currentGameId, "g1");
+  }
+});
+
+test("players can leave an ended vNext game and roster projection is forced", async () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  const left = authority.handleMutation(player, envelope("p0", 1, "leaveRoom", { roomId: "r1", playerId: "p0" }), Date.now() + 1);
+  assert.equal(left.error, undefined);
+  assert.equal(left.forceCheckpoint, "projection");
+  assert.deepEqual(authority.getAggregate()?.players.map((item) => item.id), ["host"]);
+  assert.deepEqual(authority.getAggregate()?.gameParticipants?.map((item) => item.id), ["p0"]);
+  await authority.forceCheckpoint(left.forceCheckpoint!);
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.deepEqual(restored.getAggregate()?.players.map((item) => item.id), ["host"]);
+  assert.deepEqual(restored.query("getLeaderboardForGameSession", ["g1"]).map((entry: { playerId: string; nickname: string }) => [entry.playerId, entry.nickname]), [["p0", "P0"]]);
+});
+
+test("ended room mutations ignore a stale question index", () => {
+  const { state, authority } = createAuthority(1, fakeD1, 2);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const now = Date.now();
+  const advanced = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), now);
+  assert.equal(advanced.error, undefined);
+  const ended = authority.handleMutation(host, {
+    ...envelope("host", 2, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 1 }),
+    questionIndex: 1,
+  }, now + 1);
+  assert.equal(ended.error, undefined);
+
+  const left = authority.handleMutation(player, envelope("p0", 1, "leaveRoom", { roomId: "r1", playerId: "p0" }), now + 2);
+  assert.equal(left.error, undefined);
+  assert.deepEqual(authority.getAggregate()?.players.map((item) => item.id), ["host"]);
+
+  const returned = authority.handleMutation(host, envelope("host", 3, "returnRoomToLobby", { roomId: "r1", hostPlayerId: "host" }), now + 3);
+  assert.equal(returned.error, undefined);
+  assert.equal(authority.getAggregate()?.room?.status, "LOBBY");
+});
+
+test("game result snapshot and final projection retain labels saved before question changes", async () => {
+  const statements: Array<{ sql: string; bindings: unknown[] }> = [];
+  const d1 = {
+    prepare(sql: string) { return { bind(...bindings: unknown[]) { const statement = { sql, bindings }; statements.push(statement); return statement; } }; },
+    async batch() { return []; },
+  } as unknown as D1Database;
+  const { state, authority } = createAuthority(1, d1, 2);
+  const host = socketFor(state, "host");
+  const now = Date.now();
+
+  authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", {
+    presenterPlayerId: "host",
+    questionId: "q1",
+    labelText: "第一题答案",
+    source: "manual",
+  }), now);
+  const advanced = authority.handleMutation(host, envelope("host", 2, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), now + 1);
+  await authority.forceCheckpoint(advanced.forceCheckpoint ?? "phase-boundary", true);
+  authority.handleMutation(host, {
+    ...envelope("host", 3, "updateQuestionLabel", {
+      presenterPlayerId: "host",
+      questionId: "q2",
+      labelText: "第二题答案",
+      source: "answer",
+      answerId: "answer-2",
+    }),
+    questionIndex: 1,
+  }, now + 2);
+  const ended = authority.handleMutation(host, {
+    ...envelope("host", 4, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 1 }),
+    questionIndex: 1,
+  }, now + 3);
+
+  const snapshotDelta = ended.publicDeltas.find((delta) => delta.type === "game_result_snapshot");
+  assert.equal(snapshotDelta?.type, "game_result_snapshot");
+  if (snapshotDelta?.type === "game_result_snapshot") {
+    assert.deepEqual(snapshotDelta.snapshot.questionSet?.questions?.map((question) => question.labelText), ["第一题答案", "第二题答案"]);
+  }
+
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, d1);
+  await restored.restoreFromStorage();
+  const restoredSnapshot = restored.query("getGameResultSnapshot", []) as { questionSet: QuestionSet | null };
+  assert.deepEqual(restoredSnapshot.questionSet?.questions?.map((question) => question.labelText), ["第一题答案", "第二题答案"]);
+  await authority.flushFinalProjection();
+  const labelUpdates = statements.filter((statement) => /UPDATE questions SET label_text/.test(statement.sql));
+  assert.deepEqual(labelUpdates.map((statement) => [statement.bindings[0], statement.bindings[5]]), [["第一题答案", "q1"], ["第二题答案", "q2"]]);
+});
+
+test("ended host leave projects host transfer and the final player dissolves the room", async () => {
+  const statements: Array<{ sql: string; bindings: unknown[] }> = [];
+  const d1 = {
+    prepare(sql: string) { return { bind(...bindings: unknown[]) { const statement = { sql, bindings }; statements.push(statement); return statement; } }; },
+    async batch() { return []; },
+  } as unknown as D1Database;
+  const { state, authority } = createAuthority(1, d1);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  const hostLeft = authority.handleMutation(host, envelope("host", 2, "leaveRoom", { roomId: "r1", playerId: "host" }), Date.now() + 1);
+  assert.equal(hostLeft.forceCheckpoint, "projection");
+  assert.equal(authority.getAggregate()?.room?.hostPlayerId, "p0");
+  await authority.forceCheckpoint(hostLeft.forceCheckpoint!);
+  await authority.flushFinalProjection();
+  const roomUpdate = statements.find((statement) => /UPDATE rooms SET host_player_id/.test(statement.sql));
+  assert.equal(roomUpdate?.bindings[0], "p0");
+
+  statements.length = 0;
+  const finalLeft = authority.handleMutation(player, envelope("p0", 1, "leaveRoom", { roomId: "r1", playerId: "p0" }), Date.now() + 2);
+  assert.equal(finalLeft.forceCheckpoint, "game-end");
+  assert.equal(finalLeft.data, null);
+  assert.equal(authority.getAggregate()?.dissolved, true);
+  assert.equal(authority.getAggregate()?.room, undefined);
+  await authority.forceCheckpoint(finalLeft.forceCheckpoint!);
+  await authority.flushFinalProjection();
+  assert.ok(statements.some((statement) => /DELETE FROM rooms WHERE id/.test(statement.sql)));
+});
+
+test("presenter UI reveals answers and enables judging immediately after the stability window", () => {
+  const answer = { submittedAt: new Date(1_000).toISOString(), serverReceivedAt: new Date(1_000).toISOString() };
+  assert.equal(getBuzzerAnswerStabilityDelayMs(answer, 3_999), 1);
+  assert.equal(isBuzzerAnswerReadyForJudging(answer, 3_999), false);
+  assert.equal(getBuzzerAnswerStabilityDelayMs(answer, 4_000), 0);
+  assert.equal(isBuzzerAnswerReadyForJudging(answer, 4_000), true);
+
+  const source = readFileSync(new URL("../src/components/ImageRevealGame.tsx", import.meta.url), "utf8");
+  assert.match(source, /const currentBuzzerAnswer =\s*firstPendingBuzzerAnswer && isBuzzerAnswerReadyForJudging/);
+  assert.match(source, /currentBuzzerAnswer &&\s*isBuzzerAnswerReadyForJudging\(currentBuzzerAnswer, getEstimatedServerNowMs\(\)\)/);
+  assert.match(source, /const isAnswerRevealed = Boolean\(answer && canRevealAnswer\(answer\)\);/);
+  assert.match(source, /答案确认中/);
+  assert.match(source, /setTimeout\(\(\) => setBuzzerQueueClockTick/);
+  assert.match(source, /nextReadyAtMs - nowMs/);
+});
+
+test("countdown is derived from absolute server time and catches up after delayed UI ticks", () => {
+  const roundStartedAt = new Date(1_000).toISOString();
+  assert.equal(getRemainingSeconds(roundStartedAt, 45, 1_000), 45);
+  assert.equal(getRemainingSeconds(roundStartedAt, 45, 11_000), 35);
+  assert.equal(getRemainingSeconds(roundStartedAt, 45, 46_000), 0);
+  assert.equal(getRemainingSeconds(roundStartedAt, 45, 70_000), 0);
+});
+
+test("recovery snapshots use generation time and cannot rewind the client clock", () => {
+  const { authority } = createAuthority(1);
+  const aggregate = authority.getAggregate()!;
+  const persistedRoundStart = new Date(1_000).toISOString();
+  aggregate.gameSession!.roundStartedAt = persistedRoundStart;
+  aggregate.gameSession!.serverNow = persistedRoundStart;
+
+  const beforeQuery = Date.now();
+  const snapshot = authority.query("getGameBootstrapSnapshot", [aggregate.gameId]) as {
+    gameSession: GameSession;
+    roundSnapshot: { gameSession: GameSession };
+  };
+  const snapshotServerNowMs = new Date(snapshot.gameSession.serverNow ?? "").getTime();
+
+  assert.ok(snapshotServerNowMs >= beforeQuery);
+  assert.equal(snapshot.roundSnapshot.gameSession.serverNow, snapshot.gameSession.serverNow);
+  assert.equal(snapshot.gameSession.roundStartedAt, persistedRoundStart);
+  assert.equal(shouldAcceptServerClock(snapshotServerNowMs, snapshotServerNowMs - 60_000), false);
+  assert.equal(shouldAcceptServerClock(snapshotServerNowMs, snapshotServerNowMs + 1), true);
+  assert.equal(getRemainingSeconds(snapshot.gameSession.roundStartedAt, 45, snapshotServerNowMs), 0);
+});
+
+test("fresh snapshot clock does not cause same-round authoritative deltas to be discarded", () => {
+  const { authority } = createAuthority(1);
+  const current = structuredClone(authority.getAggregate()!.gameSession!);
+  current.roundStartedAt = new Date(10_000).toISOString();
+  current.serverNow = new Date(70_000).toISOString();
+
+  const settled = { ...structuredClone(current), roundStartedAt: null, serverNow: new Date(10_000).toISOString() };
+  assert.equal(isGameSessionPositionStale(settled, current), false);
+
+  const sameRoundDelta = { ...structuredClone(current), serverNow: new Date(10_000).toISOString() };
+  assert.equal(isGameSessionPositionStale(sameRoundDelta, current), false);
+
+  const olderRound = { ...structuredClone(current), currentRevealRound: current.currentRevealRound - 1 };
+  assert.equal(isGameSessionPositionStale(olderRound, current), true);
+});
+
+test("leaderboard and final projection include participants but exclude presenter and spectators", async () => {
+  const projectionBatches: Array<Array<{ sql: string; bindings: unknown[] }>> = [];
+  const projectionD1 = {
+    prepare(sql: string) {
+      return { sql, bindings: [] as unknown[], bind(...bindings: unknown[]) { this.bindings = bindings; return this; } };
+    },
+    async batch(statements: Array<{ sql: string; bindings: unknown[] }>) {
+      projectionBatches.push(statements);
+      return [];
+    },
+  } as unknown as D1Database;
+  const state = new FakeState();
+  state.storage.sql.db.exec(`
+    CREATE TABLE authority_vnext_active_game (id INTEGER PRIMARY KEY CHECK(id=1),room_id TEXT NOT NULL,game_id TEXT NOT NULL,authority_version INTEGER NOT NULL,schema_version INTEGER NOT NULL,cutover_state TEXT NOT NULL,state_version INTEGER NOT NULL,state_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
+    CREATE TABLE authority_vnext_question_archive (game_id TEXT NOT NULL,question_index INTEGER NOT NULL,checkpoint_version INTEGER NOT NULL,state_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(game_id,question_index));
+    CREATE TABLE authority_vnext_projection_outbox (id INTEGER PRIMARY KEY CHECK(id=1),payload_json TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
+  `);
+  const authority = new RoomAuthorityVNext(state as unknown as DurableObjectState, projectionD1);
+  const start = bootstrap(1);
+  const spectator: Player = { id: "spectator", roomId: "r1", nickname: "Watcher", isHost: false, role: "SPECTATOR", joinedAt: 2 };
+  start.players.push(spectator);
+  start.room.players = start.players;
+  authority.beginStart("r1", "g1", { startRequestId: "g1" });
+  authority.activateStart(start);
+
+  assert.deepEqual(authority.getAggregate()?.scores.map((score) => score.playerId), ["p0"]);
+  assert.deepEqual(authority.getAggregate()?.gameParticipants?.map((player) => player.id), ["p0"]);
+
+  // Old vNext rows may already contain these invalid zero-score entries; result generation must sanitize them.
+  authority.getAggregate()!.scores.push(
+    { id: "g1:host", gameSessionId: "g1", playerId: "host", score: 0, correctCount: 0 },
+    { id: "g1:spectator", gameSessionId: "g1", playerId: "spectator", score: 0, correctCount: 0 },
+  );
+  authority.getAggregate()!.gameParticipants!.push(
+    { ...start.players[0], role: "PLAYER" },
+    { ...spectator, role: "SPECTATOR" },
+  );
+  authority.getAggregate()!.questionResults.push(
+    { id: "g1:0:host", gameSessionId: "g1", questionIndex: 0, playerId: "host", scoredRound: 1, scoreAwarded: 5, judgedByPlayerId: "host", judgedAt: new Date().toISOString() },
+    { id: "g1:0:spectator", gameSessionId: "g1", questionIndex: 0, playerId: "spectator", scoredRound: 1, scoreAwarded: 5, judgedByPlayerId: "host", judgedAt: new Date().toISOString() },
+  );
+  assert.deepEqual(authority.query("getPlayerScores", ["g1"]).map((score: { playerId: string }) => score.playerId), ["p0"]);
+  assert.deepEqual(authority.query("getQuestionResultsForGameSession", ["g1"]), []);
+  assert.deepEqual(authority.getSnapshot().questionResults, []);
+  const ended = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  const resultDelta = ended.publicDeltas.find((delta) => delta.type === "game_result_snapshot");
+  assert.equal(resultDelta?.type, "game_result_snapshot");
+  if (resultDelta?.type === "game_result_snapshot") {
+    assert.deepEqual(resultDelta.snapshot.leaderboard.map((entry) => entry.playerId), ["p0"]);
+    assert.deepEqual(resultDelta.snapshot.questionResults, []);
+  }
+
+  await authority.forceCheckpoint("game-end", true);
+  await authority.flushFinalProjection();
+  const participantInsert = projectionBatches.flat().find((statement) => /INSERT INTO game_participants/.test(statement.sql));
+  const scoreInsert = projectionBatches.flat().find((statement) => /INSERT INTO player_scores/.test(statement.sql));
+  assert.deepEqual(JSON.parse(String(participantInsert?.bindings[1])).map((player: Player) => player.id), ["p0"]);
+  assert.deepEqual(JSON.parse(String(scoreInsert?.bindings[0])).map((score: { playerId: string }) => score.playerId), ["p0"]);
 });
 
 test("TEAM_BATTLE skip advances both turn and reveal round", () => {
@@ -628,6 +979,19 @@ test("realtime authority source has no heartbeat, keepalive, or periodic checkpo
   const authority = readFileSync(new URL("../worker/roomAuthorityVNext.ts", import.meta.url), "utf8");
   assert.doesNotMatch(client, /heartbeat|\bping\b|\bpong\b/i);
   assert.doesNotMatch(authority, /setInterval|setTimeout|setAlarm|heartbeat|\bping\b|\bpong\b/i);
+});
+
+test("WebSocket projection boundaries flush the D1 aggregate outbox", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /outcome\.forceCheckpoint === "game-end" \|\| outcome\.forceCheckpoint === "projection"[\s\S]{0,160}flushFinalProjection/);
+  assert.match(worker, /aggregate\?\.room\?\.status !== "LOBBY"/);
+  assert.match(worker, /aggregate\.room\?\.status !== "LOBBY" && positional/);
+});
+
+test("WebSocket proxy preserves player identity for targeted vNext deltas", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /url\.searchParams\.get\("playerId"\)/);
+  assert.match(worker, /roomObjectUrl\.searchParams\.set\("playerId", playerId\)/);
 });
 
 test("50 players complete 30 questions within the vNext write budget", async () => {

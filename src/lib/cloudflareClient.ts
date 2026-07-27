@@ -31,6 +31,7 @@ type ActionResultMessage = {
 type ActionAcceptedMessage = { type: "action_accepted"; clientActionId?: string };
 type ActionReceivedMessage = { type: "action_received"; clientActionId?: string; actionId?: string };
 type CheckpointCommittedMessage = { type: "checkpoint_committed"; gameId?: string; committedSeqByActor?: Record<string, number> };
+type AuthoritySequenceHint = { gameId: string; actorId: string; committedSeq: number };
 
 type TopicState = {
   socket: WebSocket | null;
@@ -66,7 +67,7 @@ const LONG_ACTION_TIMEOUT_MS = 30000;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 5000;
 const ROOM_TOPIC_PREFIX = "room:";
-const POSITIONAL_ROOM_MUTATION_NAMES = new Set(["leaveRoom", "updatePlayerRole", "kickPlayerFromRoom", "dissolveRoom", "returnRoomToLobby"]);
+const POSITIONAL_ROOM_MUTATION_NAMES = new Set(["leaveRoom", "updatePlayerRole", "kickPlayerFromRoom", "dissolveRoom", "cancelCurrentRound", "returnRoomToLobby"]);
 
 const MUTATION_NAMES = new Set([
   "leaveRoom",
@@ -289,6 +290,7 @@ function getPositionalRoomMutation(name: string, args: unknown[]) {
     case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3] } } : null;
     case "kickPlayerFromRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1], targetPlayerId: args[2] } } : null;
     case "dissolveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
+    case "cancelCurrentRound": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     case "returnRoomToLobby": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     default: return null;
   }
@@ -432,7 +434,11 @@ function ensureSocket(topic: string) {
 
     if (message.type === "checkpoint_committed") {
       const committed = message as CheckpointCommittedMessage;
-      if (committed.committedSeqByActor) void commitAuthorityOutbox(topic, committed.gameId, committed.committedSeqByActor);
+      if (committed.committedSeqByActor) {
+        state.sequenceSync = state.sequenceSync
+          .then(() => commitAuthorityOutbox(topic, committed.gameId, committed.committedSeqByActor ?? {}, state.playerId ? [state.playerId] : []))
+          .catch((error) => { console.error("Realtime durable sequence sync failed.", error); });
+      }
       return;
     }
 
@@ -543,7 +549,11 @@ async function httpRpc<T>(name: string, args: unknown[]) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, args }),
   });
-  const payload = (await response.json()) as { data?: T; error?: string };
+  const payload = (await response.json()) as { data?: T; error?: string; authoritySequence?: AuthoritySequenceHint };
+  const hint = payload.authoritySequence;
+  if (hint && hint.gameId && hint.actorId && Number.isInteger(hint.committedSeq) && hint.committedSeq >= 0) {
+    await syncAuthoritySequence(hint.gameId, hint.actorId, hint.committedSeq);
+  }
   if (!response.ok || payload.error) {
     throw new Error(payload.error ?? "请求游戏服务失败，请稍后重试。");
   }

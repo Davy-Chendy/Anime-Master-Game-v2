@@ -96,14 +96,30 @@ export async function deleteAuthorityAction(actionId: string) {
   await transactionDone(transaction);
 }
 
-export async function commitAuthorityOutbox(topic: string, gameId: string | undefined, committedSeqByActor: Record<string, number>) {
+export async function commitAuthorityOutbox(
+  topic: string,
+  gameId: string | undefined,
+  committedSeqByActor: Record<string, number>,
+  localActorIds: Iterable<string> = [],
+) {
   const database = await openDatabase();
-  const transaction = database.transaction(OUTBOX_STORE, "readwrite");
-  const store = transaction.objectStore(OUTBOX_STORE);
-  const items = await requestResult(store.index("topic").getAll(topic)) as AuthorityOutboxItem[];
+  const transaction = database.transaction([OUTBOX_STORE, META_STORE], "readwrite");
+  const outbox = transaction.objectStore(OUTBOX_STORE);
+  const meta = transaction.objectStore(META_STORE);
+  const items = await requestResult(outbox.index("topic").getAll(topic)) as AuthorityOutboxItem[];
+  const actorsToSync = new Set(localActorIds);
   for (const item of items) {
     if (gameId && item.gameId !== gameId) continue;
-    if (item.clientSeq <= (committedSeqByActor[item.actorId] ?? 0)) store.delete(item.actionId);
+    actorsToSync.add(item.actorId);
+    if (item.clientSeq <= (committedSeqByActor[item.actorId] ?? 0)) outbox.delete(item.actionId);
+  }
+  if (gameId) {
+    for (const actorId of actorsToSync) {
+      const committedSeq = committedSeqByActor[actorId] ?? 0;
+      const key = `seq:${gameId}:${actorId}`;
+      const current = Number(await requestResult(meta.get(key))) || 0;
+      if (committedSeq > current) meta.put(committedSeq, key);
+    }
   }
   await transactionDone(transaction);
 }

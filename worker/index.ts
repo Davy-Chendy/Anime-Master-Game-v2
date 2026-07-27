@@ -356,7 +356,7 @@ const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
 const ROOM_AUTHORITY_MEMBERSHIP_NAMES = new Set(["joinRoom", "leaveRoom", "kickPlayerFromRoom", "dissolveRoom", "updatePlayerRole"]);
 const ROOM_AUTHORITY_ACTIVE_ONLY_NAMES = new Set(["cancelCurrentRound"]);
 const ROOM_AUTHORITY_ROSTER_QUERY_NAMES = new Set(["getRoomWithPlayers", "getPlayersByRoomId"]);
-const VNEXT_POSITIONAL_ROOM_MUTATIONS = new Set(["joinRoom", "leaveRoom", "kickPlayerFromRoom", "dissolveRoom", "updatePlayerRole", "returnRoomToLobby"]);
+const VNEXT_POSITIONAL_ROOM_MUTATIONS = new Set(["joinRoom", "leaveRoom", "kickPlayerFromRoom", "dissolveRoom", "updatePlayerRole", "cancelCurrentRound", "returnRoomToLobby"]);
 
 function getVNextPositionalMutation(name: string, args: unknown[]) {
   switch (name) {
@@ -365,6 +365,7 @@ function getVNextPositionalMutation(name: string, args: unknown[]) {
     case "kickPlayerFromRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1], targetPlayerId: args[2] } } : null;
     case "dissolveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3] } } : null;
+    case "cancelCurrentRound": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     case "returnRoomToLobby": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     default: return null;
   }
@@ -400,6 +401,16 @@ function corsHeaders(request: Request, env: Env) {
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
   };
+}
+
+function withCors(response: Response, request: Request, env: Env) {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(corsHeaders(request, env))) headers.set(name, value);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function json(data: unknown, init: ResponseInit = {}, request: Request, env: Env) {
@@ -3060,14 +3071,16 @@ export class RoomDurableObject {
       if (localTopic && body.name && ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name) && this.authorityVNext.hasStoredState()) {
         await this.authorityVNext.restoreFromStorage();
         const aggregate = this.authorityVNext.getAggregate();
-        if (aggregate?.cutoverState !== "initializing") return Response.json({ data: this.authorityVNext.query(body.name, body.args ?? []) });
+        if (aggregate?.cutoverState !== "initializing" && aggregate?.room?.status !== "LOBBY") {
+          return Response.json({ data: this.authorityVNext.query(body.name, body.args ?? []) });
+        }
       }
       if (localTopic && body.name && VNEXT_POSITIONAL_ROOM_MUTATIONS.has(body.name)) {
         await this.ensureAuthority(localTopic);
         await this.resumeInitializingVNextStart();
         const aggregate = this.authorityVNext.getAggregate();
         const positional = getVNextPositionalMutation(body.name, body.args ?? []);
-        if (aggregate?.gameSession && aggregate.cutoverState !== "initializing" && positional) {
+        if (aggregate?.gameSession && aggregate.cutoverState !== "initializing" && aggregate.room?.status !== "LOBBY" && positional) {
           const seen = aggregate.seenSeqByActor[positional.actorId] ?? aggregate.committedSeqByActor[positional.actorId] ?? 0;
           const envelope: VNextMutationEnvelope = {
             actionId: body.clientActionId || crypto.randomUUID(),
@@ -3088,7 +3101,14 @@ export class RoomDurableObject {
             this.sendVNextOutcome(body.name, outcome);
             if (outcome.forceCheckpoint === "game-end" || outcome.forceCheckpoint === "projection") this.state.waitUntil(this.authorityVNext.flushFinalProjection());
           }
-          return Response.json(outcome.error ? { error: outcome.error } : { data: outcome.data }, { status: outcome.error ? 400 : 200 });
+          const committedSeq = this.authorityVNext.getAggregate()?.committedSeqByActor[positional.actorId] ?? 0;
+          const authoritySequence = committedSeq >= envelope.clientSeq
+            ? { gameId: envelope.gameId, actorId: positional.actorId, committedSeq }
+            : undefined;
+          return Response.json(
+            outcome.error ? { error: outcome.error, authoritySequence } : { data: outcome.data, authoritySequence },
+            { status: outcome.error ? 400 : 200 },
+          );
         }
       }
       if (localTopic && (ROOM_AUTHORITY_MEMBERSHIP_NAMES.has(body.name ?? "") || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name ?? ""))) await this.ensureAuthority(localTopic);
@@ -3654,7 +3674,9 @@ export class RoomDurableObject {
       await this.reconcileVNextAlarm();
       this.sendVNextOutcome(payload.name, outcome);
       sendActionResult();
-      if (outcome.forceCheckpoint === "game-end") this.state.waitUntil(this.authorityVNext.flushFinalProjection());
+      if (outcome.forceCheckpoint === "game-end" || outcome.forceCheckpoint === "projection") {
+        this.state.waitUntil(this.authorityVNext.flushFinalProjection());
+      }
       return true;
     }
 
@@ -4966,7 +4988,7 @@ export default {
           body: JSON.stringify(body),
         });
         if (body?.name === "createQuestionSetFromUrlText") {
-          return await getR2UploadGateObject(env).fetch(requestWithBody);
+          return withCors(await getR2UploadGateObject(env).fetch(requestWithBody), request, env);
         }
 
         const mutationDeadlinePolicy = getMutationDeadlinePolicy(body?.name ?? "");
@@ -4987,7 +5009,7 @@ export default {
           if (topic) {
             const headers = new Headers(requestWithBody.headers);
             headers.set(LOCAL_ROOM_OBJECT_TOPIC_HEADER, topic);
-            return await getRoomObject(env, topic).fetch(new Request(requestWithBody, { headers }));
+            return withCors(await getRoomObject(env, topic).fetch(new Request(requestWithBody, { headers })), request, env);
           }
         }
 
@@ -4995,7 +5017,7 @@ export default {
       }
 
       if (url.pathname === "/api/r2-upload" && request.method === "POST") {
-        return await getR2UploadGateObject(env).fetch(request);
+        return withCors(await getR2UploadGateObject(env).fetch(request), request, env);
       }
 
       if (url.pathname === "/api/r2-images" && request.method === "GET") {
@@ -5010,7 +5032,11 @@ export default {
       const realtimeMatch = url.pathname.match(/^\/api\/realtime\/(.+)\/ws$/);
       if (realtimeMatch && request.headers.get("upgrade") === "websocket") {
         const topic = decodeURIComponent(realtimeMatch[1]);
-        return getRoomObject(env, topic).fetch(new Request(`https://room-object/ws?topic=${encodeURIComponent(topic)}`, request));
+        const roomObjectUrl = new URL("https://room-object/ws");
+        roomObjectUrl.searchParams.set("topic", topic);
+        const playerId = url.searchParams.get("playerId")?.trim();
+        if (playerId) roomObjectUrl.searchParams.set("playerId", playerId);
+        return getRoomObject(env, topic).fetch(new Request(roomObjectUrl, request));
       }
 
       return json({ error: "未找到对应的服务接口。" }, { status: 404 }, request, env);

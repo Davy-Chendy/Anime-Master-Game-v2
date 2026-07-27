@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, resetAuthorityOutboxForTests } from "../src/lib/authorityOutbox";
+import { commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, resetAuthorityOutboxForTests, syncAuthoritySequence } from "../src/lib/authorityOutbox";
 
 test.beforeEach(async () => {
   await resetAuthorityOutboxForTests();
@@ -38,6 +38,18 @@ test("durable ACK deletes only committed actor sequences for the matching game",
   await commitAuthorityOutbox("room:r1", "g1", { p1: 1, host: 1 });
   const remaining = await listAuthorityOutbox("room:r1");
   assert.deepEqual(remaining.map((item) => [item.gameId, item.actorId, item.clientSeq]), [["g2", "p1", 1], ["g1", "p1", 2]]);
+});
+
+test("durable ACK advances the sequence watermark before the next mutation", async () => {
+  await commitAuthorityOutbox("room:r1", "g1", { late: 1 }, ["late"]);
+  const next = await enqueueAuthorityMutation(mutation("late"));
+  assert.equal(next.clientSeq, 2);
+});
+
+test("HTTP authority sequence hint advances the watermark before returning to the caller", async () => {
+  await syncAuthoritySequence("g1", "late", 1);
+  const next = await enqueueAuthorityMutation(mutation("late"));
+  assert.equal(next.clientSeq, 2);
 });
 
 test("refresh-style reopen preserves uncommitted mutations", async () => {

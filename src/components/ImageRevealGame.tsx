@@ -67,7 +67,7 @@ const DEFAULT_ROUND_SECONDS = 45;
 const ROUND_DEADLINE_GRACE_MS = 3000;
 const ANSWER_JUDGEMENT_BATCH_WINDOW_MS = 250;
 const DEFAULT_ROUND_SCORES = [5, 3, 1];
-const BUZZER_JUDGING_STABILIZE_MS = 3000;
+export const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
 const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
@@ -232,7 +232,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
   };
 }
 
-function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFAULT_ROUND_SECONDS, nowMs = Date.now()) {
+export function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFAULT_ROUND_SECONDS, nowMs = Date.now()) {
   if (!roundStartedAt) {
     return roundSeconds;
   }
@@ -273,8 +273,48 @@ function comparePlayerAnswerOrder(left: BuzzerAnswer, right: BuzzerAnswer) {
   );
 }
 
-function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt" | "serverReceivedAt">, nowMs: number) {
-  return nowMs - new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
+export function getBuzzerAnswerStabilityDelayMs(
+  answer: Pick<BuzzerAnswer, "submittedAt" | "serverReceivedAt">,
+  nowMs: number,
+) {
+  const receivedAtMs = new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime();
+  return Math.max(0, receivedAtMs + BUZZER_JUDGING_STABILIZE_MS - nowMs);
+}
+
+export function shouldAcceptServerClock(currentEstimatedServerNowMs: number | null, nextServerNowMs: number) {
+  return currentEstimatedServerNowMs == null || nextServerNowMs >= currentEstimatedServerNowMs;
+}
+
+export function isGameSessionPositionStale(nextGameSession: GameSession, currentGameSession: GameSession | null) {
+  if (!currentGameSession || nextGameSession.id !== currentGameSession.id) {
+    return false;
+  }
+
+  if (nextGameSession.currentQuestionIndex !== currentGameSession.currentQuestionIndex) {
+    return nextGameSession.currentQuestionIndex < currentGameSession.currentQuestionIndex;
+  }
+
+  if (nextGameSession.currentRevealRound !== currentGameSession.currentRevealRound) {
+    return nextGameSession.currentRevealRound < currentGameSession.currentRevealRound;
+  }
+
+  const nextRoundStartedAtMs = nextGameSession.roundStartedAt ? new Date(nextGameSession.roundStartedAt).getTime() : null;
+  const currentRoundStartedAtMs = currentGameSession.roundStartedAt ? new Date(currentGameSession.roundStartedAt).getTime() : null;
+  return (
+    nextRoundStartedAtMs != null &&
+    currentRoundStartedAtMs != null &&
+    Number.isFinite(nextRoundStartedAtMs) &&
+    Number.isFinite(currentRoundStartedAtMs) &&
+    nextRoundStartedAtMs !== currentRoundStartedAtMs &&
+    nextRoundStartedAtMs < currentRoundStartedAtMs
+  );
+}
+
+export function isBuzzerAnswerReadyForJudging(
+  answer: Pick<BuzzerAnswer, "submittedAt" | "serverReceivedAt">,
+  nowMs: number,
+) {
+  return getBuzzerAnswerStabilityDelayMs(answer, nowMs) === 0;
 }
 
 function getTeamName(team: TeamBattleTeam) {
@@ -1316,6 +1356,13 @@ export function ImageRevealGame({
 
     const serverNowMs = new Date(nextGameSession.serverNow).getTime();
     if (Number.isFinite(serverNowMs)) {
+      const currentClock = serverClockRef.current;
+      if (currentClock) {
+        const currentEstimatedServerNowMs = currentClock.serverNowMs + (performance.now() - currentClock.clientNowMs);
+        if (!shouldAcceptServerClock(currentEstimatedServerNowMs, serverNowMs)) {
+          return;
+        }
+      }
       serverClockRef.current = {
         serverNowMs,
         clientNowMs: performance.now(),
@@ -1345,48 +1392,8 @@ export function ImageRevealGame({
     return Math.max(0, getEstimatedServerNowMs() - roundStartedAtMs);
   }
 
-  function getGameSessionPosition(gameSession: GameSession) {
-    return {
-      questionIndex: gameSession.currentQuestionIndex,
-      revealRound: gameSession.currentRevealRound,
-      roundStartedAtMs: gameSession.roundStartedAt ? new Date(gameSession.roundStartedAt).getTime() : null,
-      serverNowMs: gameSession.serverNow ? new Date(gameSession.serverNow).getTime() : null,
-    };
-  }
-
   function isStaleGameSession(nextGameSession: GameSession, currentGameSession: GameSession | null) {
-    if (!currentGameSession || nextGameSession.id !== currentGameSession.id) {
-      return false;
-    }
-
-    const next = getGameSessionPosition(nextGameSession);
-    const current = getGameSessionPosition(currentGameSession);
-
-    if (next.questionIndex !== current.questionIndex) {
-      return next.questionIndex < current.questionIndex;
-    }
-
-    if (next.revealRound !== current.revealRound) {
-      return next.revealRound < current.revealRound;
-    }
-
-    if (
-      next.roundStartedAtMs != null &&
-      current.roundStartedAtMs != null &&
-      Number.isFinite(next.roundStartedAtMs) &&
-      Number.isFinite(current.roundStartedAtMs) &&
-      next.roundStartedAtMs !== current.roundStartedAtMs
-    ) {
-      return next.roundStartedAtMs < current.roundStartedAtMs;
-    }
-
-    return (
-      next.serverNowMs != null &&
-      current.serverNowMs != null &&
-      Number.isFinite(next.serverNowMs) &&
-      Number.isFinite(current.serverNowMs) &&
-      next.serverNowMs < current.serverNowMs
-    );
+    return isGameSessionPositionStale(nextGameSession, currentGameSession);
   }
 
   function applyGameSession(nextGameSession: GameSession, options: { syncClock?: boolean } = {}) {
@@ -1711,6 +1718,7 @@ export function ImageRevealGame({
 
   useEffect(() => {
     gameCatchUpGenerationRef.current += 1;
+    serverClockRef.current = null;
     roundSnapshotFetchRef.current = null;
     lastGameRealtimeVersionRef.current = null;
     missedGameRealtimeVersionRef.current = false;
@@ -2456,11 +2464,8 @@ export function ImageRevealGame({
   useEffect(() => {
     if (!firstPendingBuzzerAnswer || !isWaitingForBuzzerQueueStability) return;
 
-    const readyAtMs =
-      new Date(firstPendingBuzzerAnswer.serverReceivedAt ?? firstPendingBuzzerAnswer.submittedAt).getTime() +
-      BUZZER_JUDGING_STABILIZE_MS;
-    const delayMs = Math.max(0, readyAtMs - getEstimatedServerNowMs());
-    const timer = window.setTimeout(() => setBuzzerQueueClockTick((tick) => tick + 1), delayMs + 20);
+    const delayMs = getBuzzerAnswerStabilityDelayMs(firstPendingBuzzerAnswer, getEstimatedServerNowMs());
+    const timer = window.setTimeout(() => setBuzzerQueueClockTick((tick) => tick + 1), Math.ceil(delayMs) + 1);
     return () => window.clearTimeout(timer);
   }, [firstPendingBuzzerAnswer, isWaitingForBuzzerQueueStability]);
 
@@ -2468,14 +2473,15 @@ export function ImageRevealGame({
     if (!isAnswerPanelOpen) return;
     const nowMs = getEstimatedServerNowMs();
     const nextReadyAtMs = buzzerAnswers.reduce<number | null>((nextReadyAt, answer) => {
-      const readyAt = new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() + BUZZER_JUDGING_STABILIZE_MS;
-      if (!Number.isFinite(readyAt) || readyAt <= nowMs) return nextReadyAt;
+      const delayMs = getBuzzerAnswerStabilityDelayMs(answer, nowMs);
+      if (delayMs <= 0) return nextReadyAt;
+      const readyAt = nowMs + delayMs;
       return nextReadyAt == null ? readyAt : Math.min(nextReadyAt, readyAt);
     }, null);
     if (nextReadyAtMs == null) return;
     const timer = window.setTimeout(
       () => setBuzzerQueueClockTick((tick) => tick + 1),
-      Math.max(0, nextReadyAtMs - nowMs) + 20,
+      Math.ceil(Math.max(0, nextReadyAtMs - nowMs)) + 1,
     );
     return () => window.clearTimeout(timer);
   }, [buzzerAnswers, buzzerQueueClockTick, isAnswerPanelOpen]);
@@ -2697,7 +2703,11 @@ export function ImageRevealGame({
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     Boolean(gameSession) &&
-    Boolean(currentBuzzerAnswer && canJudgePanelAnswer(currentBuzzerAnswer));
+    Boolean(
+      currentBuzzerAnswer &&
+        isBuzzerAnswerReadyForJudging(currentBuzzerAnswer, getEstimatedServerNowMs()) &&
+        canJudgePanelAnswer(currentBuzzerAnswer),
+    );
   const canOpenAnswerPanel =
     isPresenter &&
     !isTeamBattleMode &&
@@ -4557,6 +4567,9 @@ export function ImageRevealGame({
                   <div className="mt-2 rounded-md bg-slate-50 p-3">
                     <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
                     <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
+                    {isWaitingForBuzzerQueueStability ? (
+                      <p className="mt-2 text-xs font-semibold text-amber-700">答案已收到，顺序稳定后即可判定</p>
+                    ) : null}
                     <div className="mt-3 grid grid-cols-2 gap-2">
                       <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer}>
                         答对
