@@ -64,6 +64,8 @@ const LANDSCAPE_TOTAL_BLOCKS = 45;
 const PORTRAIT_TOTAL_BLOCKS = 35;
 const MAX_REVEAL_BLOCKS = LANDSCAPE_TOTAL_BLOCKS;
 const DEFAULT_ROUND_SECONDS = 45;
+const ROUND_DEADLINE_GRACE_MS = 3000;
+const ANSWER_JUDGEMENT_BATCH_WINDOW_MS = 250;
 const DEFAULT_ROUND_SCORES = [5, 3, 1];
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
@@ -982,7 +984,7 @@ function AnswerJudgementPanel({
                 </span>
               </div>
               <p className="mt-1 text-sm text-[var(--muted)]" id="answer-judgement-panel-description">
-                当前轮判定实时生效，打开面板不会暂停倒计时
+                当前轮判定实时生效
               </p>
             </div>
             <button
@@ -1030,14 +1032,14 @@ function AnswerJudgementPanel({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5">
-          <div className="grid gap-2">
+          <div className="grid gap-2 md:grid-cols-2">
             {filteredRows.map(({ player, answer, hasForfeited }, index) => {
               const status = answer?.status ?? null;
               const canJudge = Boolean(answer && canJudgeAnswer(answer));
               return (
                 <div
                   className={[
-                    "grid min-h-16 grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border px-3 py-2",
+                    "grid min-h-20 grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border px-3 py-2.5",
                     status === "correct"
                       ? "border-emerald-300 bg-emerald-50"
                       : status === "wrong"
@@ -1050,9 +1052,16 @@ function AnswerJudgementPanel({
                     {status === "correct" ? <IconCheck className="mx-auto h-5 w-5 text-emerald-700" /> : status === "wrong" ? <IconXMark className="mx-auto h-5 w-5 text-rose-700" /> : index + 1}
                   </span>
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-bold text-slate-950" title={player.nickname}>{player.nickname}</p>
-                    <p className="mt-0.5 break-words text-sm text-slate-700">
+                    <p
+                      className={[
+                        "break-words text-base leading-snug",
+                        answer ? "font-semibold text-slate-950" : "font-medium text-slate-500",
+                      ].join(" ")}
+                    >
                       {answer?.answerText ?? (hasForfeited ? "已放弃" : "尚未回答")}
+                    </p>
+                    <p className="mt-1 truncate text-xs font-medium text-slate-500" title={player.nickname}>
+                      {player.nickname}
                     </p>
                   </div>
                   {answer ? (
@@ -1177,6 +1186,7 @@ export function ImageRevealGame({
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
+  const [hasRoundDeadlineGraceExpired, setHasRoundDeadlineGraceExpired] = useState(false);
   const [, setBuzzerQueueClockTick] = useState(0);
   const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
@@ -2013,11 +2023,19 @@ export function ImageRevealGame({
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
+    const updateRoundClock = () => {
+      const estimatedServerNowMs = getEstimatedServerNowMs();
       setRemainingSeconds(
-        getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds, getEstimatedServerNowMs()),
+        getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds, estimatedServerNowMs),
       );
-    }, 500);
+      const roundStartedAtMs = gameSession?.roundStartedAt ? new Date(gameSession.roundStartedAt).getTime() : Number.NaN;
+      setHasRoundDeadlineGraceExpired(
+        Number.isFinite(roundStartedAtMs) &&
+          estimatedServerNowMs >= roundStartedAtMs + (gameSession?.roundSeconds ?? DEFAULT_ROUND_SECONDS) * 1000 + ROUND_DEADLINE_GRACE_MS,
+      );
+    };
+    updateRoundClock();
+    const timer = window.setInterval(updateRoundClock, 500);
 
     return () => window.clearInterval(timer);
   }, [gameSession?.roundSeconds, gameSession?.roundStartedAt]);
@@ -2610,7 +2628,7 @@ export function ImageRevealGame({
   const canMarkAllPendingWrong =
     Boolean(gameSession) &&
     answerPanelPendingCount > 0 &&
-    (isRoundClosedForPlayerActions || isQuestionReviewing);
+    (hasRoundDeadlineGraceExpired || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || isQuestionReviewing);
   const canSettleBuzzerRound =
     isPresenter &&
     !isTeamBattleMode &&
@@ -3421,7 +3439,7 @@ export function ImageRevealGame({
             void drainAnswerJudgementQueue().catch((error) => {
               onError(error instanceof Error ? error.message : "判定答案失败");
             });
-          }, 80);
+          }, ANSWER_JUDGEMENT_BATCH_WINDOW_MS);
         }
       });
     answerJudgementFlushPromiseRef.current = flushPromise;
@@ -3454,7 +3472,7 @@ export function ImageRevealGame({
       void drainAnswerJudgementQueue().catch((error) => {
         onError(error instanceof Error ? error.message : "判定答案失败");
       });
-    }, 80);
+    }, ANSWER_JUDGEMENT_BATCH_WINDOW_MS);
   }
 
   async function handleJudgeBuzzerAnswer(isCorrect: boolean) {
@@ -3491,6 +3509,7 @@ export function ImageRevealGame({
 
     setIsSettlingBuzzerRound(true);
     try {
+      await drainAnswerJudgementQueue();
       const settled = await settleBuzzerRound({
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
@@ -3508,6 +3527,7 @@ export function ImageRevealGame({
       return;
     }
 
+    await drainAnswerJudgementQueue();
     const skipped = await skipCurrentQuestion({
       gameSessionId: gameSession.id,
       presenterPlayerId: playerId,
@@ -3575,6 +3595,7 @@ export function ImageRevealGame({
       return;
     }
 
+    await drainAnswerJudgementQueue();
     const advanced = await advanceReviewedQuestion({
       gameSessionId: gameSession.id,
       presenterPlayerId: playerId,

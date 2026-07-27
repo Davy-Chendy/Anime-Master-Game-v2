@@ -3465,6 +3465,9 @@ export class RoomDurableObject {
       logRpcInvocation({ transport: "websocket", name: payload.name, isMutation, localTopic: socketAttachment?.topic });
 
       if (isMutation && actionTopic) {
+        if (AUTHORITY_JOURNALED_NAMES.has(payload.name)) {
+          await this.ensureAuthority(actionTopic);
+        }
         await this.ensureDeadlineReconciled(actionTopic, "websocket_action");
       }
 
