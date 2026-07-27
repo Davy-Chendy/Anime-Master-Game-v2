@@ -64,7 +64,7 @@ type GameSettings = {
 const defaultGameSettings: GameSettings = {
   gameMode: "ROUND_REVEAL",
   maxRevealRounds: 3,
-  roundSeconds: 60,
+  roundSeconds: 45,
   roundScores: [5, 3, 1],
 };
 
@@ -952,7 +952,7 @@ function GameSettingsPanel({
                 type="number"
                 value={settings.roundSeconds}
                 onChange={(event) =>
-                  onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 60)) })
+                  onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 45)) })
                 }
               />
             </label>

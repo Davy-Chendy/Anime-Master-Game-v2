@@ -60,6 +60,7 @@ type DbGameParticipant = {
 
 const d1Context = new AsyncLocalStorage<D1QueryClient>();
 const unboundD1 = createD1QueryClient(null);
+const DEFAULT_ROUND_SECONDS = 45;
 const DEFAULT_ROUND_SCORES = [5, 3, 1];
 const MAX_QUESTION_SET_QUESTIONS = 30;
 const d1: D1QueryClient = {
@@ -126,7 +127,7 @@ function normalizeMaxRevealRounds(value: unknown) {
 }
 
 function normalizeRoundSeconds(value: unknown) {
-  return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : 60)));
+  return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_ROUND_SECONDS)));
 }
 
 function normalizeRoundScores(value: unknown, maxRevealRounds: number) {
@@ -253,7 +254,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks,
     maxRevealRounds: gameSession.max_reveal_rounds ?? 3,
-    roundSeconds: gameSession.round_seconds ?? 60,
+    roundSeconds: gameSession.round_seconds ?? DEFAULT_ROUND_SECONDS,
     roundScores,
     roundStartedAt: gameSession.round_started_at,
     serverNow: new Date().toISOString(),
@@ -1475,6 +1476,7 @@ export async function createRoom(playerId: string, nickname: string) {
       .insert({
         room_code: roomCode,
         host_player_id: playerId,
+        lobby_round_seconds: DEFAULT_ROUND_SECONDS,
         lobby_round_scores: DEFAULT_ROUND_SCORES,
       })
       .select()

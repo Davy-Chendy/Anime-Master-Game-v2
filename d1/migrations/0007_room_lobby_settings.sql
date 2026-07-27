@@ -4,7 +4,7 @@ ALTER TABLE rooms ADD COLUMN lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL
 ALTER TABLE rooms ADD COLUMN lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3
   CHECK (lobby_max_reveal_rounds >= 1);
 
-ALTER TABLE rooms ADD COLUMN lobby_round_seconds INTEGER NOT NULL DEFAULT 60
+ALTER TABLE rooms ADD COLUMN lobby_round_seconds INTEGER NOT NULL DEFAULT 45
   CHECK (lobby_round_seconds >= 1);
 
 ALTER TABLE rooms ADD COLUMN lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]';
