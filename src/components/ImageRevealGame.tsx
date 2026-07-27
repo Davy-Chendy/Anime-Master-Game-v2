@@ -888,6 +888,7 @@ export function ImageRevealGame({
   const [answerText, setAnswerText] = useState("");
   const [teamGuessText, setTeamGuessText] = useState("");
   const [labelInput, setLabelInput] = useState("");
+  const [selectedLabelAnswerId, setSelectedLabelAnswerId] = useState<string | null>(null);
   const [resultPublishTitle, setResultPublishTitle] = useState("");
   const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
@@ -2579,6 +2580,7 @@ export function ImageRevealGame({
 
   useEffect(() => {
     setLabelInput("");
+    setSelectedLabelAnswerId(null);
     setIsLabelModalOpen(false);
   }, [currentQuestion?.id, currentQuestionLabel]);
 
@@ -2633,6 +2635,7 @@ export function ImageRevealGame({
         currentQuestions.map((question) => (question.id === updatedQuestion.id ? updatedQuestion : question)),
       );
       setLabelInput("");
+      setSelectedLabelAnswerId(null);
       setIsLabelModalOpen(false);
     } catch (error) {
       onError(error instanceof Error ? error.message : "保存正确答案失败");
@@ -2641,19 +2644,37 @@ export function ImageRevealGame({
     }
   }
 
-  function handleSaveManualLabel() {
+  function handleSaveQuestionLabel() {
+    const selectedAnswer = selectedLabelAnswerId
+      ? labelAnswers.find((answer) => answer.id === selectedLabelAnswerId)
+      : null;
     const nextLabel = labelInput.trim();
 
+    if (selectedAnswer) {
+      void saveQuestionLabel({
+        labelText: selectedAnswer.answerText,
+        source: "answer",
+        answerId: selectedAnswer.id,
+      });
+      return;
+    }
+
     if (!nextLabel) {
-      onError("请先输入正确答案");
+      onError("请先选择或输入要展示的答案");
       return;
     }
 
     void saveQuestionLabel({ labelText: nextLabel, source: "manual" });
   }
 
-  function handleUseAnswerAsLabel(answer: Answer) {
-    void saveQuestionLabel({ labelText: answer.answerText, source: "answer", answerId: answer.id });
+  function handleSelectLabelAnswer(answerId: string) {
+    setSelectedLabelAnswerId(answerId);
+    setLabelInput("");
+  }
+
+  function handleLabelInputChange(value: string) {
+    setLabelInput(value);
+    setSelectedLabelAnswerId(null);
   }
 
   function handleDisableLabelPromptForGame() {
@@ -3648,7 +3669,7 @@ export function ImageRevealGame({
           </div>
           {canAddQuestionLabel ? (
             <Button className="mt-3 w-full" type="button" variant="secondary" onClick={() => setIsLabelModalOpen(true)}>
-              填写正确答案
+              向玩家展示答案
             </Button>
           ) : null}
           {isPresenter ? (
@@ -4315,8 +4336,10 @@ export function ImageRevealGame({
           <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
             <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-start">
               <div>
-                <p className="text-lg font-semibold text-slate-950">填写正确答案</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">可选玩家答案，也可手动输入。保存后不能修改。</p>
+                <p className="text-lg font-semibold text-slate-950">向玩家展示答案</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  保存后建议等待几秒，等玩家看清答案后再进入下一题。
+                </p>
               </div>
               <button
                 className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
@@ -4329,21 +4352,38 @@ export function ImageRevealGame({
 
             <div className="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
               <div>
-                <p className="text-sm font-semibold text-slate-950">选择玩家回答</p>
+                <p className="text-sm font-semibold text-slate-950">选择玩家答案</p>
                 <div className="mt-2 space-y-2">
                   {labelAnswers.length > 0 ? (
-                    labelAnswers.map((answer) => (
-                      <button
-                        className="w-full rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                        disabled={isSavingLabel}
-                        key={answer.id}
-                        type="button"
-                        onClick={() => handleUseAnswerAsLabel(answer)}
-                      >
-                        <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
-                        <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
-                      </button>
-                    ))
+                    labelAnswers.map((answer) => {
+                      const isSelected = selectedLabelAnswerId === answer.id;
+
+                      return (
+                        <button
+                          aria-pressed={isSelected}
+                          className={[
+                            "w-full rounded-md border px-3 py-2 text-left text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
+                            isSelected
+                              ? "border-[var(--primary)] bg-rose-50 ring-2 ring-rose-100"
+                              : "border-[var(--line)] bg-slate-50 hover:border-rose-300 hover:bg-rose-50",
+                          ].join(" ")}
+                          disabled={isSavingLabel}
+                          key={answer.id}
+                          type="button"
+                          onClick={() => handleSelectLabelAnswer(answer.id)}
+                        >
+                          <span className="flex items-center justify-between gap-3">
+                            <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
+                            {isSelected ? (
+                              <span className="shrink-0 rounded bg-[var(--primary)] px-2 py-0.5 text-xs font-semibold text-white">
+                                已选择
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
+                        </button>
+                      );
+                    })
                   ) : (
                     <p className="rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">
                       本题还没有可选择的玩家回答
@@ -4359,9 +4399,10 @@ export function ImageRevealGame({
                   maxLength={80}
                   placeholder="例如：动画名称"
                   value={labelInput}
-                  onChange={(event) => setLabelInput(event.target.value)}
+                  onChange={(event) => handleLabelInputChange(event.target.value)}
                 />
               </label>
+              <p className="text-sm text-[var(--muted)]">答案保存后不能修改。</p>
             </div>
 
             <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
@@ -4369,10 +4410,11 @@ export function ImageRevealGame({
                 本局不再提示
               </Button>
               <div className="flex flex-col gap-2 sm:flex-row">
-                <Button type="button" variant="secondary" onClick={() => setIsLabelModalOpen(false)}>
-                  稍后再说
-                </Button>
-                <Button type="button" onClick={handleSaveManualLabel} disabled={isSavingLabel || !labelInput.trim()}>
+                <Button
+                  type="button"
+                  onClick={handleSaveQuestionLabel}
+                  disabled={isSavingLabel || (!selectedLabelAnswerId && !labelInput.trim())}
+                >
                   {isSavingLabel ? "保存中…" : "保存答案"}
                 </Button>
               </div>
