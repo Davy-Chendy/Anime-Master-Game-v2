@@ -10,6 +10,9 @@
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy",
     "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
+    "test:authority-budget": "node scripts/authority-write-budget.mjs",
+    "test:authority-vnext": "tsx --test tests/authority-vnext.test.ts",
+    "test:authority-outbox": "tsx --test tests/authority-outbox.test.ts",
     "d1:migrate:local": "wrangler d1 migrations apply anime_master_game --local",
     "d1:migrate:remote": "wrangler d1 migrations apply anime_master_game --remote"
   },
@@ -25,8 +28,10 @@
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10",
     "eslint": "^8",
+    "fake-indexeddb": "^6.2.5",
     "postcss": "^8",
     "tailwindcss": "^3.4.17",
+    "tsx": "^4.23.1",
     "typescript": "^5",
     "vite": "^8.0.16",
     "wrangler": "^4.100.0"

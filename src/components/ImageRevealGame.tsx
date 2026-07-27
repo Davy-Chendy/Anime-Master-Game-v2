@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { CSSProperties, ReactNode, SVGProps } from "react";
 import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
-import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
+import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic, updateGameSessionRealtimeQuestion } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
   cancelForfeitAnswer,
@@ -1399,6 +1399,7 @@ export function ImageRevealGame({
       syncServerClock(nextGameSession);
     }
     gameSessionRef.current = nextGameSession;
+    updateGameSessionRealtimeQuestion(nextGameSession.id, nextGameSession.currentQuestionIndex);
     setGameSession(nextGameSession);
     const nowMs =
       shouldSyncClock || serverClockRef.current ? getEstimatedServerNowMs() : new Date(nextGameSession.serverNow ?? "").getTime();
@@ -1741,7 +1742,7 @@ export function ImageRevealGame({
       }
 
       unbindGameSessionTopic = bindGameSessionRealtimeTopic(room.currentGameId, `room:${room.id}`);
-      ensureRealtimeTopic(`room:${room.id}`);
+      ensureRealtimeTopic(`room:${room.id}`, playerId);
       isBootstrapLoadingRef.current = true;
       setIsLoading(true);
       try {
@@ -1777,7 +1778,7 @@ export function ImageRevealGame({
       isMounted = false;
       unbindGameSessionTopic();
     };
-  }, [applyRoundSnapshot, catchUpRoundSnapshot, onError, room.currentGameId, room.id]);
+  }, [applyRoundSnapshot, catchUpRoundSnapshot, onError, playerId, room.currentGameId, room.id]);
 
   const applyRealtimeDelta = useCallback(
     (delta: RealtimeDelta) => {
@@ -1876,19 +1877,20 @@ export function ImageRevealGame({
         return;
       }
 
-      if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
-        const didApplyGameSession = applyGameSessionDelta(delta.gameSession);
+      if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.buzzerAnswer.gameSessionId === room.currentGameId && (!delta.gameSession || delta.gameSession.id === room.currentGameId)) {
+        const didApplyGameSession = delta.gameSession ? applyGameSessionDelta(delta.gameSession) : true;
         if (!didApplyGameSession) {
           return;
         }
         if (delta.scores) {
-          setScores(delta.scores);
+          setScores((currentScores) => delta.scores!.reduce((nextScores, score) => upsertById(nextScores, score), currentScores));
         }
         const judgedQuestionResults = delta.questionResults;
         if (judgedQuestionResults) {
-          setQuestionResults((currentResults) =>
-            judgedQuestionResults.reduce((nextResults, questionResult) => upsertById(nextResults, questionResult), currentResults),
-          );
+          setQuestionResults((currentResults) => judgedQuestionResults.reduce(
+            (nextResults, questionResult) => upsertById(nextResults, questionResult),
+            currentResults.filter((result) => !delta.removedQuestionResultPlayerIds?.includes(result.playerId)),
+          ));
         }
         if (delta.buzzerAnswers) {
           setBuzzerAnswers(sortBySubmittedAt(delta.buzzerAnswers));
@@ -1896,7 +1898,7 @@ export function ImageRevealGame({
           if (updatedOwnBuzzerAnswer) {
             setMyBuzzerAnswer(updatedOwnBuzzerAnswer);
           }
-          if (delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
+          if (delta.gameSession && delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
             setLabelAnswers(getCorrectLabelAnswersFromBuzzerAnswers(delta.buzzerAnswers));
           }
         } else {
@@ -1907,15 +1909,18 @@ export function ImageRevealGame({
         }
       }
 
-      if (delta.scope === "game" && delta.type === "answer_judgements_changed" && delta.gameSession.id === room.currentGameId) {
-        const didApplyGameSession = applyGameSessionDelta(delta.gameSession);
+      if (delta.scope === "game" && delta.type === "answer_judgements_changed" && delta.answers[0]?.gameSessionId === room.currentGameId && (!delta.gameSession || delta.gameSession.id === room.currentGameId)) {
+        const didApplyGameSession = delta.gameSession ? applyGameSessionDelta(delta.gameSession) : true;
         if (!didApplyGameSession) return;
-        setScores(delta.scores);
-        setQuestionResults(delta.questionResults);
+        setScores((currentScores) => delta.scores.reduce((nextScores, score) => upsertById(nextScores, score), currentScores));
+        setQuestionResults((currentResults) => delta.questionResults.reduce(
+          (nextResults, result) => upsertById(nextResults, result),
+          currentResults.filter((result) => !delta.removedQuestionResultPlayerIds?.includes(result.playerId)),
+        ));
         setBuzzerAnswers((currentAnswers) =>
           sortBySubmittedAt(delta.answers.reduce((nextAnswers, answer) => upsertById(nextAnswers, answer), currentAnswers)),
         );
-        if (delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
+        if (delta.gameSession && delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
           setLabelAnswers((currentAnswers) => applyCorrectBuzzerAnswerChanges(currentAnswers, delta.answers));
         }
         const ownAnswer = delta.answers.find((answer) => answer.playerId === playerId);
@@ -1973,6 +1978,14 @@ export function ImageRevealGame({
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        if (message.name === "authorityCutover") {
+          lastGameRealtimeVersionRef.current = null;
+          missedGameRealtimeVersionRef.current = true;
+          gameCatchUpTargetVersionRef.current = null;
+          clearQueuedRealtimeDeltas();
+          catchUpRoundSnapshot();
+          return;
+        }
         if (message.name === "authorityRecovered") {
           missedGameRealtimeVersionRef.current = true;
           if (messageVersion != null) {
@@ -2024,6 +2037,7 @@ export function ImageRevealGame({
         }
       },
       {
+        playerId,
         onOpen: () => {
           if (!hasOpenedRealtime) {
             hasOpenedRealtime = true;
@@ -2049,6 +2063,7 @@ export function ImageRevealGame({
     catchUpRoundSnapshot,
     room.currentGameId,
     room.id,
+    playerId,
   ]);
 
   useEffect(() => {

@@ -1,6 +1,13 @@
 ﻿import * as gameService from "./gameService";
 
 import { RoomGameAuthority, type AuthorityVersion } from "./roomGameAuthority";
+import {
+  RoomAuthorityVNext,
+  type VNextMutationEnvelope,
+  type VNextMutationOutcome,
+  type VNextSocketAttachment,
+  type VNextStartBootstrap,
+} from "./roomAuthorityVNext";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
 
 import type {
@@ -349,6 +356,19 @@ const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
 const ROOM_AUTHORITY_MEMBERSHIP_NAMES = new Set(["joinRoom", "leaveRoom", "kickPlayerFromRoom", "dissolveRoom", "updatePlayerRole"]);
 const ROOM_AUTHORITY_ACTIVE_ONLY_NAMES = new Set(["cancelCurrentRound"]);
 const ROOM_AUTHORITY_ROSTER_QUERY_NAMES = new Set(["getRoomWithPlayers", "getPlayersByRoomId"]);
+const VNEXT_POSITIONAL_ROOM_MUTATIONS = new Set(["joinRoom", "leaveRoom", "kickPlayerFromRoom", "dissolveRoom", "updatePlayerRole", "returnRoomToLobby"]);
+
+function getVNextPositionalMutation(name: string, args: unknown[]) {
+  switch (name) {
+    case "joinRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomCode: args[0], playerId: args[1], nickname: args[2], role: args[3] } } : null;
+    case "leaveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], playerId: args[1] } } : null;
+    case "kickPlayerFromRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1], targetPlayerId: args[2] } } : null;
+    case "dissolveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
+    case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3] } } : null;
+    case "returnRoomToLobby": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
+    default: return null;
+  }
+}
 
 const AUTHORITY_PROJECTION_BOUNDARY_NAMES = new Set<string>([
   "cancelCurrentRound", "dissolveRoom", "revealTeamBattleAnswer", "gradeAnswersAndAdvance", "advanceReviewedQuestion", "updateQuestionLabel",
@@ -2611,6 +2631,7 @@ async function cleanupExpiredRooms(env: Env, now = Date.now()) {
 
 export class RoomDurableObject {
   private readonly authority: RoomGameAuthority;
+  private readonly authorityVNext: RoomAuthorityVNext;
   private authorityTopic: string | null = null;
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
   private readonly roundSnapshotCache = new Map<string, { expiresAt: number; snapshot: RoundSnapshot }>();
@@ -2637,7 +2658,7 @@ export class RoomDurableObject {
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.authority = new RoomGameAuthority(state.storage, env.DB);
-    state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
+    this.authorityVNext = new RoomAuthorityVNext(state, env.DB);
     state.blockConcurrencyWhile(async () => this.authority.initializeSchema());
   }
 
@@ -2649,6 +2670,10 @@ export class RoomDurableObject {
     const roomId = getRoomIdFromTopic(topic);
     if (!roomId) throw new Error("实时房间标识无效。");
     this.authorityTopic = `room:${roomId}`;
+    if (this.authorityVNext.hasStoredState()) {
+      await this.authorityVNext.restoreFromStorage();
+      return roomId;
+    }
     if (!force && this.authorityHydrationPromise) {
       await this.authorityHydrationPromise;
     } else {
@@ -2832,8 +2857,22 @@ export class RoomDurableObject {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
-      server.serializeAttachment({ topic });
-      server.send(JSON.stringify({ type: "connected", topic }));
+      const playerId = url.searchParams.get("playerId")?.trim() || undefined;
+      const attachment: VNextSocketAttachment = {
+        attachmentVersion: 1,
+        topic,
+        playerId,
+        pending: [],
+        serializedBytes: 0,
+      };
+      try {
+        attachment.serializedBytes = new TextEncoder().encode(JSON.stringify(attachment)).byteLength;
+        server.serializeAttachment(attachment);
+      } catch (error) {
+        logAuxiliaryFailure("websocket_attachment_initialize_failed", error, { topic, playerId: playerId ?? null });
+      }
+      const connectedAggregate = this.authorityVNext.getAggregate();
+      server.send(JSON.stringify({ type: "connected", topic, authorityVersion: connectedAggregate ? 2 : 1, gameId: connectedAggregate?.gameId, committedSeqByActor: connectedAggregate?.committedSeqByActor }));
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -2994,6 +3033,64 @@ export class RoomDurableObject {
       const body = await readRpcBody(request);
       const mutationDeadlinePolicy = getMutationDeadlinePolicy(body.name ?? "");
       const localRoomId = getRoomIdFromTopic(localTopic);
+      if (localTopic && localRoomId && body.name === "startGameWithQuestionSet" && isRecord(body.args?.[0])) {
+        const startParams = { ...body.args[0], authorityVersion: 2 };
+        const gameId = typeof startParams.startRequestId === "string" ? startParams.startRequestId : null;
+        if (!gameId) throw new Error("authority vNext 开局请求缺少 startRequestId。");
+        if (this.authorityVNext.hasPendingFinalProjection()) {
+          const flushed = await this.authorityVNext.flushFinalProjection();
+          if (!flushed && !this.authorityVNext.canStartAnotherGame()) throw new Error("上一局长期结果队列接近容量上限，请稍后再开始新游戏。");
+        }
+        this.authorityVNext.beginStart(localRoomId, gameId, startParams);
+        const result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [startParams], receivedAtMs));
+        if (!isRecord(result)) throw new Error("authority vNext 开局结果无效。");
+        const hidden = isRecord(result.__authorityVNextBootstrap) ? result.__authorityVNextBootstrap : null;
+        const gameSession = asGameSession(result.gameSession);
+        const room = asRoom(result.room);
+        if (!hidden || !gameSession || !room || !Array.isArray(hidden.players) || !Array.isArray(hidden.questions) || !isRecord(hidden.questionSet)) throw new Error("authority vNext 开局 bootstrap 不完整。");
+        const players = hidden.players as VNextStartBootstrap["players"];
+        this.authorityVNext.activateStart({ room: { ...room, players }, players, questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"], questions: hidden.questions as VNextStartBootstrap["questions"], gameSession });
+        await this.reconcileVNextAlarm();
+        this.broadcastVNextCutover();
+        this.sendVNextDelta(body.name, { scope: "room", type: "room_updated", room: { ...room, players } });
+        this.sendVNextDelta(body.name, { scope: "game", type: "round_snapshot", snapshot: this.authorityVNext.getSnapshot() });
+        const { __authorityVNextBootstrap: _hidden, ...publicResult } = result;
+        return Response.json({ data: publicResult });
+      }
+      if (localTopic && body.name && ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name) && this.authorityVNext.hasStoredState()) {
+        await this.authorityVNext.restoreFromStorage();
+        const aggregate = this.authorityVNext.getAggregate();
+        if (aggregate?.cutoverState !== "initializing") return Response.json({ data: this.authorityVNext.query(body.name, body.args ?? []) });
+      }
+      if (localTopic && body.name && VNEXT_POSITIONAL_ROOM_MUTATIONS.has(body.name)) {
+        await this.ensureAuthority(localTopic);
+        await this.resumeInitializingVNextStart();
+        const aggregate = this.authorityVNext.getAggregate();
+        const positional = getVNextPositionalMutation(body.name, body.args ?? []);
+        if (aggregate?.gameSession && aggregate.cutoverState !== "initializing" && positional) {
+          const seen = aggregate.seenSeqByActor[positional.actorId] ?? aggregate.committedSeqByActor[positional.actorId] ?? 0;
+          const envelope: VNextMutationEnvelope = {
+            actionId: body.clientActionId || crypto.randomUUID(),
+            actorId: positional.actorId,
+            clientSeq: seen + 1,
+            gameId: aggregate.gameId,
+            questionIndex: aggregate.gameSession.currentQuestionIndex,
+            name: body.name,
+            payload: positional.payload,
+          };
+          const outcome = this.authorityVNext.handleMutation(null, envelope, receivedAtMs);
+          this.invalidateVNextSnapshotCaches(outcome);
+          if (outcome.provisional) {
+            if (outcome.forceCheckpoint === "game-end") this.authorityVNext.prepareFinalResultsFromArchives();
+            const receipt = await this.authorityVNext.forceCheckpoint(outcome.forceCheckpoint ?? "phase-boundary", outcome.archiveQuestion === true);
+            if (receipt) this.broadcastVNextDurableAck(receipt);
+            await this.reconcileVNextAlarm();
+            this.sendVNextOutcome(body.name, outcome);
+            if (outcome.forceCheckpoint === "game-end" || outcome.forceCheckpoint === "projection") this.state.waitUntil(this.authorityVNext.flushFinalProjection());
+          }
+          return Response.json(outcome.error ? { error: outcome.error } : { data: outcome.data }, { status: outcome.error ? 400 : 200 });
+        }
+      }
       if (localTopic && (ROOM_AUTHORITY_MEMBERSHIP_NAMES.has(body.name ?? "") || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name ?? ""))) await this.ensureAuthority(localTopic);
       let useAuthority = Boolean(
         localTopic && (ROOM_AUTHORITY_GAME_NAMES.has(body.name ?? "") ||
@@ -3077,9 +3174,6 @@ export class RoomDurableObject {
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const receivedAtMs = Math.max(Date.now(), this.lastActionReceivedAtMs + 1);
     this.lastActionReceivedAtMs = receivedAtMs;
-    if (this.tryHandleWebSocketFastPath(socket, message)) {
-      return;
-    }
     this.sendActionAccepted(socket, message);
     if (this.tryHandleWebSocketRoundSnapshotRead(socket, message)) return;
     if (this.tryHandleWebSocketBootstrapSnapshotRead(socket, message)) return;
@@ -3091,6 +3185,22 @@ export class RoomDurableObject {
     );
     this.actionQueue = task.catch(() => undefined);
     await task;
+  }
+
+  async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
+    if (this.authorityVNext.hasStoredState()) {
+      const receipt = await this.authorityVNext.handleSocketClose(socket);
+      if (receipt) this.broadcastVNextDurableAck(receipt);
+    }
+    try { socket.close(code, reason); } catch { /* The peer may already be closed. */ }
+  }
+
+  async webSocketError(socket: WebSocket): Promise<void> {
+    if (this.authorityVNext.hasStoredState()) {
+      const receipt = await this.authorityVNext.handleSocketClose(socket);
+      if (receipt) this.broadcastVNextDurableAck(receipt);
+    }
+    try { socket.close(1011, "实时连接异常。"); } catch { /* The peer may already be closed. */ }
   }
 
   private sendActionAccepted(socket: WebSocket, message: string | ArrayBuffer) {
@@ -3122,11 +3232,6 @@ export class RoomDurableObject {
       payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as typeof payload;
     } catch {
       return false;
-    }
-
-    if (payload.type === "ping") {
-      socket.send(JSON.stringify({ type: "pong" }));
-      return true;
     }
 
     const requestedSnapshotGameSessionId = payload.type === "action" && typeof payload.args?.[0] === "string" ? payload.args[0] : null;
@@ -3193,14 +3298,10 @@ export class RoomDurableObject {
 
   private async handleRoundSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
     const receivedAtMs = Date.now();
+    const precedingActions = this.actionQueue;
     let ownsInflightRead = false;
     try {
-      const cachedRoundSnapshot = this.getCachedRoundSnapshot(gameSessionId);
-      if (cachedRoundSnapshot) {
-        socket.send(JSON.stringify({ type: "action_result", clientActionId, data: cachedRoundSnapshot }));
-        return;
-      }
-
+      await precedingActions;
       let snapshotPromise = this.roundSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
         ownsInflightRead = true;
@@ -3251,6 +3352,11 @@ export class RoomDurableObject {
       return cachedRoundSnapshot;
     }
 
+    if (this.authorityVNext.isActiveGame(gameSessionId)) {
+      await this.authorityVNext.restoreFromStorage();
+      return this.authorityVNext.query("getRoundSnapshot", [gameSessionId]) as RoundSnapshot;
+    }
+
     await this.ensureAuthority(this.authorityTopic);
     await this.authority.loadGameProjection(gameSessionId);
     const snapshot = await gameService.runWithGameDatabase(this.authority.database, () => gameService.getRoundSnapshot(gameSessionId));
@@ -3286,14 +3392,10 @@ export class RoomDurableObject {
 
   private async handleBootstrapSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
     const receivedAtMs = Date.now();
+    const precedingActions = this.actionQueue;
     let ownsInflightRead = false;
     try {
-      const cachedSnapshot = this.getCachedBootstrapSnapshot(gameSessionId);
-      if (cachedSnapshot) {
-        socket.send(JSON.stringify({ type: "action_result", clientActionId, data: cachedSnapshot }));
-        return;
-      }
-
+      await precedingActions;
       let snapshotPromise = this.bootstrapSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
         ownsInflightRead = true;
@@ -3338,6 +3440,11 @@ export class RoomDurableObject {
       return cachedSnapshot;
     }
 
+    if (this.authorityVNext.isActiveGame(gameSessionId)) {
+      await this.authorityVNext.restoreFromStorage();
+      return this.authorityVNext.query("getGameBootstrapSnapshot", [gameSessionId]) as GameBootstrapSnapshot;
+    }
+
     await this.ensureAuthority(this.authorityTopic);
     await this.authority.loadGameProjection(gameSessionId);
     const snapshot = await gameService.runWithGameDatabase(this.authority.database, () => gameService.getGameBootstrapSnapshot(gameSessionId));
@@ -3373,14 +3480,10 @@ export class RoomDurableObject {
 
   private async handleGameResultSnapshotRead(socket: WebSocket, gameSessionId: string, clientActionId: string | undefined) {
     const receivedAtMs = Date.now();
+    const precedingActions = this.actionQueue;
     let ownsInflightRead = false;
     try {
-      const cachedSnapshot = this.getCachedGameResultSnapshot(gameSessionId);
-      if (cachedSnapshot) {
-        socket.send(JSON.stringify({ type: "action_result", clientActionId, data: cachedSnapshot }));
-        return;
-      }
-
+      await precedingActions;
       let snapshotPromise = this.gameResultSnapshotReadInflight.get(gameSessionId);
       if (!snapshotPromise) {
         ownsInflightRead = true;
@@ -3425,11 +3528,233 @@ export class RoomDurableObject {
       return cachedSnapshot;
     }
 
+    if (this.authorityVNext.isActiveGame(gameSessionId)) {
+      await this.authorityVNext.restoreFromStorage();
+      return this.authorityVNext.query("getGameResultSnapshot", [gameSessionId]) as GameResultSnapshot;
+    }
+
     await this.ensureAuthority(this.authorityTopic);
     await this.authority.loadGameProjection(gameSessionId);
     const snapshot = await gameService.runWithGameDatabase(this.authority.database, () => gameService.getGameResultSnapshot(gameSessionId));
     await this.cacheGameResultSnapshot(snapshot, cacheGeneration);
     return snapshot;
+  }
+
+  private async resumeInitializingVNextStart() {
+    const initializing = this.authorityVNext.getInitializingStart();
+    if (!initializing) return;
+    const params = { ...initializing.startParams, authorityVersion: 2 };
+    const result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [params], Date.now()));
+    if (!isRecord(result)) throw new Error("authority vNext 开局恢复结果无效。");
+    const hidden = isRecord(result.__authorityVNextBootstrap) ? result.__authorityVNextBootstrap : null;
+    const gameSession = asGameSession(result.gameSession);
+    const room = asRoom(result.room);
+    if (!hidden || !gameSession || gameSession.id !== initializing.gameId || !room || !Array.isArray(hidden.players) || !Array.isArray(hidden.questions) || !isRecord(hidden.questionSet)) {
+      throw new Error("authority vNext 开局恢复 bootstrap 不完整。");
+    }
+    const players = hidden.players as VNextStartBootstrap["players"];
+    this.authorityVNext.activateStart({
+      room: { ...room, players },
+      players,
+      questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"],
+      questions: hidden.questions as VNextStartBootstrap["questions"],
+      gameSession,
+    });
+    this.clearAllSnapshotCaches();
+    await this.reconcileVNextAlarm();
+  }
+
+  private async tryHandleVNextAction(
+    socket: WebSocket,
+    payload: {
+      type?: string;
+      name?: string;
+      args?: unknown[];
+      clientActionId?: string;
+      mutation?: VNextMutationEnvelope;
+    },
+    receivedAtMs: number,
+  ) {
+    if (!payload.name || payload.name === "startGameWithQuestionSet") return false;
+    await this.resumeInitializingVNextStart();
+    const queryGameId = getQueryGameSessionId(payload.name, payload.args);
+    const argRecord = isRecord(payload.args?.[0]) ? payload.args?.[0] : null;
+    const positional = getVNextPositionalMutation(payload.name, payload.args ?? []);
+    const activeAggregate = this.authorityVNext.getAggregate();
+    const gameId = payload.mutation?.gameId ?? queryGameId ?? (typeof argRecord?.gameSessionId === "string" ? argRecord.gameSessionId : null)
+      ?? (VNEXT_POSITIONAL_ROOM_MUTATIONS.has(payload.name) || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(payload.name) ? activeAggregate?.gameId ?? null : null);
+    if (payload.mutation && this.authorityVNext.isActiveGame() && !this.authorityVNext.isActiveGame(payload.mutation.gameId)) {
+      await this.authorityVNext.restoreFromStorage();
+      socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, error: "该操作属于已结束的游戏，请刷新后重试。" }));
+      return true;
+    }
+    if (!gameId || !this.authorityVNext.isActiveGame(gameId)) return false;
+    await this.authorityVNext.restoreFromStorage();
+    const mutationDeadlinePolicy = getMutationDeadlinePolicy(payload.name);
+    if (mutationDeadlinePolicy == null) {
+      const data = this.authorityVNext.query(payload.name, payload.args ?? []);
+      socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data }));
+      return true;
+    }
+    let mutation = payload.mutation;
+    if (!mutation || mutation.name !== payload.name) {
+      const attachment = (() => {
+        try { return socket.deserializeAttachment() as VNextSocketAttachment | null; } catch { return null; }
+      })();
+      const aggregate = this.authorityVNext.getAggregate();
+      const actorId = attachment?.playerId
+        ?? positional?.actorId
+        ?? (typeof argRecord?.playerId === "string" ? argRecord.playerId : undefined)
+        ?? (typeof argRecord?.presenterPlayerId === "string" ? argRecord.presenterPlayerId : undefined)
+        ?? (typeof argRecord?.hostPlayerId === "string" ? argRecord.hostPlayerId : undefined)
+        ?? (typeof argRecord?.actorPlayerId === "string" ? argRecord.actorPlayerId : undefined);
+      const mutationPayload = argRecord ?? positional?.payload;
+      if (!aggregate?.gameSession || !actorId || !mutationPayload) {
+        socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, error: "当前游戏已启用 authority vNext，请刷新页面后重试。" }));
+        return true;
+      }
+      const seen = aggregate.seenSeqByActor[actorId] ?? aggregate.committedSeqByActor[actorId] ?? 0;
+      mutation = {
+        actionId: payload.clientActionId || crypto.randomUUID(),
+        actorId,
+        clientSeq: seen + 1,
+        gameId: aggregate.gameId,
+        questionIndex: aggregate.gameSession.currentQuestionIndex,
+        name: payload.name,
+        payload: mutationPayload,
+      };
+    }
+    const outcome = this.authorityVNext.handleMutation(socket, mutation, receivedAtMs);
+    this.invalidateVNextSnapshotCaches(outcome);
+    socket.send(JSON.stringify({
+      type: "action_received",
+      clientActionId: payload.clientActionId,
+      actionId: mutation.actionId,
+      provisional: outcome.provisional,
+      orderToken: outcome.orderToken,
+      data: outcome.data,
+      error: outcome.error,
+      terminal: outcome.terminal,
+      duplicate: outcome.duplicate,
+    }));
+    const sendActionResult = () => socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: outcome.data, error: outcome.error }));
+    if (!outcome.provisional) {
+      sendActionResult();
+      if (outcome.duplicate) {
+        const aggregate = this.authorityVNext.getAggregate();
+        socket.send(JSON.stringify({ type: "checkpoint_committed", gameId: aggregate?.gameId, version: aggregate?.stateVersion ?? 0, committedSeqByActor: aggregate?.committedSeqByActor ?? {} }));
+      }
+      return true;
+    }
+
+    if (outcome.forceCheckpoint) {
+      if (outcome.forceCheckpoint === "game-end") this.authorityVNext.prepareFinalResultsFromArchives();
+      const receipt = await this.authorityVNext.forceCheckpoint(outcome.forceCheckpoint, outcome.archiveQuestion === true);
+      if (receipt) this.broadcastVNextDurableAck(receipt);
+      await this.reconcileVNextAlarm();
+      this.sendVNextOutcome(payload.name, outcome);
+      sendActionResult();
+      if (outcome.forceCheckpoint === "game-end") this.state.waitUntil(this.authorityVNext.flushFinalProjection());
+      return true;
+    }
+
+    if (outcome.duplicate) {
+      sendActionResult();
+      const receipt = await this.authorityVNext.maybeCheckpoint();
+      if (receipt) this.broadcastVNextDurableAck(receipt);
+      return true;
+    }
+
+    this.sendVNextOutcome(payload.name, outcome);
+    sendActionResult();
+    if (outcome.deadlineChanged) await this.reconcileVNextAlarm();
+    const receipt = await this.authorityVNext.maybeCheckpoint();
+    if (receipt) this.broadcastVNextDurableAck(receipt);
+    return true;
+  }
+
+  private sendVNextOutcome(name: string, outcome: VNextMutationOutcome) {
+    if (outcome.publicDeltas.length) this.sendVNextDeltas(name, outcome.publicDeltas, undefined, true);
+    const presenterId = this.authorityVNext.getAggregate()?.gameSession?.presenterPlayerId;
+    if (presenterId && outcome.presenterDeltas.length) this.sendVNextDeltas(name, outcome.presenterDeltas, new Set([presenterId]));
+    for (const delivery of outcome.playerDeltas) this.sendVNextDelta(name, delivery.delta, new Set([delivery.playerId]));
+  }
+
+  private invalidateVNextSnapshotCaches(outcome: VNextMutationOutcome) {
+    if (!outcome.provisional || outcome.duplicate) return;
+    const gameId = this.authorityVNext.getAggregate()?.gameId;
+    if (gameId) this.clearGameSessionSnapshotCaches(gameId);
+  }
+
+  private sendVNextDelta(name: string, delta: RealtimeDelta, recipients?: Set<string>, publicStream = false) {
+    this.sendVNextDeltas(name, [delta], recipients, publicStream);
+  }
+
+  private sendVNextDeltas(name: string, deltas: RealtimeDelta[], recipients?: Set<string>, publicStream = false) {
+    const aggregate = this.authorityVNext.getAggregate();
+    const payload = JSON.stringify({
+      type: "change",
+      name,
+      topic: this.authorityTopic,
+      authorityVersion: 2,
+      ...(publicStream ? { version: aggregate?.publicStateVersion ?? 0 } : {}),
+      deltas,
+    });
+    let sent = 0;
+    for (const target of this.state.getWebSockets()) {
+      if (recipients) {
+        let playerId: string | undefined;
+        try { playerId = (target.deserializeAttachment() as VNextSocketAttachment | null)?.playerId; } catch { playerId = undefined; }
+        if (!playerId || !recipients.has(playerId)) continue;
+      }
+      try { target.send(payload); sent += 1; } catch { target.close(1011, "实时推送失败。"); }
+    }
+    this.authorityVNext.recordBroadcast(payload.length, sent);
+  }
+
+  private broadcastVNextDurableAck(receipt: { version: number; committedSeqByActor: Record<string, number> }) {
+    const payload = JSON.stringify({
+      type: "checkpoint_committed",
+      gameId: this.authorityVNext.getAggregate()?.gameId,
+      version: receipt.version,
+      committedSeqByActor: receipt.committedSeqByActor,
+    });
+    let sent = 0;
+    for (const socket of this.state.getWebSockets()) {
+      try { socket.send(payload); sent += 1; } catch { socket.close(1011, "持久化确认推送失败。"); }
+    }
+    this.authorityVNext.recordBroadcast(payload.length, sent);
+  }
+
+  private broadcastVNextCutover() {
+    const aggregate = this.authorityVNext.getAggregate();
+    this.broadcast(JSON.stringify({
+      type: "change",
+      name: "authorityCutover",
+      topic: this.authorityTopic,
+      authorityVersion: 2,
+      version: aggregate?.publicStateVersion ?? 0,
+      gameId: aggregate?.gameId,
+      committedSeqByActor: aggregate?.committedSeqByActor ?? {},
+      deltas: [],
+    }));
+  }
+
+  private async reconcileVNextAlarm() {
+    const deadline = this.authorityVNext.getDeadline();
+    const current = await this.state.storage.getAlarm();
+    if (!deadline) {
+      if (current != null) await this.state.storage.deleteAlarm();
+      this.authorityVNext.recordAlarmScheduled(current != null);
+      return;
+    }
+    const scheduledAt = Math.max(deadline.runAtMs, Date.now() + BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS);
+    if (current === scheduledAt) {
+      this.authorityVNext.recordAlarmScheduled(false);
+      return;
+    }
+    await this.state.storage.setAlarm(scheduledAt);
+    this.authorityVNext.recordAlarmScheduled(true);
   }
 
   private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer, receivedAtMs = Date.now()): Promise<void> {
@@ -3446,19 +3771,22 @@ export class RoomDurableObject {
         name?: string;
         args?: unknown[];
         clientActionId?: string;
+        mutation?: VNextMutationEnvelope;
       };
       clientActionId = payload.clientActionId;
       actionName = payload.name;
       actionArgs = payload.args ?? [];
 
-      if (payload.type === "ping") {
-        socket.send(JSON.stringify({ type: "pong" }));
-        return;
-      }
-
       if (payload.type !== "action" || !payload.name) {
         socket.send(JSON.stringify({ type: "error", error: "无效的实时操作请求。" }));
         return;
+      }
+
+      if (await this.tryHandleVNextAction(socket, payload, receivedAtMs)) return;
+
+      if (payload.name === "startGameWithQuestionSet" && isRecord(payload.args?.[0])) {
+        payload.args = [{ ...payload.args[0], authorityVersion: 2 }];
+        actionArgs = payload.args;
       }
 
       const mutationDeadlinePolicy = getMutationDeadlinePolicy(payload.name);
@@ -3536,6 +3864,15 @@ export class RoomDurableObject {
         };
       };
       const roomId = getRoomIdFromTopic(actionTopic);
+      if (payload.name === "startGameWithQuestionSet" && roomId && isRecord(payload.args?.[0])) {
+        const gameId = typeof payload.args[0].startRequestId === "string" ? payload.args[0].startRequestId : null;
+        if (!gameId) throw new Error("authority vNext 开局请求缺少 startRequestId。");
+        if (this.authorityVNext.hasPendingFinalProjection()) {
+          const flushed = await this.authorityVNext.flushFinalProjection();
+          if (!flushed && !this.authorityVNext.canStartAnotherGame()) throw new Error("上一局长期结果队列接近容量上限，请稍后再开始新游戏。");
+        }
+        this.authorityVNext.beginStart(roomId, gameId, payload.args[0]);
+      }
       let useAuthority = ROOM_AUTHORITY_GAME_NAMES.has(payload.name) || Boolean(
         roomId && (ROOM_AUTHORITY_MEMBERSHIP_NAMES.has(payload.name) || ROOM_AUTHORITY_ACTIVE_ONLY_NAMES.has(payload.name)) && this.authority.isAuthoritative(roomId),
       );
@@ -3560,24 +3897,47 @@ export class RoomDurableObject {
       const execution = useAuthority
         ? await gameService.runWithGameDatabase(this.authority.database, executeAction, mutationTracker ?? undefined)
         : await runWithGameDatabase(this.env, executeAction);
-      if (payload.name === "startGameWithQuestionSet" && actionTopic) {
-        await this.ensureAuthority(actionTopic, true);
+      const { deltas, gameResultSnapshot, roundSnapshot, topic } = execution;
+      let { responseResult } = execution;
+      if (payload.name === "startGameWithQuestionSet" && isRecord(responseResult)) {
+        const hidden = isRecord(responseResult.__authorityVNextBootstrap) ? responseResult.__authorityVNextBootstrap : null;
+        const gameSession = asGameSession(responseResult.gameSession);
+        const room = asRoom(responseResult.room);
+        if (!hidden || !gameSession || !room || !Array.isArray(hidden.players) || !Array.isArray(hidden.questions) || !isRecord(hidden.questionSet)) {
+          throw new Error("authority vNext 开局 bootstrap 不完整。");
+        }
+        const players = hidden.players as VNextStartBootstrap["players"];
+        this.authorityVNext.activateStart({
+          room: { ...room, players },
+          players,
+          questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"],
+          questions: hidden.questions as VNextStartBootstrap["questions"],
+          gameSession,
+        });
+        this.clearAllSnapshotCaches();
+        const { __authorityVNextBootstrap: _hidden, ...publicResult } = responseResult;
+        responseResult = publicResult;
+        await this.reconcileVNextAlarm();
+        this.broadcastVNextCutover();
       }
-      const { deltas, gameResultSnapshot, roundSnapshot, responseResult, topic } = execution;
       let authorityVersion: AuthorityVersion | null = null;
       if (isMutation && roomId) {
-        const isBoundary = useAuthority && AUTHORITY_PROJECTION_BOUNDARY_NAMES.has(payload.name);
-        authorityVersion = this.authority.commitMutation(
-          roomId,
-          actionKey && !AUTHORITY_HANDOFF_NAMES.has(payload.name) && AUTHORITY_PERSIST_RESULT_NAMES.has(payload.name) ? actionKey : null,
-          responseResult,
-          isBoundary ? payload.name : null,
-        );
-        if (isBoundary) {
-          const flush = this.flushAuthorityProjections();
-          this.state.waitUntil(flush);
-        } else if (!useAuthority && (payload.name === "dissolveRoom" || (payload.name === "leaveRoom" && !getResultRoom(responseResult)))) {
-          this.authority.purgeRoom(roomId);
+        if (payload.name === "startGameWithQuestionSet") {
+          authorityVersion = { epoch: "vnext", stateVersion: this.authorityVNext.getAggregate()?.stateVersion ?? 0 };
+        } else {
+          const isBoundary = useAuthority && AUTHORITY_PROJECTION_BOUNDARY_NAMES.has(payload.name);
+          authorityVersion = this.authority.commitMutation(
+            roomId,
+            actionKey && !AUTHORITY_HANDOFF_NAMES.has(payload.name) && AUTHORITY_PERSIST_RESULT_NAMES.has(payload.name) ? actionKey : null,
+            responseResult,
+            isBoundary ? payload.name : null,
+          );
+          if (isBoundary) {
+            const flush = this.flushAuthorityProjections();
+            this.state.waitUntil(flush);
+          } else if (!useAuthority && (payload.name === "dissolveRoom" || (payload.name === "leaveRoom" && !getResultRoom(responseResult)))) {
+            this.authority.purgeRoom(roomId);
+          }
         }
       }
       actionLogContext = this.enrichGameRpcErrorLogContext(
@@ -3588,7 +3948,7 @@ export class RoomDurableObject {
       );
       const scheduleRoundSnapshot = asRoundSnapshot(responseResult) ?? roundSnapshot;
       let postCommitError: unknown = null;
-      if (isMutation && mutationDeadlinePolicy === "authoritative-post-state") {
+      if (isMutation && mutationDeadlinePolicy === "authoritative-post-state" && payload.name !== "startGameWithQuestionSet") {
         try {
           await this.applyMutationDeadlineTransitions({
             mutationName: payload.name as MutationName,
@@ -3674,16 +4034,35 @@ export class RoomDurableObject {
     }
   }
 
-  async alarm(): Promise<void> {
+  async alarm(alarmInfo?: { retryCount: number; isRetry: boolean }): Promise<void> {
     const task = this.actionQueue.then(
-      () => this.handleAlarm(),
-      () => this.handleAlarm(),
+      () => this.handleAlarm(alarmInfo),
+      () => this.handleAlarm(alarmInfo),
     );
     this.actionQueue = task.catch(() => undefined);
     await task;
   }
 
-  private async handleAlarm() {
+  private async handleAlarm(alarmInfo?: { retryCount: number; isRetry: boolean }) {
+    if (this.authorityVNext.hasStoredState() && this.authorityVNext.getCutoverState() === "active") {
+      try {
+        await this.authorityVNext.restoreFromStorage();
+        this.authorityVNext.markAlarmMetric(alarmInfo ?? {});
+        const executed = await this.authorityVNext.executeDueDeadline(Date.now());
+        if (executed?.outcome) this.invalidateVNextSnapshotCaches(executed.outcome);
+        if (executed?.receipt) this.broadcastVNextDurableAck(executed.receipt);
+        if (executed?.outcome) this.sendVNextOutcome(executed.outcome.forceCheckpoint ?? "deadline", executed.outcome);
+        await this.reconcileVNextAlarm();
+        return;
+      } catch (error) {
+        this.authorityVNext.resetAfterFailedTransition();
+        const permanent = /no such (table|column)|schema|不兼容/i.test(error instanceof Error ? error.message : String(error));
+        const retryCount = alarmInfo?.retryCount ?? 0;
+        console.error(JSON.stringify({ event: "authority_vnext_alarm_failed", authorityVersion: 2, retryCount, permanent, ...getErrorLogDetails(error) }));
+        if (!permanent && retryCount < 5) throw error;
+        return;
+      }
+    }
     const now = Date.now();
     const { autoForfeit, teamBattleVote } = await this.getBusinessAlarmStates();
     await this.runDueAutoForfeit(autoForfeit, now);

@@ -2532,6 +2532,7 @@ export async function startGameWithQuestionSet(params: {
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
+  authorityVersion?: 2;
 }) {
   assertD1Env();
 
@@ -2551,15 +2552,43 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (room.game_status === "PLAYING" && room.current_game_id) {
-    const currentGameSession = await getGameSessionById(room.current_game_id);
+    const currentGameSession = params.authorityVersion === 2
+      ? await (async () => {
+          const { data, error } = await d1.from("game_sessions").select("*").eq("id", room.current_game_id).maybeSingle<DbGameSession>();
+          if (error) throw new Error(error.message);
+          if (!data) return null;
+          const currentPlayers = await getDbPlayersByRoomId(room.id);
+          return {
+            ...toGameSession(data),
+            eligiblePlayerIds: currentPlayers.filter(isGamePlayer).filter((player) => player.id !== data.presenter_player_id).map((player) => player.id),
+          };
+        })()
+      : await getGameSessionById(room.current_game_id);
     if (
       currentGameSession?.status === "PLAYING" &&
       currentGameSession.presenterPlayerId === params.presenterPlayerId &&
       currentGameSession.questionSetId === params.questionSetId
     ) {
+      const currentPlayers = await getDbPlayersByRoomId(room.id);
+      if (params.authorityVersion === 2) {
+        const [{ data: currentQuestionSet, error: currentQuestionSetError }, currentQuestions] = await Promise.all([
+          d1.from("question_sets").select("*").eq("id", params.questionSetId).maybeSingle<DbQuestionSet>(),
+          getDbQuestionsByQuestionSetId(params.questionSetId),
+        ]);
+        if (currentQuestionSetError || !currentQuestionSet) throw new Error(currentQuestionSetError?.message ?? "题库不存在。");
+        return {
+          gameSession: currentGameSession,
+          room: toRoom(room, currentPlayers),
+          __authorityVNextBootstrap: {
+            players: currentPlayers.map(toPlayer),
+            questionSet: toQuestionSet(currentQuestionSet, currentQuestions),
+            questions: currentQuestions.map(toQuestion),
+          },
+        };
+      }
       return {
         gameSession: currentGameSession,
-        room: toRoom(room, await getDbPlayersByRoomId(room.id)),
+        room: toRoom(room, currentPlayers),
       };
     }
   }
@@ -2733,17 +2762,23 @@ export async function startGameWithQuestionSet(params: {
   }
 
   let eligiblePlayerIds: string[];
-  try {
-    await createGameParticipantSnapshot(gameSession.id, activeGamePlayers);
-    eligiblePlayerIds = await createQuestionEligibilitySnapshotFromPlayers({
-      gameSessionId: gameSession.id,
-      questionIndex: gameSession.current_question_index,
-      presenterPlayerId: params.presenterPlayerId,
-      players: activeGamePlayers,
-    });
-  } catch (error) {
-    await cleanupFailedGameSession(gameSession.id);
-    throw error;
+  if (params.authorityVersion === 2) {
+    eligiblePlayerIds = activeGamePlayers
+      .filter((player) => player.id !== params.presenterPlayerId)
+      .map((player) => player.id);
+  } else {
+    try {
+      await createGameParticipantSnapshot(gameSession.id, activeGamePlayers);
+      eligiblePlayerIds = await createQuestionEligibilitySnapshotFromPlayers({
+        gameSessionId: gameSession.id,
+        questionIndex: gameSession.current_question_index,
+        presenterPlayerId: params.presenterPlayerId,
+        players: activeGamePlayers,
+      });
+    } catch (error) {
+      await cleanupFailedGameSession(gameSession.id);
+      throw error;
+    }
   }
   const hydratedGameSession = {
     ...toGameSession(gameSession),
@@ -2795,9 +2830,19 @@ export async function startGameWithQuestionSet(params: {
     throw new Error("开始游戏失败：房间状态已变化，请刷新后重试。");
   }
 
+  const vnextQuestions = params.authorityVersion === 2 ? await getDbQuestionsByQuestionSetId(params.questionSetId) : [];
   return {
     gameSession: hydratedGameSession,
     room: toRoom(updatedRoom),
+    ...(params.authorityVersion === 2
+      ? {
+          __authorityVNextBootstrap: {
+            players: (players ?? []).map(toPlayer),
+            questionSet: toQuestionSet(questionSet, vnextQuestions),
+            questions: vnextQuestions.map(toQuestion),
+          },
+        }
+      : {}),
   };
 }
 

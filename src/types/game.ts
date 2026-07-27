@@ -315,19 +315,21 @@ export type RealtimeDelta =
   | {
       scope: "game";
       type: "buzzer_answer_judged";
-      gameSession: GameSession;
+      gameSession?: GameSession;
       buzzerAnswer: BuzzerAnswer;
       scores?: PlayerScore[];
       questionResults?: QuestionResult[];
+      removedQuestionResultPlayerIds?: string[];
       buzzerAnswers?: BuzzerAnswer[];
     }
   | {
       scope: "game";
       type: "answer_judgements_changed";
-      gameSession: GameSession;
+      gameSession?: GameSession;
       answers: BuzzerAnswer[];
       scores: PlayerScore[];
       questionResults: QuestionResult[];
+      removedQuestionResultPlayerIds?: string[];
     }
   | {
       scope: "game";

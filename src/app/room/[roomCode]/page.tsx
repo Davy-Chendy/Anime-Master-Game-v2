@@ -1110,7 +1110,7 @@ function GameResultPanel({
     }
 
     const unbindGameSessionTopic = bindGameSessionRealtimeTopic(currentGameId, `room:${room.id}`);
-    ensureRealtimeTopic(`room:${room.id}`);
+    ensureRealtimeTopic(`room:${room.id}`, playerId);
 
     return () => {
       unbindGameSessionTopic();
@@ -1135,8 +1135,8 @@ function GameResultPanel({
         setQuestionSet,
         setQuestionResults,
       });
-    });
-  }, [currentGameId, room.id]);
+    }, { playerId });
+  }, [currentGameId, playerId, room.id]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1275,7 +1275,7 @@ function GameResultPanel({
         }
         return;
       }
-    });
+    }, { playerId });
   }, [currentGameId, playerId, questionSet?.id, room.id]);
 
   useEffect(() => {
@@ -1987,6 +1987,13 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        if (message.name === "authorityCutover") {
+          lastRoomRealtimeVersionRef.current = null;
+          missedRoomRealtimeVersionRef.current = true;
+          roomCatchUpTargetVersionRef.current = null;
+          void refreshLatestRoom();
+          return;
+        }
         if (message.name === "authorityRecovered") {
           missedRoomRealtimeVersionRef.current = true;
           if (messageVersion != null) {
@@ -2037,6 +2044,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
       },
       {
+        playerId,
         onOpen: () => {
           missedRoomRealtimeVersionRef.current = true;
           void refreshLatestRoom();

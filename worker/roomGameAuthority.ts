@@ -2,7 +2,22 @@ import { DurableSqlDatabase } from "./durableSqlDatabase";
 
 type Row = Record<string, unknown>;
 
-const AUTHORITY_SCHEMA_VERSION = 6;
+const AUTHORITY_SCHEMA_VERSION = 7;
+const AUTHORITY_VNEXT_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS authority_vnext_active_game (
+    id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, game_id TEXT NOT NULL,
+    authority_version INTEGER NOT NULL, schema_version INTEGER NOT NULL, cutover_state TEXT NOT NULL,
+    state_version INTEGER NOT NULL, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS authority_vnext_question_archive (
+    game_id TEXT NOT NULL, question_index INTEGER NOT NULL, checkpoint_version INTEGER NOT NULL,
+    state_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(game_id,question_index)
+  )`,
+  `CREATE TABLE IF NOT EXISTS authority_vnext_projection_outbox (
+    id INTEGER PRIMARY KEY CHECK(id=1), payload_json TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+  )`,
+] as const;
 const MUTATION_JOURNAL_VALIDATION_SCHEMA = `CREATE TABLE IF NOT EXISTS mutation_journal_validation (id INTEGER PRIMARY KEY CHECK(id=1), validated_at INTEGER NOT NULL)`;
 
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
@@ -87,7 +102,7 @@ export class RoomGameAuthority {
   initializeSchema() {
     this.storage.sql.exec(SCHEMA[0]);
     const current = this.storage.sql.exec<Row>("SELECT version FROM authority_schema WHERE id = 1").toArray()[0];
-    const currentVersion = Number(current?.version ?? 0);
+    let currentVersion = Number(current?.version ?? 0);
     if (currentVersion >= AUTHORITY_SCHEMA_VERSION) return;
     if (currentVersion < 5) {
       for (const statement of SCHEMA.slice(1)) this.storage.sql.exec(statement);
@@ -99,13 +114,32 @@ export class RoomGameAuthority {
       }
       this.storage.sql.exec("UPDATE buzzer_answers SET server_received_at=submitted_at WHERE server_received_at IS NULL");
       this.storage.sql.exec("CREATE INDEX IF NOT EXISTS buzzer_answers_fair_order_idx ON buzzer_answers(game_session_id,question_index,reveal_round,submitted_at,server_received_at,id)");
-    } else {
+    } else if (currentVersion < 6) {
       this.storage.sql.exec(MUTATION_JOURNAL_VALIDATION_SCHEMA);
     }
-    this.storage.sql.exec(
-      "INSERT INTO authority_schema(id,version) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET version=excluded.version",
-      AUTHORITY_SCHEMA_VERSION,
-    );
+    if (currentVersion < 6) {
+      this.storage.sql.exec(
+        "INSERT INTO authority_schema(id,version) VALUES(1,6) ON CONFLICT(id) DO UPDATE SET version=excluded.version",
+      );
+      currentVersion = 6;
+    }
+    if (currentVersion < 7) {
+      this.storage.transactionSync(() => {
+        for (const statement of AUTHORITY_VNEXT_SCHEMA) this.storage.sql.exec(statement);
+        const required = new Map<string, string[]>([
+          ["authority_vnext_active_game", ["authority_version", "cutover_state", "state_json"]],
+          ["authority_vnext_question_archive", ["game_id", "question_index", "state_json"]],
+          ["authority_vnext_projection_outbox", ["payload_json", "attempts"]],
+        ]);
+        for (const [table, columns] of required) {
+          const existing = new Set(this.storage.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map((row) => row.name));
+          if (columns.some((column) => !existing.has(column))) throw new Error(`authority vNext schema validation failed: ${table}`);
+        }
+        this.storage.sql.exec("UPDATE authority_schema SET version=7 WHERE id=1 AND version=6");
+        const advanced = this.storage.sql.exec<{ version: number }>("SELECT version FROM authority_schema WHERE id=1").one();
+        if (advanced.version !== 7) throw new Error("authority vNext schema version did not advance");
+      });
+    }
   }
 
   getMeta(roomId: string) {

@@ -2,6 +2,7 @@
 
 import type { GameResultSnapshot, RoundSnapshot } from "@/types/game";
 import type { RealtimeDelta } from "@/types/game";
+import { commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, syncAuthoritySequence, type AuthorityOutboxItem } from "@/lib/authorityOutbox";
 
 type ChangeMessage = {
   type: "change";
@@ -15,6 +16,9 @@ type ChangeMessage = {
   deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
   gameResultSnapshot?: GameResultSnapshot;
+  authorityVersion?: 1 | 2;
+  gameId?: string;
+  committedSeqByActor?: Record<string, number>;
 };
 
 type ActionResultMessage = {
@@ -25,17 +29,26 @@ type ActionResultMessage = {
 };
 
 type ActionAcceptedMessage = { type: "action_accepted"; clientActionId?: string };
+type ActionReceivedMessage = { type: "action_received"; clientActionId?: string; actionId?: string };
+type CheckpointCommittedMessage = { type: "checkpoint_committed"; gameId?: string; committedSeqByActor?: Record<string, number> };
 
 type TopicState = {
   socket: WebSocket | null;
   listeners: Set<(message: ChangeMessage) => void>;
   connectListeners: Set<() => void>;
-  pending: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: number }>;
+  pending: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: number; actionId?: string }>;
   reconnectTimer: number | null;
-  heartbeatTimer: number | null;
   reconnectAttempts: number;
-  lastPongAt: number;
-  lastActivityAt: number;
+  playerId?: string;
+  drainPromise: Promise<void> | null;
+  drainSocket: WebSocket | null;
+  drainRequested: boolean;
+  sentOutboxActionIds: Set<string>;
+  authorityVersion: 1 | 2 | null;
+  currentGameId: string | null;
+  sequenceSync: Promise<void>;
+  readyPromise: Promise<void>;
+  resolveReady?: () => void;
 };
 
 class WsActionError extends Error {
@@ -52,9 +65,8 @@ const ACTION_TIMEOUT_MS = 4000;
 const LONG_ACTION_TIMEOUT_MS = 30000;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 5000;
-const HEARTBEAT_INTERVAL_MS = 60000;
-const HEARTBEAT_TIMEOUT_MS = 150000;
 const ROOM_TOPIC_PREFIX = "room:";
+const POSITIONAL_ROOM_MUTATION_NAMES = new Set(["leaveRoom", "updatePlayerRole", "kickPlayerFromRoom", "dissolveRoom", "returnRoomToLobby"]);
 
 const MUTATION_NAMES = new Set([
   "leaveRoom",
@@ -125,6 +137,9 @@ const GAME_SESSION_ID_STRING_ARG_NAMES = new Set([
 ]);
 const topicStates = new Map<string, TopicState>();
 const gameSessionTopics = new Map<string, string>();
+const gameSessionQuestionIndexes = new Map<string, number>();
+const provisionalActionIds = new Set<string>();
+let recoveryListenersInstalled = false;
 
 function apiBase() {
   return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -150,7 +165,7 @@ function inferActionTopic(name: string, args: unknown[]) {
 
   if (
     typeof first === "string" &&
-    (name.includes("Room") || name.includes("Presenter") || name.includes("Round") || ROOM_ID_STRING_ARG_NAMES.has(name))
+    (name.includes("Room") || name.includes("Presenter") || name.includes("Round") || ROOM_ID_STRING_ARG_NAMES.has(name) || POSITIONAL_ROOM_MUTATION_NAMES.has(name))
   ) {
     const roomTopic = `${ROOM_TOPIC_PREFIX}${first}`;
     if (topicStates.has(roomTopic)) {
@@ -197,10 +212,15 @@ function getTopicState(topic: string) {
       connectListeners: new Set(),
       pending: new Map(),
       reconnectTimer: null,
-      heartbeatTimer: null,
       reconnectAttempts: 0,
-      lastPongAt: Date.now(),
-      lastActivityAt: Date.now(),
+      drainPromise: null,
+      drainSocket: null,
+      drainRequested: false,
+      sentOutboxActionIds: new Set(),
+      authorityVersion: null,
+      currentGameId: null,
+      sequenceSync: Promise.resolve(),
+      readyPromise: Promise.resolve(),
     };
     topicStates.set(topic, state);
   }
@@ -209,13 +229,6 @@ function getTopicState(topic: string) {
 
 function getReconnectDelayMs(state: TopicState) {
   return Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, state.reconnectAttempts - 1));
-}
-
-function clearHeartbeat(state: TopicState) {
-  if (state.heartbeatTimer !== null) {
-    window.clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer = null;
-  }
 }
 
 function cleanupTopicStateIfIdle(topic: string, state: TopicState) {
@@ -227,7 +240,6 @@ function cleanupTopicStateIfIdle(topic: string, state: TopicState) {
     window.clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
   }
-  clearHeartbeat(state);
   state.socket?.close(1000, "No listeners.");
   state.socket = null;
   topicStates.delete(topic);
@@ -259,32 +271,89 @@ function notifyChangeListeners(state: TopicState, message: ChangeMessage) {
   }
 }
 
-function startHeartbeat(topic: string, state: TopicState, socket: WebSocket) {
-  clearHeartbeat(state);
-  state.lastPongAt = Date.now();
-  state.lastActivityAt = Date.now();
-  state.heartbeatTimer = window.setInterval(() => {
-    if (state.socket !== socket || socket.readyState !== WebSocket.OPEN) {
-      clearHeartbeat(state);
-      return;
-    }
+function setTopicPlayerId(topic: string, playerId: string | null | undefined) {
+  if (!playerId) return;
+  const state = getTopicState(topic);
+  if (state.playerId === playerId) return;
+  const previous = state.playerId;
+  state.playerId = playerId;
+  if (state.socket && previous !== playerId && (state.socket.readyState === WebSocket.CONNECTING || state.socket.readyState === WebSocket.OPEN)) {
+    state.socket.close(1000, "Reconnect with player identity.");
+    state.socket = null;
+  }
+}
 
-    if (Date.now() - state.lastPongAt > HEARTBEAT_TIMEOUT_MS) {
-      socket.close(4000, "Heartbeat timeout.");
-      return;
-    }
+function getPositionalRoomMutation(name: string, args: unknown[]) {
+  switch (name) {
+    case "leaveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], playerId: args[1] } } : null;
+    case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3] } } : null;
+    case "kickPlayerFromRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1], targetPlayerId: args[2] } } : null;
+    case "dissolveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
+    case "returnRoomToLobby": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
+    default: return null;
+  }
+}
 
-    if (Date.now() - state.lastActivityAt < HEARTBEAT_INTERVAL_MS) {
-      return;
-    }
+function mutationMessage(item: AuthorityOutboxItem) {
+  return JSON.stringify({
+    type: "action",
+    name: item.name,
+    args: item.args,
+    clientActionId: item.actionId,
+    mutation: {
+      actionId: item.actionId,
+      actorId: item.actorId,
+      clientSeq: item.clientSeq,
+      gameId: item.gameId,
+      questionIndex: item.questionIndex,
+      name: item.name,
+      payload: item.payload,
+    },
+  });
+}
 
+function drainAuthorityOutbox(topic: string, state: TopicState, socket: WebSocket) {
+  state.drainRequested = true;
+  if (state.drainPromise && state.drainSocket === socket) return state.drainPromise;
+  const drain = (async () => {
     try {
-      socket.send('{"type":"ping"}');
-      state.lastActivityAt = Date.now();
-    } catch {
-      socket.close(1011, "Heartbeat send failed.");
+      while (state.drainRequested && state.socket === socket && socket.readyState === WebSocket.OPEN) {
+        state.drainRequested = false;
+        for (const item of await listAuthorityOutbox(topic)) {
+          if (state.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+          if (state.sentOutboxActionIds.has(item.actionId)) continue;
+          socket.send(mutationMessage(item));
+          state.sentOutboxActionIds.add(item.actionId);
+        }
+      }
+    } catch (error) {
+      console.error("Realtime Outbox drain failed.", error);
     }
-  }, HEARTBEAT_INTERVAL_MS);
+  })();
+  let wrapped: Promise<void>;
+  wrapped = drain.finally(() => {
+    if (state.drainPromise !== wrapped) return;
+    state.drainPromise = null;
+    state.drainSocket = null;
+    if (state.drainRequested && state.socket === socket && socket.readyState === WebSocket.OPEN) void drainAuthorityOutbox(topic, state, socket);
+  });
+  state.drainPromise = wrapped;
+  state.drainSocket = socket;
+  return wrapped;
+}
+
+function installRecoveryListeners() {
+  if (recoveryListenersInstalled || typeof window === "undefined") return;
+  recoveryListenersInstalled = true;
+  const recover = () => {
+    for (const [topic, state] of topicStates) {
+      if (state.listeners.size === 0 && state.pending.size === 0) continue;
+      const socket = ensureSocket(topic);
+      if (socket.readyState === WebSocket.OPEN) void state.readyPromise.then(() => drainAuthorityOutbox(topic, state, socket));
+    }
+  };
+  window.addEventListener("online", recover);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") recover(); });
 }
 
 function scheduleReconnect(topic: string, state: TopicState) {
@@ -312,8 +381,12 @@ function ensureSocket(topic: string) {
     state.reconnectTimer = null;
   }
 
-  const socket = new WebSocket(wsUrl(`/api/realtime/${encodeURIComponent(topic)}/ws`));
+  installRecoveryListeners();
+  state.readyPromise = new Promise<void>((resolve) => { state.resolveReady = resolve; });
+  const playerQuery = state.playerId ? `?playerId=${encodeURIComponent(state.playerId)}` : "";
+  const socket = new WebSocket(wsUrl(`/api/realtime/${encodeURIComponent(topic)}/ws${playerQuery}`));
   state.socket = socket;
+  state.sentOutboxActionIds.clear();
 
   socket.onopen = () => {
     if (state.socket !== socket) {
@@ -321,12 +394,10 @@ function ensureSocket(topic: string) {
     }
 
     state.reconnectAttempts = 0;
-    startHeartbeat(topic, state, socket);
-    notifyConnectListeners(state);
   };
 
   socket.onmessage = (event) => {
-    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | { type?: string };
+    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | ActionReceivedMessage | CheckpointCommittedMessage | { type?: string; authorityVersion?: 1 | 2; gameId?: string; committedSeqByActor?: Record<string, number> };
 
     try {
       message = JSON.parse(String(event.data)) as ChangeMessage | ActionResultMessage | { type?: string };
@@ -335,19 +406,44 @@ function ensureSocket(topic: string) {
       return;
     }
 
-    state.lastActivityAt = Date.now();
-    state.lastPongAt = Date.now();
+    if (message.type === "connected") {
+      state.authorityVersion = message.authorityVersion ?? null;
+      state.currentGameId = message.gameId ?? null;
+      const syncTasks: Promise<void>[] = [];
+      if (message.gameId) syncTasks.push(discardSupersededAuthorityOutbox(topic, message.gameId));
+      if (message.gameId && state.playerId && message.committedSeqByActor) syncTasks.push(syncAuthoritySequence(message.gameId, state.playerId, message.committedSeqByActor[state.playerId] ?? 0));
+      state.sequenceSync = Promise.all(syncTasks).then(() => undefined).catch((error) => { console.error("Realtime sequence sync failed.", error); });
+      void state.sequenceSync
+        .then(() => drainAuthorityOutbox(topic, state, socket))
+        .finally(() => {
+          if (state.socket !== socket) return;
+          state.resolveReady?.();
+          state.resolveReady = undefined;
+          notifyConnectListeners(state);
+        });
+      return;
+    }
 
-    if (message.type === "pong" || message.type === "connected") {
+    if (message.type === "action_received") {
+      const received = message as ActionReceivedMessage;
+      if (received.actionId) provisionalActionIds.add(received.actionId);
+      return;
+    }
+
+    if (message.type === "checkpoint_committed") {
+      const committed = message as CheckpointCommittedMessage;
+      if (committed.committedSeqByActor) void commitAuthorityOutbox(topic, committed.gameId, committed.committedSeqByActor);
       return;
     }
 
     if (message.type === "action_result") {
       const result = message as ActionResultMessage;
       const pending = result.clientActionId ? state.pending.get(result.clientActionId) : null;
+      if (!pending && result.clientActionId) provisionalActionIds.delete(result.clientActionId);
       if (pending) {
         window.clearTimeout(pending.timer);
         state.pending.delete(result.clientActionId ?? "");
+        if (pending.actionId) provisionalActionIds.delete(pending.actionId);
         cleanupTopicStateIfIdle(topic, state);
         if (result.error) {
           pending.reject(new WsActionError("server", result.error));
@@ -373,8 +469,15 @@ function ensureSocket(topic: string) {
     }
 
     if (message.type === "change") {
-      state.lastPongAt = Date.now();
-      notifyChangeListeners(state, message as ChangeMessage);
+      const change = message as ChangeMessage;
+      if (change.authorityVersion === 2) state.authorityVersion = 2;
+      if (change.name === "authorityCutover" && change.gameId) {
+        state.currentGameId = change.gameId;
+        const tasks: Promise<void>[] = [discardSupersededAuthorityOutbox(topic, change.gameId)];
+        if (state.playerId) tasks.push(syncAuthoritySequence(change.gameId, state.playerId, change.committedSeqByActor?.[state.playerId] ?? 0));
+        state.sequenceSync = Promise.all(tasks).then(() => undefined).catch((error) => { console.error("Realtime cutover sequence sync failed.", error); });
+      }
+      notifyChangeListeners(state, change);
     }
   };
 
@@ -383,7 +486,9 @@ function ensureSocket(topic: string) {
       return;
     }
 
-    clearHeartbeat(state);
+    state.resolveReady?.();
+    state.resolveReady = undefined;
+
     for (const pending of state.pending.values()) {
       window.clearTimeout(pending.timer);
       pending.reject(new WsActionError("transport", "实时连接已断开，本次操作没有完成。请重试。"));
@@ -447,14 +552,25 @@ async function httpRpc<T>(name: string, args: unknown[]) {
 
 async function wsAction<T>(topic: string, name: string, args: unknown[]) {
   const state = getTopicState(topic);
-  const socket = await waitForSocketOpen(topic, ensureSocket(topic));
   const timeoutMs = getActionTimeoutMs(name);
-
-  const clientActionId =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
+  const socket = await waitForSocketOpen(topic, ensureSocket(topic));
+  await state.readyPromise;
+  await state.sequenceSync;
+  const first = isRecord(args[0]) ? args[0] : null;
+  const positional = getPositionalRoomMutation(name, args);
+  const boundGameId = [...gameSessionTopics].find(([, boundTopic]) => boundTopic === topic)?.[0] ?? null;
+  const gameId = typeof first?.gameSessionId === "string" ? first.gameSessionId : POSITIONAL_ROOM_MUTATION_NAMES.has(name) ? boundGameId : null;
+  const actorId = positional?.actorId ?? (typeof first?.playerId === "string" ? first.playerId
+    : typeof first?.presenterPlayerId === "string" ? first.presenterPlayerId
+      : typeof first?.hostPlayerId === "string" ? first.hostPlayerId : null);
+  const mutationPayload = first ?? positional?.payload ?? null;
+  if (state.authorityVersion === 2 && gameId && state.currentGameId && gameId !== state.currentGameId) {
+    throw new WsActionError("server", "该操作属于已结束的游戏，请刷新后重试。");
+  }
+  const outboxItem = state.authorityVersion !== 1 && MUTATION_NAMES.has(name) && gameId && actorId
+    && mutationPayload ? await enqueueAuthorityMutation({ topic, actorId, gameId, questionIndex: gameSessionQuestionIndexes.get(gameId) ?? 0, name, payload: mutationPayload, args })
+    : null;
+  const clientActionId = outboxItem?.actionId ?? crypto.randomUUID();
   const promise = new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       state.pending.delete(clientActionId);
@@ -466,12 +582,16 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
       resolve: resolve as (value: unknown) => void,
       reject,
       timer,
+      actionId: outboxItem?.actionId,
     });
   });
 
   try {
-    socket.send(JSON.stringify({ type: "action", name, args, clientActionId }));
-    state.lastActivityAt = Date.now();
+    if (outboxItem) {
+      await drainAuthorityOutbox(topic, state, socket);
+    } else {
+      socket.send(JSON.stringify({ type: "action", name, args, clientActionId }));
+    }
   } catch {
     const pending = state.pending.get(clientActionId);
     if (pending) {
@@ -505,9 +625,10 @@ export async function callGameRpc<T>(name: string, args: unknown[] = []) {
 export function subscribeRealtimeTopic(
   topic: string,
   listener: (message: ChangeMessage) => void,
-  options: { onOpen?: () => void } = {},
+  options: { onOpen?: () => void; playerId?: string } = {},
 ) {
   const state = getTopicState(topic);
+  setTopicPlayerId(topic, options.playerId);
   const onOpen = options.onOpen;
   state.listeners.add(listener);
   if (onOpen) {
@@ -515,11 +636,11 @@ export function subscribeRealtimeTopic(
   }
   ensureSocket(topic);
   if (onOpen && state.socket?.readyState === WebSocket.OPEN) {
-    window.setTimeout(() => {
+    void state.readyPromise.then(() => {
       if (state.connectListeners.has(onOpen)) {
         onOpen();
       }
-    }, 0);
+    });
   }
 
   return () => {
@@ -531,24 +652,31 @@ export function subscribeRealtimeTopic(
   };
 }
 
-export function bindGameSessionRealtimeTopic(gameSessionId: string | null | undefined, topic: string | null | undefined) {
+export function bindGameSessionRealtimeTopic(gameSessionId: string | null | undefined, topic: string | null | undefined, questionIndex = 0) {
   if (!gameSessionId || !topic) {
     return () => undefined;
   }
 
   gameSessionTopics.set(gameSessionId, topic);
+  gameSessionQuestionIndexes.set(gameSessionId, questionIndex);
 
   return () => {
     if (gameSessionTopics.get(gameSessionId) === topic) {
       gameSessionTopics.delete(gameSessionId);
+      gameSessionQuestionIndexes.delete(gameSessionId);
     }
   };
 }
 
-export function ensureRealtimeTopic(topic: string | null | undefined) {
+export function updateGameSessionRealtimeQuestion(gameSessionId: string, questionIndex: number) {
+  gameSessionQuestionIndexes.set(gameSessionId, questionIndex);
+}
+
+export function ensureRealtimeTopic(topic: string | null | undefined, playerId?: string) {
   if (!topic) {
     return;
   }
 
+  setTopicPlayerId(topic, playerId);
   ensureSocket(topic);
 }
