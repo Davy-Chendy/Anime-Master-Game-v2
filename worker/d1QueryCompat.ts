@@ -460,8 +460,9 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       }
 
       const results = await this.db!.batch<Record<string, unknown>>(statements);
-      if (this.mutationTracker) this.mutationTracker.successfulWrites += statements.length;
-      return this.shapeRows(results.flatMap((result) => result.results ?? []));
+      const affectedRows = results.flatMap((result) => result.results ?? []);
+      if (this.mutationTracker) this.mutationTracker.successfulWrites += affectedRows.length;
+      return this.shapeRows(affectedRows);
     }
 
     for (let index = 0; index < records.length; index += 1) {
@@ -492,7 +493,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
         .map(sqlIdentifier)
         .join(", ")}) VALUES (${placeholders})${conflict} RETURNING ${this.selectedSql()}`;
       const result = await this.db!.prepare(sql).bind(...values).first<Record<string, unknown>>();
-      if (this.mutationTracker) this.mutationTracker.successfulWrites += 1;
+      if (this.mutationTracker && result) this.mutationTracker.successfulWrites += 1;
       if (result) {
         rows.push(result);
       }
@@ -520,16 +521,18 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       .map((column) => `${sqlIdentifier(column)} = ?`)
       .join(", ")}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
-    if (this.mutationTracker) this.mutationTracker.successfulWrites += 1;
-    return this.shapeRows(result.results ?? []);
+    const affectedRows = result.results ?? [];
+    if (this.mutationTracker) this.mutationTracker.successfulWrites += affectedRows.length;
+    return this.shapeRows(affectedRows);
   }
 
   private async executeDelete(): Promise<QueryResult<T>> {
     const params: unknown[] = [];
     const sql = `DELETE FROM ${sqlIdentifier(this.table)}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
-    if (this.mutationTracker) this.mutationTracker.successfulWrites += 1;
-    return this.shapeRows(result.results ?? []);
+    const affectedRows = result.results ?? [];
+    if (this.mutationTracker) this.mutationTracker.successfulWrites += affectedRows.length;
+    return this.shapeRows(affectedRows);
   }
 }
 

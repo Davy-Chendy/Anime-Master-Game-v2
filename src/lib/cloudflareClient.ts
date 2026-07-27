@@ -324,7 +324,6 @@ function ensureSocket(topic: string) {
   };
 
   socket.onmessage = (event) => {
-    state.lastActivityAt = Date.now();
     let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | { type?: string };
 
     try {
@@ -334,8 +333,10 @@ function ensureSocket(topic: string) {
       return;
     }
 
+    state.lastActivityAt = Date.now();
+    state.lastPongAt = Date.now();
+
     if (message.type === "pong" || message.type === "connected") {
-      state.lastPongAt = Date.now();
       return;
     }
 

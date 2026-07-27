@@ -180,6 +180,15 @@ const GAME_SESSION_ID_STRING_ARG_NAMES = new Set([
   "getQuestionResultsForGameSession",
   "getRoundSnapshot",
 ]);
+const GAME_SESSION_ID_OBJECT_ARG_NAMES = new Set([
+  "getQuestionResultsForQuestion",
+  "getAnswersForQuestion",
+  "getAnswersForQuestionRound",
+  "getAnswerForPlayerRound",
+  "getBuzzerAnswersForQuestion",
+  "getBuzzerAnswersForQuestionRound",
+  "getBuzzerAnswerForPlayerRound",
+]);
 const DEFAULT_REMOTE_IMAGE_PROXY_CANDIDATES = [
   "https://corsproxy.io/?url=",
   "https://api.allorigins.win/raw?url=",
@@ -191,6 +200,8 @@ const SERVER_RECEIVED_AT_ACTION_NAMES = new Set([
   "submitForfeitAnswer",
   "cancelForfeitAnswer",
   "submitBuzzerAnswer",
+  "submitTeamBattleRevealVote",
+  "submitTeamBattleGuessVote",
   "autoForfeitExpiredRound",
   "settleBuzzerRound",
 ]);
@@ -287,6 +298,7 @@ function getMutationDeadlinePolicy(name: string): MutationDeadlinePolicy | null 
 
 const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
+  "leaveRoom",
   "kickPlayerFromRoom",
   "confirmRevealBlocks",
   "autoForfeitExpiredRound",
@@ -314,6 +326,7 @@ const DELTA_ONLY_ROUND_CACHE_INVALIDATION_MUTATION_NAMES = new Set([
   "judgeBuzzerAnswer",
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",
+  "updateQuestionLabel",
 ]);
 
 const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
@@ -526,6 +539,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function getQueryGameSessionId(name: string | undefined, args: unknown[] | undefined) {
+  const firstArg = args?.[0];
+  if (name && GAME_SESSION_ID_STRING_ARG_NAMES.has(name) && typeof firstArg === "string") {
+    return firstArg;
+  }
+  if (name && GAME_SESSION_ID_OBJECT_ARG_NAMES.has(name) && isRecord(firstArg) && typeof firstArg.gameSessionId === "string") {
+    return firstArg.gameSessionId;
+  }
+  return null;
+}
+
 function isGameSessionRecord(value: Record<string, unknown>) {
   return typeof value.id === "string" && typeof value.roomId === "string" && "currentQuestionIndex" in value;
 }
@@ -551,8 +575,12 @@ function getResultGameSessionId(result: unknown) {
   return null;
 }
 
-function getDeltaOnlyRoundCacheInvalidationGameSessionId(name: string, result: unknown) {
-  return DELTA_ONLY_ROUND_CACHE_INVALIDATION_MUTATION_NAMES.has(name) ? getResultGameSessionId(result) : null;
+function getDeltaOnlyRoundCacheInvalidationGameSessionId(name: string, result: unknown, args: unknown[] = []) {
+  if (!DELTA_ONLY_ROUND_CACHE_INVALIDATION_MUTATION_NAMES.has(name)) return null;
+  if (name === "updateQuestionLabel" && isRecord(args[0]) && typeof args[0].gameSessionId === "string") {
+    return args[0].gameSessionId;
+  }
+  return getResultGameSessionId(result);
 }
 
 async function getRoundSnapshotForMutation(name: string, result: unknown) {
@@ -566,7 +594,7 @@ async function getRoundSnapshotForMutation(name: string, result: unknown) {
   }
 
   const room = getResultRoom(result);
-  if (name === "kickPlayerFromRoom" && room?.status === "PLAYING" && room.currentGameId) {
+  if ((name === "kickPlayerFromRoom" || name === "leaveRoom") && room?.status === "PLAYING" && room.currentGameId) {
     return await gameService.getRoundSnapshot(room.currentGameId);
   }
 
@@ -1308,12 +1336,13 @@ async function handleRpc(
     const authorityVersion = isMutation ? await options.localAuthorityCommit?.(name, responseResult, body.clientActionId) ?? null : null;
     const scheduleRoundSnapshot = asRoundSnapshot(responseResult) ?? roundSnapshot;
     const topic = options.localTopic ?? await getRoomTopicForBroadcast(name, args, responseResult);
-    const invalidatedGameSessionId = getDeltaOnlyRoundCacheInvalidationGameSessionId(name, responseResult);
+    const invalidatedGameSessionId = getDeltaOnlyRoundCacheInvalidationGameSessionId(name, responseResult, args);
 
     if (invalidatedGameSessionId && options.localTopic && options.localInvalidateRoundSnapshots) {
       options.localInvalidateRoundSnapshots(invalidatedGameSessionId);
     }
 
+    let postCommitError: unknown = null;
     if (topic && mutationDeadlinePolicy === "authoritative-post-state") {
       const scheduleMessage = {
         topic,
@@ -1322,10 +1351,17 @@ async function handleRpc(
         mutationName: name as MutationName,
         source: options.localTopic === topic ? "local_rpc" : "http_rpc",
       } satisfies AutoForfeitScheduleMessage;
-      if (options.localTopic === topic && options.localScheduleAutoForfeit) {
-        await options.localScheduleAutoForfeit(scheduleMessage);
-      } else {
-        await scheduleAutoForfeit(env, scheduleMessage);
+      try {
+        if (options.localTopic === topic && options.localScheduleAutoForfeit) {
+          await options.localScheduleAutoForfeit(scheduleMessage);
+        } else {
+          await scheduleAutoForfeit(env, scheduleMessage);
+        }
+      } catch (error) {
+        postCommitError = error;
+        if (options.localTopic === topic && options.localInvalidateRoundSnapshots && scheduleRoundSnapshot) {
+          options.localInvalidateRoundSnapshots(scheduleRoundSnapshot.gameSession.id);
+        }
       }
     }
 
@@ -1345,15 +1381,27 @@ async function handleRpc(
         } satisfies BroadcastMessage;
 
         if (options.localTopic === topic && options.localCacheGameResult && gameResultSnapshot) {
-          await options.localCacheGameResult(gameResultSnapshot);
+          try {
+            await options.localCacheGameResult(gameResultSnapshot);
+          } catch (error) {
+            postCommitError ??= error;
+          }
         }
 
-        if (options.localTopic === topic && options.localBroadcast) {
-          await options.localBroadcast(message);
-        } else {
-          await broadcast(env, message);
+        try {
+          if (options.localTopic === topic && options.localBroadcast) {
+            await options.localBroadcast(message);
+          } else {
+            await broadcast(env, message);
+          }
+        } catch (error) {
+          postCommitError ??= error;
         }
       }
+    }
+
+    if (postCommitError) {
+      throw postCommitError instanceof DeadlineTransitionApplyError ? postCommitError : new DeadlineTransitionApplyError();
     }
 
     return json({ data: responseResult }, {}, request, env);
@@ -2872,7 +2920,7 @@ export class RoomDurableObject {
 
     try {
       this.rememberRoomPlayerCount(message.topic, message.result);
-      this.invalidateRoundSnapshotCachesForMutation(message.name, message.result);
+      this.invalidateRoundSnapshotCachesForMutation(message.name, message.result, message.args);
       const gameResultSnapshot = getBroadcastGameResultSnapshot(message);
       if (gameResultSnapshot) {
         await this.cacheGameResultSnapshot(gameResultSnapshot);
@@ -2947,6 +2995,12 @@ export class RoomDurableObject {
       if (localTopic && mutationDeadlinePolicy != null) {
         await this.ensureDeadlineReconciled(localTopic, "local_rpc_action");
       }
+      const queryGameSessionId = mutationDeadlinePolicy == null
+        ? getQueryGameSessionId(body.name, body.args)
+        : null;
+      if (useAuthority && queryGameSessionId) {
+        await this.authority.loadGameProjection(queryGameSessionId);
+      }
       if (useAuthority && mutationDeadlinePolicy != null && localRoomId && AUTHORITY_JOURNALED_NAMES.has(body.name ?? "")) {
         this.authority.beginMutation(localRoomId, body.name ?? "", body.clientActionId ? `${body.name}:${body.clientActionId}` : null, body.args ?? []);
         mutationTracker = { successfulWrites: 0 };
@@ -2983,6 +3037,8 @@ export class RoomDurableObject {
               if (isBoundary) {
                 const flush = this.flushAuthorityProjections();
                 this.state.waitUntil(flush);
+              } else if (!useAuthority && (name === "dissolveRoom" || (name === "leaveRoom" && !getResultRoom(result)))) {
+                this.authority.purgeRoom(localRoomId);
               }
               return version;
             }
@@ -3472,8 +3528,9 @@ export class RoomDurableObject {
         this.authority.beginMutation(roomId, payload.name, actionKey || null, payload.args ?? []);
         mutationTracker = { successfulWrites: 0 };
       }
-      if (useAuthority && !isMutation && typeof payload.args?.[0] === "string" && GAME_SESSION_ID_STRING_ARG_NAMES.has(payload.name)) {
-        await this.authority.loadGameProjection(payload.args[0]);
+      const queryGameSessionId = !isMutation ? getQueryGameSessionId(payload.name, payload.args) : null;
+      if (useAuthority && queryGameSessionId) {
+        await this.authority.loadGameProjection(queryGameSessionId);
       }
       const execution = useAuthority
         ? await gameService.runWithGameDatabase(this.authority.database, executeAction, mutationTracker ?? undefined)
@@ -3494,6 +3551,8 @@ export class RoomDurableObject {
         if (isBoundary) {
           const flush = this.flushAuthorityProjections();
           this.state.waitUntil(flush);
+        } else if (!useAuthority && (payload.name === "dissolveRoom" || (payload.name === "leaveRoom" && !getResultRoom(responseResult)))) {
+          this.authority.purgeRoom(roomId);
         }
       }
       actionLogContext = this.enrichGameRpcErrorLogContext(
@@ -3503,19 +3562,29 @@ export class RoomDurableObject {
         topic ?? actionTopic,
       );
       const scheduleRoundSnapshot = asRoundSnapshot(responseResult) ?? roundSnapshot;
+      let postCommitError: unknown = null;
       if (isMutation && mutationDeadlinePolicy === "authoritative-post-state") {
-        await this.applyMutationDeadlineTransitions({
-          mutationName: payload.name as MutationName,
-          result: responseResult,
-          roundSnapshot: scheduleRoundSnapshot,
-          topic: topic ?? actionTopic ?? null,
-          source: "websocket_action",
-          stateMayHaveCommitted: true,
-        });
+        try {
+          await this.applyMutationDeadlineTransitions({
+            mutationName: payload.name as MutationName,
+            result: responseResult,
+            roundSnapshot: scheduleRoundSnapshot,
+            topic: topic ?? actionTopic ?? null,
+            source: "websocket_action",
+            stateMayHaveCommitted: true,
+          });
+        } catch (error) {
+          postCommitError = error;
+          if (scheduleRoundSnapshot) this.invalidateRoundSnapshotCaches(scheduleRoundSnapshot.gameSession.id);
+        }
       }
-      this.invalidateRoundSnapshotCachesForMutation(payload.name ?? "", responseResult);
+      this.invalidateRoundSnapshotCachesForMutation(payload.name ?? "", responseResult, payload.args ?? []);
       if (gameResultSnapshot) {
-        await this.cacheGameResultSnapshot(gameResultSnapshot);
+        try {
+          await this.cacheGameResultSnapshot(gameResultSnapshot);
+        } catch (error) {
+          postCommitError ??= error;
+        }
       }
       if (actionKey) {
         this.cacheRecentAction(actionKey, responseResult);
@@ -3534,12 +3603,20 @@ export class RoomDurableObject {
             deltas,
             version: authorityVersion?.stateVersion,
           } satisfies BroadcastMessage;
-          if (socketAttachment?.topic === topic) {
-            await this.broadcastChangeMessage(changeMessage);
-          } else {
-            await broadcast(this.env, changeMessage);
+          try {
+            if (socketAttachment?.topic === topic) {
+              await this.broadcastChangeMessage(changeMessage);
+            } else {
+              await broadcast(this.env, changeMessage);
+            }
+          } catch (error) {
+            postCommitError ??= error;
           }
         }
+      }
+
+      if (postCommitError) {
+        throw postCommitError instanceof DeadlineTransitionApplyError ? postCommitError : new DeadlineTransitionApplyError();
       }
 
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult, authority: authorityVersion }));
@@ -3677,7 +3754,7 @@ export class RoomDurableObject {
     this.trimOldestEntries(this.gameResultSnapshotCache, GAME_RESULT_SNAPSHOT_CACHE_MAX_ENTRIES);
   }
 
-  private invalidateRoundSnapshotCachesForMutation(name: string, result: unknown) {
+  private invalidateRoundSnapshotCachesForMutation(name: string, result: unknown, args: unknown[] = []) {
     const gameSession = getResultGameSession(result);
     const room = getResultRoom(result);
     if (name === "dissolveRoom" || (name === "leaveRoom" && !room)) {
@@ -3692,7 +3769,7 @@ export class RoomDurableObject {
       return;
     }
 
-    const gameSessionId = getDeltaOnlyRoundCacheInvalidationGameSessionId(name, result);
+    const gameSessionId = getDeltaOnlyRoundCacheInvalidationGameSessionId(name, result, args);
     if (!gameSessionId) {
       return;
     }
@@ -4138,6 +4215,12 @@ export class RoomDurableObject {
       if (completedKey === alarm.key) {
         this.deadlineReconcileRequired = true;
         this.deadlineReconcileAfterAlarm = true;
+        if ((alarm.attempts ?? 0) > 0) {
+          const roomId = await this.ensureAuthority(alarm.topic);
+          this.clearAllSnapshotCaches();
+          const gapVersion = this.authority.bumpVersion(roomId).stateVersion;
+          this.broadcast(JSON.stringify({ type: "change", name: "authorityRecovered", topic: alarm.topic, version: gapVersion, deltas: [] }));
+        }
         return;
       }
 
@@ -4177,6 +4260,11 @@ export class RoomDurableObject {
         this.authority.abortMutation(autoForfeitRoomId);
         this.deadlineReconcileRequired = true;
         this.deadlineReconcileAfterAlarm = true;
+        if ((alarm.attempts ?? 0) > 0) {
+          this.clearAllSnapshotCaches();
+          const gapVersion = this.authority.bumpVersion(autoForfeitRoomId).stateVersion;
+          this.broadcast(JSON.stringify({ type: "change", name: "authorityRecovered", topic: alarm.topic, version: gapVersion, deltas: [] }));
+        }
         console.info(
           JSON.stringify({
             event: "business_alarm_fired",
@@ -4194,33 +4282,52 @@ export class RoomDurableObject {
         ? this.authority.commitMutation(autoForfeitRoomId, null, execution.responseResult, null)
         : { epoch: "", stateVersion: 0 };
 
-      await this.state.storage.put(AUTO_FORFEIT_COMPLETED_KEY_STORAGE_KEY, alarm.key);
-      await this.applyMutationDeadlineTransitions({
-        mutationName: "autoForfeitExpiredRound",
-        result: execution.responseResult,
-        roundSnapshot: execution.roundSnapshot,
-        topic: alarm.topic,
-        source: "auto_forfeit_alarm",
-        stateMayHaveCommitted: true,
-        reconcileAlarm: false,
-      });
+      let postCommitError: unknown = null;
+      try {
+        await this.state.storage.put(AUTO_FORFEIT_COMPLETED_KEY_STORAGE_KEY, alarm.key);
+      } catch (error) {
+        postCommitError = error;
+      }
+      try {
+        await this.applyMutationDeadlineTransitions({
+          mutationName: "autoForfeitExpiredRound",
+          result: execution.responseResult,
+          roundSnapshot: execution.roundSnapshot,
+          topic: alarm.topic,
+          source: "auto_forfeit_alarm",
+          stateMayHaveCommitted: true,
+          reconcileAlarm: false,
+        });
+      } catch (error) {
+        postCommitError ??= error;
+        this.invalidateRoundSnapshotCaches(execution.roundSnapshot.gameSession.id);
+      }
       this.invalidateRoundSnapshotCachesForMutation("autoForfeitExpiredRound", execution.responseResult);
       if (execution.gameResultSnapshot) {
-        await this.cacheGameResultSnapshot(execution.gameResultSnapshot);
+        try {
+          await this.cacheGameResultSnapshot(execution.gameResultSnapshot);
+        } catch (error) {
+          postCommitError ??= error;
+        }
       }
 
       if (execution.deltas.length > 0) {
-        await this.broadcastChangeMessage({
-          type: "change",
-          name: "autoForfeitExpiredRound",
-          result: stripRoundSnapshotFromBroadcastResult(execution.responseResult),
-          args: [{ gameSessionId: alarm.gameSessionId }],
-          topic: alarm.topic,
-          delta: execution.deltas[0],
-          deltas: execution.deltas,
-          version: autoForfeitVersion.stateVersion,
-        } satisfies BroadcastMessage);
+        try {
+          await this.broadcastChangeMessage({
+            type: "change",
+            name: "autoForfeitExpiredRound",
+            result: stripRoundSnapshotFromBroadcastResult(execution.responseResult),
+            args: [{ gameSessionId: alarm.gameSessionId }],
+            topic: alarm.topic,
+            delta: execution.deltas[0],
+            deltas: execution.deltas,
+            version: autoForfeitVersion.stateVersion,
+          } satisfies BroadcastMessage);
+        } catch (error) {
+          postCommitError ??= error;
+        }
       }
+      if (postCommitError) throw postCommitError;
       console.info(
         JSON.stringify({
           event: "business_alarm_fired",
@@ -4265,6 +4372,12 @@ export class RoomDurableObject {
       if (completedKey === alarm.key) {
         this.deadlineReconcileRequired = true;
         this.deadlineReconcileAfterAlarm = true;
+        if ((alarm.attempts ?? 0) > 0) {
+          const roomId = await this.ensureAuthority(alarm.topic);
+          this.clearAllSnapshotCaches();
+          const gapVersion = this.authority.bumpVersion(roomId).stateVersion;
+          this.broadcast(JSON.stringify({ type: "change", name: "authorityRecovered", topic: alarm.topic, version: gapVersion, deltas: [] }));
+        }
         return;
       }
 
@@ -4304,6 +4417,11 @@ export class RoomDurableObject {
         this.authority.abortMutation(teamVoteRoomId);
         this.deadlineReconcileRequired = true;
         this.deadlineReconcileAfterAlarm = true;
+        if ((alarm.attempts ?? 0) > 0) {
+          this.clearAllSnapshotCaches();
+          const gapVersion = this.authority.bumpVersion(teamVoteRoomId).stateVersion;
+          this.broadcast(JSON.stringify({ type: "change", name: "authorityRecovered", topic: alarm.topic, version: gapVersion, deltas: [] }));
+        }
         console.info(
           JSON.stringify({
             event: "business_alarm_fired",
@@ -4322,33 +4440,52 @@ export class RoomDurableObject {
         ? this.authority.commitMutation(teamVoteRoomId, null, execution.responseResult, null)
         : { epoch: "", stateVersion: 0 };
 
-      await this.state.storage.put(TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY, alarm.key);
-      await this.applyMutationDeadlineTransitions({
-        mutationName: "finalizeTeamBattleVote",
-        result: execution.responseResult,
-        roundSnapshot: execution.roundSnapshot,
-        topic: alarm.topic,
-        source: "team_battle_vote_alarm",
-        stateMayHaveCommitted: true,
-        reconcileAlarm: false,
-      });
+      let postCommitError: unknown = null;
+      try {
+        await this.state.storage.put(TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY, alarm.key);
+      } catch (error) {
+        postCommitError = error;
+      }
+      try {
+        await this.applyMutationDeadlineTransitions({
+          mutationName: "finalizeTeamBattleVote",
+          result: execution.responseResult,
+          roundSnapshot: execution.roundSnapshot,
+          topic: alarm.topic,
+          source: "team_battle_vote_alarm",
+          stateMayHaveCommitted: true,
+          reconcileAlarm: false,
+        });
+      } catch (error) {
+        postCommitError ??= error;
+        this.invalidateRoundSnapshotCaches(execution.roundSnapshot.gameSession.id);
+      }
       this.invalidateRoundSnapshotCachesForMutation("finalizeTeamBattleVote", execution.responseResult);
       if (execution.gameResultSnapshot) {
-        await this.cacheGameResultSnapshot(execution.gameResultSnapshot);
+        try {
+          await this.cacheGameResultSnapshot(execution.gameResultSnapshot);
+        } catch (error) {
+          postCommitError ??= error;
+        }
       }
 
       if (execution.deltas.length > 0) {
-        await this.broadcastChangeMessage({
-          type: "change",
-          name: "finalizeTeamBattleVote",
-          result: stripRoundSnapshotFromBroadcastResult(execution.responseResult),
-          args: [{ gameSessionId: alarm.gameSessionId }],
-          topic: alarm.topic,
-          delta: execution.deltas[0],
-          deltas: execution.deltas,
-          version: teamVoteVersion.stateVersion,
-        } satisfies BroadcastMessage);
+        try {
+          await this.broadcastChangeMessage({
+            type: "change",
+            name: "finalizeTeamBattleVote",
+            result: stripRoundSnapshotFromBroadcastResult(execution.responseResult),
+            args: [{ gameSessionId: alarm.gameSessionId }],
+            topic: alarm.topic,
+            delta: execution.deltas[0],
+            deltas: execution.deltas,
+            version: teamVoteVersion.stateVersion,
+          } satisfies BroadcastMessage);
+        } catch (error) {
+          postCommitError ??= error;
+        }
       }
+      if (postCommitError) throw postCommitError;
       console.info(
         JSON.stringify({
           event: "business_alarm_fired",

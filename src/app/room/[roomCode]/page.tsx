@@ -1983,8 +1983,6 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
     }
 
-    let hasOpenedRealtime = false;
-
     const unsubscribe = subscribeRealtimeTopic(
       `room:${room.id}`,
       (message) => {
@@ -2040,11 +2038,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       },
       {
         onOpen: () => {
-          if (!hasOpenedRealtime) {
-            hasOpenedRealtime = true;
-            return;
-          }
-
+          missedRoomRealtimeVersionRef.current = true;
           void refreshLatestRoom();
         },
       },

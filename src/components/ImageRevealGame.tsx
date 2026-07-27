@@ -32,6 +32,7 @@ import type {
   DbBuzzerAnswer,
   DbGameSession,
   DbQuestion,
+  GameBootstrapSnapshot,
   GameSession,
   PlayerScore,
   Question,
@@ -942,7 +943,7 @@ export function ImageRevealGame({
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
   const roundSnapshotFetchRef = useRef<{
     gameSessionId: string;
-    promise: Promise<RoundSnapshot>;
+    promise: Promise<GameBootstrapSnapshot>;
     targetVersion: number | null;
     generation: number;
   } | null>(null);
@@ -1167,7 +1168,7 @@ export function ImageRevealGame({
       return;
     }
     const targetVersion = gameCatchUpTargetVersionRef.current;
-    const snapshotPromise = getRoundSnapshot(room.currentGameId).finally(() => {
+    const snapshotPromise = getGameBootstrapSnapshot(room.currentGameId).finally(() => {
       if (roundSnapshotFetchRef.current?.promise === snapshotPromise) {
         roundSnapshotFetchRef.current = null;
       }
@@ -1181,7 +1182,8 @@ export function ImageRevealGame({
           return;
         }
 
-        applyRoundSnapshot(snapshot);
+        setQuestions(snapshot.questions);
+        applyRoundSnapshot(snapshot.roundSnapshot);
         setImageLoadFailed(false);
         gameCatchUpRetryAttemptRef.current = 0;
         const coveredTargetVersion = snapshotFetch.targetVersion;
@@ -1645,6 +1647,7 @@ export function ImageRevealGame({
           }
 
           if (!isBootstrapLoadingRef.current) {
+            missedGameRealtimeVersionRef.current = true;
             clearQueuedRealtimeDeltas();
             catchUpRoundSnapshot();
           }

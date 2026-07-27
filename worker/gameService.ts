@@ -61,6 +61,7 @@ type DbGameParticipant = {
 const d1Context = new AsyncLocalStorage<D1QueryClient>();
 const unboundD1 = createD1QueryClient(null);
 const DEFAULT_ROUND_SCORES = [5, 3, 1];
+const MAX_QUESTION_SET_QUESTIONS = 120;
 const d1: D1QueryClient = {
   hasDatabase() {
     return getD1().hasDatabase();
@@ -1912,14 +1913,19 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
 export async function dissolveRoom(roomId: string, playerId: string) {
   assertD1Env();
 
-  const { error } = await d1
+  const { data: deletedRoom, error } = await d1
     .from("rooms")
     .delete()
     .eq("id", roomId)
-    .eq("host_player_id", playerId);
+    .eq("host_player_id", playerId)
+    .select("id")
+    .maybeSingle<Pick<DbRoom, "id">>();
 
   if (error) {
     throw new Error(error.message);
+  }
+  if (!deletedRoom) {
+    throw new Error("解散房间失败：只有房主可以解散当前房间。");
   }
 }
 
@@ -2068,6 +2074,9 @@ export async function createUploadedQuestionSet(params: {
 
   if (imageUrls.length === 0) {
     throw new Error("没有检测到有效图片链接，请至少提供一张 http/https 图片。");
+  }
+  if (imageUrls.length > MAX_QUESTION_SET_QUESTIONS) {
+    throw new Error(`单个题库最多包含 ${MAX_QUESTION_SET_QUESTIONS} 道题。`);
   }
 
   const { data: room, error: roomError } = await d1
@@ -2351,6 +2360,9 @@ export async function prepareQuestionSetForStart(params: {
   if (!questionSet || questionSet.image_count <= 0) {
     throw new Error("题库不存在，或题库中没有图片。");
   }
+  if (questionSet.image_count > MAX_QUESTION_SET_QUESTIONS) {
+    throw new Error(`单个题库最多包含 ${MAX_QUESTION_SET_QUESTIONS} 道题，请删减后再开始。`);
+  }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
     throw new Error("不能使用他人的未公开题库。");
@@ -2538,6 +2550,9 @@ export async function startGameWithQuestionSet(params: {
 
   if (!questionSet || questionSet.image_count <= 0) {
     throw new Error("开始游戏失败：题库不存在，或题库中没有图片。");
+  }
+  if (questionSet.image_count > MAX_QUESTION_SET_QUESTIONS) {
+    throw new Error(`开始游戏失败：单个题库最多包含 ${MAX_QUESTION_SET_QUESTIONS} 道题。`);
   }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
@@ -4618,7 +4633,7 @@ export async function submitTeamBattleRevealVote(params: {
   playerId: string;
   selectedBlocks: number[];
   revealBlockCount?: number;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const { data: currentGameSession, error: currentError } = await d1
@@ -4644,6 +4659,9 @@ export async function submitTeamBattleRevealVote(params: {
 
   if (state.phase !== "REVEAL_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
     throw new Error("还没轮到你所在队伍投票，或当前不是选格阶段。");
+  }
+  if (state.voteDeadlineAt && getServerReceivedAtMs(params) >= new Date(state.voteDeadlineAt).getTime()) {
+    throw new Error("本轮投票时间已结束，不能再修改选择。");
   }
 
   const revealedSet = new Set(session.revealedBlocks);
@@ -4683,7 +4701,7 @@ export async function submitTeamBattleGuessVote(params: {
   gameSessionId: string;
   playerId: string;
   vote: TeamBattleGuessVote;
-}) {
+} & ServerTimedActionParams) {
   assertD1Env();
 
   const { data: currentGameSession, error: currentError } = await d1
@@ -4708,6 +4726,9 @@ export async function submitTeamBattleGuessVote(params: {
 
   if (state.phase !== "GUESS_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
     throw new Error("还没轮到你所在队伍投票，或当前不是猜测投票阶段。");
+  }
+  if (state.voteDeadlineAt && getServerReceivedAtMs(params) >= new Date(state.voteDeadlineAt).getTime()) {
+    throw new Error("本轮投票时间已结束，不能再修改选择。");
   }
 
   const vote =
