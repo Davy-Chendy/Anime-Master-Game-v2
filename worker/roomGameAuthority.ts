@@ -1257,8 +1257,8 @@ export class RoomGameAuthority {
       return Number.isFinite(timestampDiff) && timestampDiff !== 0 ? timestampDiff : leftText.localeCompare(rightText);
     };
     rows.sort((left, right) =>
-      compareTextTime(left.submitted_at, right.submitted_at) ||
       compareTextTime(left.server_received_at, right.server_received_at) ||
+      compareTextTime(left.submitted_at, right.submitted_at) ||
       Number(left.scored_round) - Number(right.scored_round) ||
       String(left.buzzer_id).localeCompare(String(right.buzzer_id)) ||
       compareTextTime(left.judged_at, right.judged_at) ||

@@ -871,6 +871,7 @@ type AnswerJudgementPanelProps = {
   unansweredCount: number;
   canMarkAllPendingWrong: boolean;
   isMarkingAllPendingWrong: boolean;
+  canRevealAnswer: (answer: BuzzerAnswer) => boolean;
   canJudgeAnswer: (answer: BuzzerAnswer) => boolean;
   onJudge: (answer: BuzzerAnswer, isCorrect: boolean) => void;
   onMarkAllPendingWrong: () => void;
@@ -888,6 +889,7 @@ function AnswerJudgementPanel({
   unansweredCount,
   canMarkAllPendingWrong,
   isMarkingAllPendingWrong,
+  canRevealAnswer,
   canJudgeAnswer,
   onJudge,
   onMarkAllPendingWrong,
@@ -1035,7 +1037,8 @@ function AnswerJudgementPanel({
           <div className="grid gap-2 md:grid-cols-2">
             {filteredRows.map(({ player, answer, hasForfeited }, index) => {
               const status = answer?.status ?? null;
-              const canJudge = Boolean(answer && canJudgeAnswer(answer));
+              const isAnswerRevealed = Boolean(answer && canRevealAnswer(answer));
+              const canJudge = Boolean(answer && isAnswerRevealed && canJudgeAnswer(answer));
               return (
                 <div
                   className={[
@@ -1058,13 +1061,19 @@ function AnswerJudgementPanel({
                         answer ? "font-semibold text-slate-950" : "font-medium text-slate-500",
                       ].join(" ")}
                     >
-                      {answer?.answerText ?? (hasForfeited ? "已放弃" : "尚未回答")}
+                      {answer
+                        ? isAnswerRevealed
+                          ? answer.answerText
+                          : "答案确认中…"
+                        : hasForfeited
+                          ? "已放弃"
+                          : "尚未回答"}
                     </p>
                     <p className="mt-1 truncate text-xs font-medium text-slate-500" title={player.nickname}>
                       {player.nickname}
                     </p>
                   </div>
-                  {answer ? (
+                  {answer && isAnswerRevealed ? (
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         aria-label={`将${player.nickname}的回答判为答对`}
@@ -1098,7 +1107,9 @@ function AnswerJudgementPanel({
                       </button>
                     </div>
                   ) : (
-                    <span className="text-xs font-semibold text-slate-400">{hasForfeited ? "放弃" : "等待"}</span>
+                    <span className="text-xs font-semibold text-slate-400">
+                      {answer ? "确认中" : hasForfeited ? "放弃" : "等待"}
+                    </span>
                   )}
                 </div>
               );
@@ -1187,7 +1198,7 @@ export function ImageRevealGame({
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
   const [hasRoundDeadlineGraceExpired, setHasRoundDeadlineGraceExpired] = useState(false);
-  const [, setBuzzerQueueClockTick] = useState(0);
+  const [buzzerQueueClockTick, setBuzzerQueueClockTick] = useState(0);
   const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
@@ -2391,6 +2402,9 @@ export function ImageRevealGame({
   const answerPanelCorrectCount = answerPanelRows.filter((row) => row.answer?.status === "correct").length;
   const answerPanelWrongCount = answerPanelRows.filter((row) => row.answer?.status === "wrong").length;
   const answerPanelUnansweredCount = answerPanelRows.filter((row) => !row.answer && !row.hasForfeited).length;
+  const areAllPendingPanelAnswersReady = answerPanelRows.every(
+    (row) => !row.answer || row.answer.status !== "pending" || isBuzzerAnswerReadyForJudging(row.answer, getEstimatedServerNowMs()),
+  );
   useEffect(() => {
     if (!firstPendingBuzzerAnswer || !isWaitingForBuzzerQueueStability) return;
 
@@ -2401,6 +2415,22 @@ export function ImageRevealGame({
     const timer = window.setTimeout(() => setBuzzerQueueClockTick((tick) => tick + 1), delayMs + 20);
     return () => window.clearTimeout(timer);
   }, [firstPendingBuzzerAnswer, isWaitingForBuzzerQueueStability]);
+
+  useEffect(() => {
+    if (!isAnswerPanelOpen) return;
+    const nowMs = getEstimatedServerNowMs();
+    const nextReadyAtMs = buzzerAnswers.reduce<number | null>((nextReadyAt, answer) => {
+      const readyAt = new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() + BUZZER_JUDGING_STABILIZE_MS;
+      if (!Number.isFinite(readyAt) || readyAt <= nowMs) return nextReadyAt;
+      return nextReadyAt == null ? readyAt : Math.min(nextReadyAt, readyAt);
+    }, null);
+    if (nextReadyAtMs == null) return;
+    const timer = window.setTimeout(
+      () => setBuzzerQueueClockTick((tick) => tick + 1),
+      Math.max(0, nextReadyAtMs - nowMs) + 20,
+    );
+    return () => window.clearTimeout(timer);
+  }, [buzzerAnswers, buzzerQueueClockTick, isAnswerPanelOpen]);
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
@@ -2628,6 +2658,7 @@ export function ImageRevealGame({
   const canMarkAllPendingWrong =
     Boolean(gameSession) &&
     answerPanelPendingCount > 0 &&
+    areAllPendingPanelAnswersReady &&
     (hasRoundDeadlineGraceExpired || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || isQuestionReviewing);
   const canSettleBuzzerRound =
     isPresenter &&
@@ -2672,6 +2703,10 @@ export function ImageRevealGame({
       );
     }
     return currentBuzzerAnswer?.id === answer.id && answerPanelCorrectCount === 0;
+  }
+
+  function canRevealPanelAnswer(answer: BuzzerAnswer) {
+    return isBuzzerAnswerReadyForJudging(answer, getEstimatedServerNowMs());
   }
 
   function handleToggleRoundPromptSound() {
@@ -4729,6 +4764,7 @@ export function ImageRevealGame({
       {isAnswerPanelOpen && canRenderPortal && gameSession && isPresenter && !isTeamBattleMode
         ? createPortal(
             <AnswerJudgementPanel
+              canRevealAnswer={canRevealPanelAnswer}
               canJudgeAnswer={canJudgePanelAnswer}
               canMarkAllPendingWrong={canMarkAllPendingWrong}
               correctCount={answerPanelCorrectCount}

@@ -741,6 +741,32 @@ function compareAnswerOrder(
   return left.reveal_round - right.reveal_round || left.id.localeCompare(right.id);
 }
 
+function compareRankedAnswerOrder(
+  left: { submitted_at: string; server_received_at?: string | null; reveal_round: number; id: string },
+  right: { submitted_at: string; server_received_at?: string | null; reveal_round: number; id: string },
+) {
+  const leftReceivedAt = left.server_received_at ?? left.submitted_at;
+  const rightReceivedAt = right.server_received_at ?? right.submitted_at;
+  const receivedAtDiff = new Date(leftReceivedAt).getTime() - new Date(rightReceivedAt).getTime();
+  if (Number.isFinite(receivedAtDiff) && receivedAtDiff !== 0) {
+    return receivedAtDiff;
+  }
+
+  const receivedAtTextDiff = leftReceivedAt.localeCompare(rightReceivedAt);
+  if (receivedAtTextDiff !== 0) {
+    return receivedAtTextDiff;
+  }
+
+  const submittedAtDiff = new Date(left.submitted_at).getTime() - new Date(right.submitted_at).getTime();
+  if (Number.isFinite(submittedAtDiff) && submittedAtDiff !== 0) {
+    return submittedAtDiff;
+  }
+
+  return left.submitted_at.localeCompare(right.submitted_at) ||
+    left.reveal_round - right.reveal_round ||
+    left.id.localeCompare(right.id);
+}
+
 function canUseForfeitAnswer(gameMode: GameMode) {
   return gameMode !== "TEAM_BATTLE";
 }
@@ -3691,7 +3717,7 @@ async function recalculateRankedBuzzerScores(params: {
     .filter((item): item is { result: DbQuestionResult; answer: DbBuzzerAnswer } => Boolean(item.answer))
     .sort(
       (a, b) =>
-        compareAnswerOrder(a.answer, b.answer) ||
+        compareRankedAnswerOrder(a.answer, b.answer) ||
         new Date(a.result.judged_at).getTime() - new Date(b.result.judged_at).getTime() ||
         a.result.id.localeCompare(b.result.id),
     );
@@ -4581,6 +4607,10 @@ export async function setAnswerJudgements(params: {
     }
     return { answer, judgement };
   });
+
+  if (targetAnswers.some(({ answer }) => answer.status === "pending" && !isBuzzerAnswerReadyForJudging(answer))) {
+    throw new Error("请稍等片刻，回答提交满 3 秒后才能判定。");
+  }
 
   const pendingAnswers = context.roundAnswers.filter((answer) => answer.status === "pending").sort(compareAnswerOrder);
   const pendingTargetIds = new Set(targetAnswers.filter(({ answer }) => answer.status === "pending").map(({ answer }) => answer.id));
