@@ -185,6 +185,7 @@ export interface GameDatabase {
 
 export type GameDatabaseMutationTracker = {
   successfulWrites: number;
+  markValidated?: () => void;
 };
 
 class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {

@@ -323,6 +323,14 @@ export type RealtimeDelta =
     }
   | {
       scope: "game";
+      type: "answer_judgements_changed";
+      gameSession: GameSession;
+      answers: BuzzerAnswer[];
+      scores: PlayerScore[];
+      questionResults: QuestionResult[];
+    }
+  | {
+      scope: "game";
       type: "question_label_updated";
       question: Question;
     }

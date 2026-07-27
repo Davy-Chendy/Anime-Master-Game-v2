@@ -228,6 +228,8 @@ const MUTATION_REGISTRY = {
   cancelForfeitAnswer: { deadline: "none" },
   submitBuzzerAnswer: { deadline: "none" },
   judgeBuzzerAnswer: { deadline: "authoritative-post-state" },
+  setAnswerJudgements: { deadline: "authoritative-post-state" },
+  markPendingRoundAnswersWrong: { deadline: "authoritative-post-state" },
   settleBuzzerRound: { deadline: "authoritative-post-state" },
   submitTeamBattleRevealVote: { deadline: "authoritative-post-state" },
   submitTeamBattleGuessVote: { deadline: "authoritative-post-state" },
@@ -324,6 +326,8 @@ const DELTA_ONLY_ROUND_CACHE_INVALIDATION_MUTATION_NAMES = new Set([
   "cancelForfeitAnswer",
   "submitBuzzerAnswer",
   "judgeBuzzerAnswer",
+  "setAnswerJudgements",
+  "markPendingRoundAnswersWrong",
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",
   "updateQuestionLabel",
@@ -335,7 +339,7 @@ const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
   "getAnswersForQuestion", "getAnswersForQuestionRound", "getAnswerForPlayerRound", "getBuzzerAnswersForQuestion",
   "getBuzzerAnswersForQuestionRound", "getBuzzerAnswerForPlayerRound", "getQuestionsByQuestionSetId",
   "confirmRevealBlocks", "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "submitBuzzerAnswer",
-  "judgeBuzzerAnswer", "settleBuzzerRound", "autoForfeitExpiredRound", "submitTeamBattleRevealVote",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "updateQuestionLabel", "skipCurrentQuestion",
   "endCurrentGameEarly", "returnRoomToLobby",
@@ -351,12 +355,12 @@ const AUTHORITY_PROJECTION_BOUNDARY_NAMES = new Set<string>([
 ]);
 const AUTHORITY_HANDOFF_NAMES = new Set(["returnRoomToLobby", "cancelCurrentRound", "dissolveRoom"]);
 const AUTHORITY_JOURNALED_NAMES = new Set([
-  "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "settleBuzzerRound",
+  "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound",
   "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer", "gradeAnswersAndAdvance",
   "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", "joinRoom", "leaveRoom", "kickPlayerFromRoom", "updatePlayerRole", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 const AUTHORITY_PERSIST_RESULT_NAMES = new Set([
-  "judgeBuzzerAnswer", "settleBuzzerRound", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 
@@ -1187,7 +1191,17 @@ function buildRealtimeDeltas(
   }
 
   const judgedBuzzerAnswer = isRecord(result) ? asBuzzerAnswer(result.judgedAnswer) : null;
-  if (judgedBuzzerAnswer && gameSession) {
+  const judgedAnswers = isRecord(result) ? asArray<BuzzerAnswer>(result.judgedAnswers) : undefined;
+  if (judgedAnswers && gameSession && (name === "setAnswerJudgements" || name === "markPendingRoundAnswersWrong")) {
+    deltas.push({
+      scope: "game",
+      type: "answer_judgements_changed",
+      gameSession,
+      answers: judgedAnswers,
+      scores: asArray<PlayerScore>(result.scores) ?? [],
+      questionResults: asArray<QuestionResult>(result.questionResults) ?? [],
+    });
+  } else if (judgedBuzzerAnswer && gameSession) {
     const scoreState = isRecord(result)
       ? {
           scores: asArray<PlayerScore>(result.scores),
@@ -3003,7 +3017,10 @@ export class RoomDurableObject {
       }
       if (useAuthority && mutationDeadlinePolicy != null && localRoomId && AUTHORITY_JOURNALED_NAMES.has(body.name ?? "")) {
         this.authority.beginMutation(localRoomId, body.name ?? "", body.clientActionId ? `${body.name}:${body.clientActionId}` : null, body.args ?? []);
-        mutationTracker = { successfulWrites: 0 };
+        mutationTracker = {
+          successfulWrites: 0,
+          markValidated: () => this.authority.markMutationValidated(localRoomId),
+        };
       }
       const response = await handleRpc(request, this.env, {
         body,
@@ -3526,7 +3543,10 @@ export class RoomDurableObject {
       }
       if (useAuthority && isMutation && roomId && AUTHORITY_JOURNALED_NAMES.has(payload.name)) {
         this.authority.beginMutation(roomId, payload.name, actionKey || null, payload.args ?? []);
-        mutationTracker = { successfulWrites: 0 };
+        mutationTracker = {
+          successfulWrites: 0,
+          markValidated: () => this.authority.markMutationValidated(roomId),
+        };
       }
       const queryGameSessionId = !isMutation ? getQueryGameSessionId(payload.name, payload.args) : null;
       if (useAuthority && queryGameSessionId) {

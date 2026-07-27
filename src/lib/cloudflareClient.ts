@@ -76,6 +76,8 @@ const MUTATION_NAMES = new Set([
   "cancelForfeitAnswer",
   "submitBuzzerAnswer",
   "judgeBuzzerAnswer",
+  "setAnswerJudgements",
+  "markPendingRoundAnswersWrong",
   "settleBuzzerRound",
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",

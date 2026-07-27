@@ -59,6 +59,7 @@ type DbGameParticipant = {
 };
 
 const d1Context = new AsyncLocalStorage<D1QueryClient>();
+const mutationTrackerContext = new AsyncLocalStorage<GameDatabaseMutationTracker>();
 const unboundD1 = createD1QueryClient(null);
 const DEFAULT_ROUND_SECONDS = 45;
 const DEFAULT_ROUND_SCORES = [5, 3, 1];
@@ -77,7 +78,14 @@ function getD1() {
 }
 
 export function runWithGameDatabase<T>(db: GameDatabase, callback: () => Promise<T>, mutationTracker?: GameDatabaseMutationTracker) {
-  return d1Context.run(createD1QueryClient(db, mutationTracker), callback);
+  return mutationTrackerContext.run(
+    mutationTracker ?? { successfulWrites: 0 },
+    () => d1Context.run(createD1QueryClient(db, mutationTracker), callback),
+  );
+}
+
+function markCurrentMutationValidated() {
+  mutationTrackerContext.getStore()?.markValidated?.();
 }
 
 function assertD1Env() {
@@ -3725,6 +3733,61 @@ async function recalculateRankedBuzzerScores(params: {
   return scoreByPlayerId;
 }
 
+async function recalculatePlayerScoresFromResults(gameSessionId: string) {
+  const [{ data: results, error: resultsError }, { data: existingScores, error: scoresError }] = await Promise.all([
+    d1
+      .from("question_results")
+      .select("*")
+      .eq("game_session_id", gameSessionId)
+      .returns<DbQuestionResult[]>(),
+    d1
+      .from("player_scores")
+      .select("*")
+      .eq("game_session_id", gameSessionId)
+      .returns<DbPlayerScore[]>(),
+  ]);
+
+  if (resultsError) {
+    throw new Error(resultsError.message);
+  }
+  if (scoresError) {
+    throw new Error(scoresError.message);
+  }
+
+  const totalsByPlayerId = new Map<string, { score: number; correctCount: number }>();
+  for (const result of results ?? []) {
+    const current = totalsByPlayerId.get(result.player_id) ?? { score: 0, correctCount: 0 };
+    current.score += result.score_awarded;
+    current.correctCount += 1;
+    totalsByPlayerId.set(result.player_id, current);
+  }
+
+  const currentScoreByPlayerId = new Map((existingScores ?? []).map((score) => [score.player_id, score]));
+  const playerIds = new Set([...currentScoreByPlayerId.keys(), ...totalsByPlayerId.keys()]);
+  if (playerIds.size > 0) {
+    const { error } = await d1.from("player_scores").upsert(
+      [...playerIds].map((playerId) => {
+        const current = currentScoreByPlayerId.get(playerId);
+        const totals = totalsByPlayerId.get(playerId) ?? { score: 0, correctCount: 0 };
+        return {
+          id: current?.id,
+          game_session_id: gameSessionId,
+          player_id: playerId,
+          score: totals.score,
+          correct_count: totals.correctCount,
+        };
+      }),
+      { onConflict: "game_session_id,player_id" },
+    );
+
+    if (error) {
+      throw new Error(error.message);
+    }
+  }
+
+  return await getPlayerScores(gameSessionId);
+}
+
 async function updatePendingBuzzerAnswer(params: {
   id: string;
   answerText: string;
@@ -4398,6 +4461,283 @@ export async function submitBuzzerAnswer(params: {
   }
 
   return toBuzzerAnswer(data);
+}
+
+export type AnswerJudgementChange = {
+  buzzerAnswerId: string;
+  isCorrect: boolean;
+};
+
+async function loadCurrentAnswerJudgementContext(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+}) {
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+  if (!currentGameSession) {
+    throw new Error("判定答案失败：当前游戏不存在，或你不是出题人。");
+  }
+  if (currentGameSession.game_mode === "TEAM_BATTLE") {
+    throw new Error("红蓝对抗模式不能使用回答判定面板。");
+  }
+  if (
+    currentGameSession.current_question_index !== params.expectedQuestionIndex ||
+    currentGameSession.current_reveal_round !== params.expectedRevealRound
+  ) {
+    throw new Error("当前轮次已经变化，请按最新回答重新判定。");
+  }
+
+  const currentSession = toGameSession(currentGameSession);
+  const [
+    eligiblePlayerIds,
+    { data: roomPlayers, error: roomPlayersError },
+    { data: roundAnswers, error: roundAnswersError },
+    { data: questionResults, error: resultsError },
+  ] = await Promise.all([
+    getOrCreateQuestionEligiblePlayerIds({
+      gameSessionId: currentGameSession.id,
+      roomId: currentGameSession.room_id,
+      questionIndex: currentGameSession.current_question_index,
+      presenterPlayerId: currentGameSession.presenter_player_id,
+      knownEligiblePlayerIds: currentSession.eligiblePlayerIds,
+    }),
+    d1.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
+    d1
+      .from("buzzer_answers")
+      .select("*")
+      .eq("game_session_id", currentGameSession.id)
+      .eq("question_index", currentGameSession.current_question_index)
+      .eq("reveal_round", currentGameSession.current_reveal_round)
+      .returns<DbBuzzerAnswer[]>(),
+    d1
+      .from("question_results")
+      .select("*")
+      .eq("game_session_id", currentGameSession.id)
+      .eq("question_index", currentGameSession.current_question_index)
+      .returns<DbQuestionResult[]>(),
+  ]);
+
+  if (roomPlayersError) throw new Error(roomPlayersError.message);
+  if (roundAnswersError) throw new Error(roundAnswersError.message);
+  if (resultsError) throw new Error(resultsError.message);
+
+  const activePlayerIds = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
+  const questionEligiblePlayerIds = new Set(eligiblePlayerIds.filter((playerId) => activePlayerIds.has(playerId)));
+  const priorRoundCorrectPlayerIds = new Set(
+    (questionResults ?? [])
+      .filter((result) => result.scored_round < currentGameSession.current_reveal_round)
+      .map((result) => result.player_id),
+  );
+  const currentRoundEligiblePlayerIds = new Set(
+    [...questionEligiblePlayerIds].filter((playerId) => !priorRoundCorrectPlayerIds.has(playerId)),
+  );
+
+  return {
+    currentGameSession,
+    currentSession,
+    currentRoundEligiblePlayerIds,
+    questionResults: questionResults ?? [],
+    roundAnswers: (roundAnswers ?? []).filter((answer) => currentRoundEligiblePlayerIds.has(answer.player_id)),
+  };
+}
+
+export async function setAnswerJudgements(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+  judgements: AnswerJudgementChange[];
+}) {
+  assertD1Env();
+  const context = await loadCurrentAnswerJudgementContext(params);
+  const { currentGameSession, currentSession } = context;
+  const normalizedByAnswerId = new Map<string, AnswerJudgementChange>();
+  for (const judgement of params.judgements.slice(0, MAX_PLAYERS_PER_ROOM)) {
+    if (typeof judgement?.buzzerAnswerId === "string" && typeof judgement.isCorrect === "boolean") {
+      normalizedByAnswerId.set(judgement.buzzerAnswerId, judgement);
+    }
+  }
+  const judgements = [...normalizedByAnswerId.values()];
+  if (judgements.length === 0) {
+    throw new Error("没有需要提交的答案判定。");
+  }
+
+  const answerById = new Map(context.roundAnswers.map((answer) => [answer.id, answer]));
+  const targetAnswers = judgements.map((judgement) => {
+    const answer = answerById.get(judgement.buzzerAnswerId);
+    if (!answer || !context.currentRoundEligiblePlayerIds.has(answer.player_id)) {
+      throw new Error("部分回答已不属于当前轮，请刷新回答面板后重试。");
+    }
+    return { answer, judgement };
+  });
+
+  const pendingAnswers = context.roundAnswers.filter((answer) => answer.status === "pending").sort(compareAnswerOrder);
+  const pendingTargetIds = new Set(targetAnswers.filter(({ answer }) => answer.status === "pending").map(({ answer }) => answer.id));
+  if (currentSession.gameMode === "BUZZER_FIRST_CORRECT" && pendingTargetIds.size > 0) {
+    for (const pendingAnswer of pendingAnswers) {
+      if (!pendingTargetIds.has(pendingAnswer.id)) break;
+      if (!isBuzzerAnswerReadyForJudging(pendingAnswer)) {
+        throw new Error("请稍等片刻，正在等待可能更早提交的抢答到达。");
+      }
+    }
+    const firstUntargetedIndex = pendingAnswers.findIndex((answer) => !pendingTargetIds.has(answer.id));
+    const targetedPendingCount = pendingAnswers.filter((answer) => pendingTargetIds.has(answer.id)).length;
+    if (firstUntargetedIndex >= 0 && firstUntargetedIndex < targetedPendingCount) {
+      throw new Error("首位答对模式必须按提交顺序判定。");
+    }
+  }
+
+  if (currentSession.gameMode === "BUZZER_FIRST_CORRECT") {
+    const finalStatusByAnswerId = new Map(context.roundAnswers.map((answer) => [answer.id, answer.status]));
+    for (const { answer, judgement } of targetAnswers) {
+      finalStatusByAnswerId.set(answer.id, judgement.isCorrect ? "correct" : "wrong");
+    }
+    const orderedAnswers = [...context.roundAnswers].sort(compareAnswerOrder);
+    const finalCorrectIndex = orderedAnswers.findIndex((answer) => finalStatusByAnswerId.get(answer.id) === "correct");
+    if (
+      finalCorrectIndex >= 0 &&
+      orderedAnswers.slice(0, finalCorrectIndex).some((answer) => finalStatusByAnswerId.get(answer.id) !== "wrong")
+    ) {
+      throw new Error("首位答对模式必须先按提交顺序判完更早的回答。");
+    }
+    const finalCorrectPlayerIds = new Set(
+      context.questionResults
+        .filter((result) => result.scored_round === currentGameSession.current_reveal_round)
+        .map((result) => result.player_id),
+    );
+    for (const { answer, judgement } of targetAnswers) {
+      if (judgement.isCorrect) finalCorrectPlayerIds.add(answer.player_id);
+      else finalCorrectPlayerIds.delete(answer.player_id);
+    }
+    if (finalCorrectPlayerIds.size > 1) {
+      throw new Error("首位答对模式只能有一名答对玩家。");
+    }
+  }
+
+  markCurrentMutationValidated();
+
+  const existingResultByPlayerId = new Map(context.questionResults.map((result) => [result.player_id, result]));
+  const judgedAt = new Date().toISOString();
+  const roundScore =
+    currentSession.gameMode === "BUZZER_FIRST_CORRECT"
+      ? 1
+      : currentSession.roundScores[currentGameSession.current_reveal_round - 1] ??
+        Math.max(1, currentSession.maxRevealRounds - currentGameSession.current_reveal_round + 1);
+
+  for (const { answer, judgement } of targetAnswers) {
+    const existingResult = existingResultByPlayerId.get(answer.player_id);
+    if (judgement.isCorrect) {
+      const { data: result, error: resultError } = await d1.from("question_results").upsert(
+        {
+          id: existingResult?.id,
+          game_session_id: currentGameSession.id,
+          question_index: currentGameSession.current_question_index,
+          player_id: answer.player_id,
+          scored_round: currentGameSession.current_reveal_round,
+          score_awarded: roundScore,
+          judged_by_player_id: params.presenterPlayerId,
+          judged_at: judgedAt,
+        },
+        { onConflict: "game_session_id,question_index,player_id" },
+      ).select().single<DbQuestionResult>();
+      if (resultError) throw new Error(resultError.message);
+      existingResultByPlayerId.set(answer.player_id, result);
+    } else if (existingResult?.scored_round === currentGameSession.current_reveal_round) {
+      const { error: resultDeleteError } = await d1.from("question_results").delete().eq("id", existingResult.id);
+      if (resultDeleteError) throw new Error(resultDeleteError.message);
+      existingResultByPlayerId.delete(answer.player_id);
+    }
+
+    const { error: answerUpdateError } = await d1
+      .from("buzzer_answers")
+      .update({
+        status: judgement.isCorrect ? "correct" : "wrong",
+        score_awarded: judgement.isCorrect ? roundScore : 0,
+        judged_at: judgedAt,
+        judged_by_player_id: params.presenterPlayerId,
+      })
+      .eq("id", answer.id)
+      .eq("game_session_id", currentGameSession.id)
+      .eq("question_index", currentGameSession.current_question_index)
+      .eq("reveal_round", currentGameSession.current_reveal_round);
+    if (answerUpdateError) throw new Error(answerUpdateError.message);
+  }
+
+  if (currentSession.gameMode === "BUZZER_RANKED") {
+    await recalculateRankedBuzzerScores({ gameSession: currentGameSession });
+  }
+  const scores = await recalculatePlayerScoresFromResults(currentGameSession.id);
+  const [questionResults, buzzerAnswers] = await Promise.all([
+    getQuestionResultsForQuestion({
+      gameSessionId: currentGameSession.id,
+      questionIndex: currentGameSession.current_question_index,
+    }),
+    getBuzzerAnswersForQuestionRound({
+      gameSessionId: currentGameSession.id,
+      questionIndex: currentGameSession.current_question_index,
+      revealRound: currentGameSession.current_reveal_round,
+    }),
+  ]);
+  const originalAnswerById = new Map(context.roundAnswers.map((answer) => [answer.id, answer]));
+  const judgedAnswerIds = new Set(targetAnswers.map(({ answer }) => answer.id));
+  const judgedAnswers = buzzerAnswers.filter((answer) => {
+    if (judgedAnswerIds.has(answer.id)) return true;
+    const original = originalAnswerById.get(answer.id);
+    return Boolean(original && (original.status !== answer.status || original.score_awarded !== answer.scoreAwarded));
+  });
+  const hasFirstCorrect =
+    currentSession.gameMode === "BUZZER_FIRST_CORRECT" &&
+    questionResults.some((result) => result.scoredRound === currentGameSession.current_reveal_round);
+  const gameSession = hasFirstCorrect ? await revealQuestionForReview(currentGameSession.id) : currentSession;
+
+  return { gameSession, judgedAnswers, scores, questionResults };
+}
+
+export async function markPendingRoundAnswersWrong(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+}) {
+  assertD1Env();
+  const context = await loadCurrentAnswerJudgementContext(params);
+  const roundActionState = await getRoundActionState(context.currentSession);
+  const submissionClosed =
+    !context.currentSession.roundStartedAt ||
+    hasRoundForfeitDeadlineArrived(context.currentSession, Date.now()) ||
+    roundActionState.allEligiblePlayersUsedChance ||
+    (context.currentSession.gameMode === "BUZZER_FIRST_CORRECT" && context.questionResults.length > 0);
+  if (!submissionClosed) {
+    throw new Error("本轮仍可提交，暂时不能将未判定回答全部判错。");
+  }
+
+  const pendingAnswers = context.roundAnswers.filter((answer) => answer.status === "pending");
+  if (pendingAnswers.length === 0) {
+    const [scores, questionResults] = await Promise.all([
+      getPlayerScores(context.currentGameSession.id),
+      getQuestionResultsForQuestion({
+        gameSessionId: context.currentGameSession.id,
+        questionIndex: context.currentGameSession.current_question_index,
+      }),
+    ]);
+    return { gameSession: context.currentSession, judgedAnswers: [], scores, questionResults };
+  }
+
+  return await setAnswerJudgements({
+    ...params,
+    judgements: pendingAnswers.map((answer) => ({ buzzerAnswerId: answer.id, isCorrect: false })),
+  });
 }
 
 export async function judgeBuzzerAnswer(params: {

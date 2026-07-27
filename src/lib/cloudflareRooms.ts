@@ -331,6 +331,33 @@ export const judgeBuzzerAnswer = (params: {
     buzzerAnswers?: BuzzerAnswer[];
   }>("judgeBuzzerAnswer", params);
 
+export type AnswerJudgementChange = {
+  buzzerAnswerId: string;
+  isCorrect: boolean;
+};
+
+export type AnswerJudgementResult = {
+  gameSession: GameSession;
+  judgedAnswers: BuzzerAnswer[];
+  scores: PlayerScore[];
+  questionResults: QuestionResult[];
+};
+
+export const setAnswerJudgements = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+  judgements: AnswerJudgementChange[];
+}) => rpc<AnswerJudgementResult>("setAnswerJudgements", params);
+
+export const markPendingRoundAnswersWrong = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+}) => rpc<AnswerJudgementResult>("markPendingRoundAnswersWrong", params);
+
 export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
 

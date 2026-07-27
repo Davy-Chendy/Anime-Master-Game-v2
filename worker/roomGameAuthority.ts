@@ -14,6 +14,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS projected_question_archives (game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, projection_version INTEGER NOT NULL, PRIMARY KEY(game_session_id,question_index))`,
   `CREATE TABLE IF NOT EXISTS mutation_journal (id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, name TEXT NOT NULL, action_key TEXT, started_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mutation_journal_payload (id INTEGER PRIMARY KEY CHECK(id=1), payload_json TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS mutation_journal_validation (id INTEGER PRIMARY KEY CHECK(id=1), validated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, room_code TEXT NOT NULL UNIQUE, host_player_id TEXT NOT NULL, game_status TEXT NOT NULL, current_presenter_player_id TEXT, current_game_id TEXT, prepared_question_set_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL', lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3, lobby_round_seconds INTEGER NOT NULL DEFAULT 45, lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]')`,
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, nickname TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), role TEXT NOT NULL DEFAULT 'PLAYER')`,
   `CREATE TABLE IF NOT EXISTS question_sets (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by_player_id TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'uploaded', is_public INTEGER NOT NULL DEFAULT 0, image_urls_text TEXT, image_count INTEGER NOT NULL DEFAULT 0, rating_avg REAL NOT NULL DEFAULT 0, rating_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by_nickname TEXT, play_count INTEGER NOT NULL DEFAULT 0)`,
@@ -182,6 +183,7 @@ export class RoomGameAuthority {
       if (projectionReason) this.enqueueProjection(roomId, projectionReason);
       this.storage.sql.exec("DELETE FROM mutation_journal WHERE id = 1");
       this.storage.sql.exec("DELETE FROM mutation_journal_payload WHERE id = 1");
+      this.storage.sql.exec("DELETE FROM mutation_journal_validation WHERE id = 1");
       return version;
     });
   }
@@ -237,13 +239,24 @@ export class RoomGameAuthority {
         roomId, name, actionKey, Date.now(),
       );
       this.storage.sql.exec("INSERT INTO mutation_journal_payload(id,payload_json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json", JSON.stringify(journalPayload ?? null));
+      this.storage.sql.exec("DELETE FROM mutation_journal_validation WHERE id = 1");
     });
+  }
+
+  markMutationValidated(roomId: string) {
+    const journal = this.storage.sql.exec<Row>("SELECT id FROM mutation_journal WHERE id=1 AND room_id=?", roomId).toArray()[0];
+    if (!journal) return;
+    this.storage.sql.exec(
+      "INSERT INTO mutation_journal_validation(id,validated_at) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET validated_at=excluded.validated_at",
+      Date.now(),
+    );
   }
 
   abortMutation(roomId: string) {
     this.storage.transactionSync(() => {
       this.storage.sql.exec("DELETE FROM mutation_journal WHERE id = 1 AND room_id = ?", roomId);
       this.storage.sql.exec("DELETE FROM mutation_journal_payload WHERE id = 1");
+      this.storage.sql.exec("DELETE FROM mutation_journal_validation WHERE id = 1");
     });
   }
 
@@ -261,6 +274,7 @@ export class RoomGameAuthority {
       let forfeitAnswerRecovered = false;
       let cancelForfeitRecovered = false;
       let judgeBuzzerAnswerRecovered = false;
+      let answerJudgementsRecovered = false;
       const judgeBuzzerParams = (name === "judgeBuzzerAnswer" && Array.isArray(actionArgs) ? actionArgs[0] : null) as {
         gameSessionId?: unknown;
         buzzerAnswerId?: unknown;
@@ -275,6 +289,119 @@ export class RoomGameAuthority {
         typeof (actionArgs[0] as { gameSessionId?: unknown }).gameSessionId === "string"
         ? (actionArgs[0] as { gameSessionId: string }).gameSessionId
         : null;
+      const answerJudgementWasValidated = Boolean(
+        this.storage.sql.exec<Row>("SELECT id FROM mutation_journal_validation WHERE id=1").toArray()[0],
+      );
+      if ((name === "setAnswerJudgements" || name === "markPendingRoundAnswersWrong") && answerJudgementWasValidated) {
+        const params = (Array.isArray(actionArgs) ? actionArgs[0] : null) as {
+          gameSessionId?: unknown;
+          presenterPlayerId?: unknown;
+          expectedQuestionIndex?: unknown;
+          expectedRevealRound?: unknown;
+          judgements?: Array<{ buzzerAnswerId?: unknown; isCorrect?: unknown }>;
+        } | null;
+        const gameSessionId = typeof params?.gameSessionId === "string" ? params.gameSessionId : null;
+        const presenterPlayerId = typeof params?.presenterPlayerId === "string" ? params.presenterPlayerId : null;
+        const questionIndex = typeof params?.expectedQuestionIndex === "number" && Number.isInteger(params.expectedQuestionIndex)
+          ? params.expectedQuestionIndex
+          : null;
+        const revealRound = typeof params?.expectedRevealRound === "number" && Number.isInteger(params.expectedRevealRound)
+          ? params.expectedRevealRound
+          : null;
+        const session = gameSessionId && presenterPlayerId && questionIndex != null && revealRound != null
+          ? this.storage.sql.exec<Row>(
+              `SELECT * FROM game_sessions WHERE id=? AND room_id=? AND presenter_player_id=? AND status='PLAYING'
+               AND current_question_index=? AND current_reveal_round=? AND game_mode!='TEAM_BATTLE'`,
+              gameSessionId,
+              roomId,
+              presenterPlayerId,
+              questionIndex,
+              revealRound,
+            ).toArray()[0]
+          : null;
+        if (session && gameSessionId && presenterPlayerId && questionIndex != null && revealRound != null) {
+          const rawRequested = name === "markPendingRoundAnswersWrong"
+            ? this.storage.sql.exec<Row>(
+                `SELECT id FROM buzzer_answers WHERE game_session_id=? AND question_index=? AND reveal_round=? AND status='pending'`,
+                gameSessionId,
+                questionIndex,
+                revealRound,
+              ).toArray().map((answer) => ({ buzzerAnswerId: answer.id, isCorrect: false }))
+            : Array.isArray(params?.judgements) ? params.judgements : [];
+          const requestedByAnswerId = new Map<string, { buzzerAnswerId: string; isCorrect: boolean }>();
+          for (const judgement of rawRequested.slice(0, 50)) {
+            if (typeof judgement?.buzzerAnswerId === "string" && typeof judgement.isCorrect === "boolean") {
+              requestedByAnswerId.set(judgement.buzzerAnswerId, {
+                buzzerAnswerId: judgement.buzzerAnswerId,
+                isCorrect: judgement.isCorrect,
+              });
+            }
+          }
+          const requested = [...requestedByAnswerId.values()];
+          const roundScores = typeof session.round_scores === "string" ? JSON.parse(session.round_scores) as number[] : [];
+          const defaultScore = session.game_mode === "BUZZER_FIRST_CORRECT"
+            ? 1
+            : Number(roundScores[revealRound - 1] ?? Math.max(1, Number(session.max_reveal_rounds) - revealRound + 1));
+          const judgedAt = new Date().toISOString();
+          for (const judgement of requested) {
+            const answer = this.storage.sql.exec<Row>(
+              `SELECT * FROM buzzer_answers WHERE id=? AND game_session_id=? AND question_index=? AND reveal_round=?`,
+              judgement.buzzerAnswerId,
+              gameSessionId,
+              questionIndex,
+              revealRound,
+            ).toArray()[0];
+            if (!answer || typeof answer.player_id !== "string") continue;
+            if (judgement.isCorrect) {
+              this.storage.sql.exec(
+                `INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at)
+                 VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(game_session_id,question_index,player_id) DO UPDATE SET
+                 scored_round=excluded.scored_round,score_awarded=excluded.score_awarded,
+                 judged_by_player_id=excluded.judged_by_player_id,judged_at=excluded.judged_at`,
+                `${gameSessionId}:${questionIndex}:${answer.player_id}:recovered`,
+                gameSessionId,
+                questionIndex,
+                answer.player_id,
+                revealRound,
+                defaultScore,
+                presenterPlayerId,
+                judgedAt,
+              );
+              this.storage.sql.exec(
+                "UPDATE buzzer_answers SET status='correct',score_awarded=?,judged_at=?,judged_by_player_id=? WHERE id=?",
+                defaultScore,
+                judgedAt,
+                presenterPlayerId,
+                answer.id,
+              );
+            } else {
+              this.storage.sql.exec(
+                "DELETE FROM question_results WHERE game_session_id=? AND question_index=? AND player_id=? AND scored_round=?",
+                gameSessionId,
+                questionIndex,
+                answer.player_id,
+                revealRound,
+              );
+              this.storage.sql.exec(
+                "UPDATE buzzer_answers SET status='wrong',score_awarded=0,judged_at=?,judged_by_player_id=? WHERE id=?",
+                judgedAt,
+                presenterPlayerId,
+                answer.id,
+              );
+            }
+          }
+          if (session.game_mode === "BUZZER_RANKED") this.repairRankedBuzzerScores(gameSessionId, questionIndex);
+          this.repairPlayerScores(gameSessionId);
+          if (session.game_mode === "BUZZER_FIRST_CORRECT" && requested.some((item) => item.isCorrect === true)) {
+            this.storage.sql.exec(
+              "UPDATE game_sessions SET revealed_blocks=?,round_started_at=NULL WHERE id=?",
+              JSON.stringify(Array.from({ length: 45 }, (_, index) => index)),
+              gameSessionId,
+            );
+          }
+          answerJudgementsRecovered = true;
+        }
+      }
       if (name === "joinRoom") {
         const playerId = Array.isArray(actionArgs) && typeof actionArgs[1] === "string" ? actionArgs[1] : null;
         const room = this.storage.sql.exec<Row>("SELECT current_game_id,game_status FROM rooms WHERE id = ?", roomId).toArray()[0];
@@ -772,7 +899,7 @@ export class RoomGameAuthority {
       const handoffApplied = name === "dissolveRoom" ? !room : ["returnRoomToLobby", "cancelCurrentRound"].includes(name) && room?.game_status === "LOBBY";
       const version = this.bumpVersion(roomId);
       const canReturnRecoveredReceipt = handoffApplied || questionTransitionRecovered || submitAnswerRecovered || forfeitAnswerRecovered ||
-        cancelForfeitRecovered || judgeBuzzerAnswerRecovered;
+        cancelForfeitRecovered || judgeBuzzerAnswerRecovered || answerJudgementsRecovered;
       if (canReturnRecoveredReceipt && typeof journal.action_key === "string" && journal.action_key) {
         this.rememberAction(journal.action_key, { __authorityRecovered: true });
       }
@@ -785,6 +912,7 @@ export class RoomGameAuthority {
       }
       this.storage.sql.exec("DELETE FROM mutation_journal WHERE id = 1");
       this.storage.sql.exec("DELETE FROM mutation_journal_payload WHERE id = 1");
+      this.storage.sql.exec("DELETE FROM mutation_journal_validation WHERE id = 1");
       return version;
     });
   }
@@ -805,6 +933,7 @@ export class RoomGameAuthority {
       this.storage.sql.exec("DELETE FROM projected_question_archives");
       this.storage.sql.exec("DELETE FROM mutation_journal");
       this.storage.sql.exec("DELETE FROM mutation_journal_payload");
+      this.storage.sql.exec("DELETE FROM mutation_journal_validation");
     });
   }
 
@@ -1154,6 +1283,10 @@ export class RoomGameAuthority {
   }
 
   private repairPlayerScores(gameSessionId: string) {
+    this.storage.sql.exec(
+      "UPDATE player_scores SET score=0,correct_count=0 WHERE game_session_id=?",
+      gameSessionId,
+    );
     this.storage.sql.exec(`INSERT INTO player_scores(id,game_session_id,player_id,score,correct_count)
       SELECT question_results.game_session_id || ':' || question_results.player_id || ':recovered', question_results.game_session_id,
              question_results.player_id, SUM(question_results.score_awarded), COUNT(*)
