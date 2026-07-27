@@ -3,7 +3,7 @@ type QueryError = {
   code?: string;
 };
 
-type QueryResult<T = unknown> = {
+export type QueryResult<T = unknown> = {
   data: T | null;
   error: QueryError | null;
 };
@@ -160,6 +160,17 @@ function uniqueError(error: unknown): QueryError {
   };
 }
 
+export interface GamePreparedStatement {
+  bind(...values: unknown[]): GamePreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<{ results?: T[] }>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+}
+
+export interface GameDatabase {
+  prepare(query: string): GamePreparedStatement;
+  batch<T = Record<string, unknown>>(statements: GamePreparedStatement[]): Promise<Array<{ results?: T[] }>>;
+}
+
 class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private operation: "select" | "insert" | "update" | "delete" = "select";
   private filters: Filter[] = [];
@@ -173,7 +184,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private ignoreDuplicates = false;
   private singleMode: "none" | "single" | "maybeSingle" = "none";
 
-  constructor(private readonly db: D1Database | null, private readonly table: string) {}
+  constructor(private readonly db: GameDatabase | null, private readonly table: string) {}
 
   select(columns = "*") {
     if (this.operation === "select") {
@@ -412,7 +423,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
             }`
           : "";
       const rowsPerStatement = Math.max(1, Math.floor(D1_MAX_BOUND_PARAMETERS_PER_QUERY / columns.length));
-      const statements: D1PreparedStatement[] = [];
+      const statements: GamePreparedStatement[] = [];
 
       for (let start = 0; start < cleanedRecords.length; start += rowsPerStatement) {
         const chunk = cleanedRecords.slice(start, start + rowsPerStatement);
@@ -485,7 +496,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 }
 
-export function createD1QueryClient(db: D1Database | null) {
+export function createD1QueryClient(db: GameDatabase | null) {
   return {
     hasDatabase() {
       return Boolean(db);

@@ -236,9 +236,12 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
   return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
 }
 
-function sortBySubmittedAt<T extends { id: string; submittedAt: string }>(items: T[]) {
+function sortBySubmittedAt<T extends { id: string; submittedAt: string; serverReceivedAt?: string }>(items: T[]) {
   return [...items].sort(
-    (a, b) => new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime() || a.id.localeCompare(b.id),
+    (a, b) =>
+      new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime() ||
+      new Date(a.serverReceivedAt ?? a.submittedAt).getTime() - new Date(b.serverReceivedAt ?? b.submittedAt).getTime() ||
+      a.id.localeCompare(b.id),
   );
 }
 
@@ -258,8 +261,8 @@ function getCorrectLabelAnswersFromBuzzerAnswers(answers: BuzzerAnswer[]) {
   return sortBySubmittedAt(answers.filter((answer) => answer.status === "correct").map(toLabelAnswerFromBuzzerAnswer));
 }
 
-function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt">, nowMs: number) {
-  return nowMs - new Date(answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
+function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt" | "serverReceivedAt">, nowMs: number) {
+  return nowMs - new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
 
 function getTeamName(team: TeamBattleTeam) {
@@ -344,6 +347,7 @@ function toBuzzerAnswer(answer: DbBuzzerAnswer): BuzzerAnswer {
     status: answer.status,
     scoreAwarded: answer.score_awarded,
     submittedAt: answer.submitted_at,
+    serverReceivedAt: answer.server_received_at ?? answer.submitted_at,
     judgedAt: answer.judged_at,
     judgedByPlayerId: answer.judged_by_player_id,
   };
@@ -889,6 +893,7 @@ export function ImageRevealGame({
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
+  const [, setBuzzerQueueClockTick] = useState(0);
   const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
@@ -1920,8 +1925,11 @@ export function ImageRevealGame({
     return scoreByPlayerId;
   }, [questionResults]);
   const pendingBuzzerAnswers = useMemo(
-    () => sortBySubmittedAt(buzzerAnswers.filter((answer) => answer.status === "pending")),
-    [buzzerAnswers],
+    () =>
+      sortBySubmittedAt(
+        buzzerAnswers.filter((answer) => answer.status === "pending" && eligibleGuesserIdSet.has(answer.playerId)),
+      ),
+    [buzzerAnswers, eligibleGuesserIdSet],
   );
   const judgedBuzzerAnswerPlayerSet = useMemo(
     () => new Set(buzzerAnswers.filter((answer) => answer.status !== "pending").map((answer) => answer.playerId)),
@@ -1932,6 +1940,7 @@ export function ImageRevealGame({
     : answers.filter(
         (answer) =>
           !isForfeitAnswer(answer) &&
+          eligibleGuesserIdSet.has(answer.playerId) &&
           !correctPlayerSet.has(answer.playerId) &&
           !judgedBuzzerAnswerPlayerSet.has(answer.playerId),
       ).length;
@@ -1943,6 +1952,16 @@ export function ImageRevealGame({
       ? firstPendingBuzzerAnswer
       : null;
   const isWaitingForBuzzerQueueStability = Boolean(firstPendingBuzzerAnswer && !currentBuzzerAnswer);
+  useEffect(() => {
+    if (!firstPendingBuzzerAnswer || !isWaitingForBuzzerQueueStability) return;
+
+    const readyAtMs =
+      new Date(firstPendingBuzzerAnswer.serverReceivedAt ?? firstPendingBuzzerAnswer.submittedAt).getTime() +
+      BUZZER_JUDGING_STABILIZE_MS;
+    const delayMs = Math.max(0, readyAtMs - getEstimatedServerNowMs());
+    const timer = window.setTimeout(() => setBuzzerQueueClockTick((tick) => tick + 1), delayMs + 20);
+    return () => window.clearTimeout(timer);
+  }, [firstPendingBuzzerAnswer, isWaitingForBuzzerQueueStability]);
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =

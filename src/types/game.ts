@@ -423,6 +423,7 @@ export type BuzzerAnswer = {
   status: BuzzerAnswerStatus;
   scoreAwarded: number;
   submittedAt: string;
+  serverReceivedAt: string;
   judgedAt?: string | null;
   judgedByPlayerId?: string | null;
 };
@@ -437,6 +438,7 @@ export type DbBuzzerAnswer = {
   status: BuzzerAnswerStatus;
   score_awarded: number;
   submitted_at: string;
+  server_received_at: string | null;
   judged_at: string | null;
   judged_by_player_id: string | null;
 };

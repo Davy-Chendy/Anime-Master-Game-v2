@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRoomCode } from "../src/lib/id";
-import { createD1QueryClient } from "./d1QueryCompat";
+import { createD1QueryClient, type GameDatabase } from "./d1QueryCompat";
 import type {
   Answer,
   BuzzerAnswer,
@@ -74,7 +74,7 @@ function getD1() {
   return d1Context.getStore() ?? unboundD1;
 }
 
-export function runWithGameDatabase<T>(db: D1Database, callback: () => Promise<T>) {
+export function runWithGameDatabase<T>(db: GameDatabase, callback: () => Promise<T>) {
   return d1Context.run(createD1QueryClient(db), callback);
 }
 
@@ -708,8 +708,8 @@ function getPlayerRoundAnswerKey(playerId: string, revealRound: number) {
 }
 
 function compareAnswerOrder(
-  left: { submitted_at: string; reveal_round: number; id: string },
-  right: { submitted_at: string; reveal_round: number; id: string },
+  left: { submitted_at: string; server_received_at?: string | null; reveal_round: number; id: string },
+  right: { submitted_at: string; server_received_at?: string | null; reveal_round: number; id: string },
 ) {
   const submittedAtDiff = new Date(left.submitted_at).getTime() - new Date(right.submitted_at).getTime();
   if (Number.isFinite(submittedAtDiff) && submittedAtDiff !== 0) {
@@ -721,6 +721,13 @@ function compareAnswerOrder(
     return submittedAtTextDiff;
   }
 
+  const receivedAtDiff =
+    new Date(left.server_received_at ?? left.submitted_at).getTime() -
+    new Date(right.server_received_at ?? right.submitted_at).getTime();
+  if (Number.isFinite(receivedAtDiff) && receivedAtDiff !== 0) {
+    return receivedAtDiff;
+  }
+
   return left.reveal_round - right.reveal_round || left.id.localeCompare(right.id);
 }
 
@@ -728,8 +735,8 @@ function canUseForfeitAnswer(gameMode: GameMode) {
   return gameMode !== "TEAM_BATTLE";
 }
 
-function isBuzzerAnswerReadyForJudging(answer: Pick<DbBuzzerAnswer, "submitted_at">, nowMs = Date.now()) {
-  return nowMs - new Date(answer.submitted_at).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
+function isBuzzerAnswerReadyForJudging(answer: Pick<DbBuzzerAnswer, "submitted_at" | "server_received_at">, nowMs = Date.now()) {
+  return nowMs - new Date(answer.server_received_at ?? answer.submitted_at).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
 
 function parseEligiblePlayerIds(value: unknown) {
@@ -1260,6 +1267,7 @@ function toBuzzerAnswer(answer: DbBuzzerAnswer): BuzzerAnswer {
     status: answer.status,
     scoreAwarded: answer.score_awarded,
     submittedAt: answer.submitted_at,
+    serverReceivedAt: answer.server_received_at ?? answer.submitted_at,
     judgedAt: answer.judged_at,
     judgedByPlayerId: answer.judged_by_player_id,
   };
@@ -1311,8 +1319,8 @@ const MAX_PLAYERS_PER_ROOM = 50;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 const ROUND_DEADLINE_GRACE_MS = 3000;
-const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
+const BUZZER_CLIENT_TIME_MAX_EARLY_MS = BUZZER_JUDGING_STABILIZE_MS;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 
 type ServerTimedActionParams = {
@@ -3658,7 +3666,7 @@ async function recalculateRankedBuzzerScores(params: {
     .filter((item): item is { result: DbQuestionResult; answer: DbBuzzerAnswer } => Boolean(item.answer))
     .sort(
       (a, b) =>
-        new Date(a.answer.submitted_at).getTime() - new Date(b.answer.submitted_at).getTime() ||
+        compareAnswerOrder(a.answer, b.answer) ||
         new Date(a.result.judged_at).getTime() - new Date(b.result.judged_at).getTime() ||
         a.result.id.localeCompare(b.result.id),
     );
@@ -3703,6 +3711,8 @@ async function recalculateRankedBuzzerScores(params: {
 async function updatePendingBuzzerAnswer(params: {
   id: string;
   answerText: string;
+  submittedAt?: string;
+  serverReceivedAt?: string;
 }) {
   const { data, error } = await d1
     .from("buzzer_answers")
@@ -3710,7 +3720,8 @@ async function updatePendingBuzzerAnswer(params: {
       answer_text: params.answerText,
       status: "pending",
       score_awarded: 0,
-      submitted_at: new Date().toISOString(),
+      submitted_at: params.submittedAt ?? new Date().toISOString(),
+      server_received_at: params.serverReceivedAt ?? new Date().toISOString(),
       judged_at: null,
       judged_by_player_id: null,
     })
@@ -3735,6 +3746,8 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
   playerId: string;
   answerText: string;
   existingBuzzerAnswer: DbBuzzerAnswer | null;
+  submittedAt: string;
+  serverReceivedAt: string;
 }) {
   if (params.existingBuzzerAnswer) {
     if (params.existingBuzzerAnswer.status !== "pending") {
@@ -3744,6 +3757,8 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
     return await updatePendingBuzzerAnswer({
       id: params.existingBuzzerAnswer.id,
       answerText: params.answerText,
+      submittedAt: params.submittedAt,
+      serverReceivedAt: params.serverReceivedAt,
     });
   }
 
@@ -3757,7 +3772,8 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
       answer_text: params.answerText,
       status: "pending",
       score_awarded: 0,
-      submitted_at: new Date().toISOString(),
+      submitted_at: params.submittedAt,
+      server_received_at: params.serverReceivedAt,
       judged_at: null,
       judged_by_player_id: null,
     })
@@ -3792,6 +3808,8 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
   return await updatePendingBuzzerAnswer({
     id: currentBuzzerAnswer.id,
     answerText: params.answerText,
+    submittedAt: params.submittedAt,
+    serverReceivedAt: params.serverReceivedAt,
   });
 }
 
@@ -4034,11 +4052,15 @@ export async function submitAnswer(params: {
     throw new Error(buzzerLoadError.message);
   }
 
+  const serverReceivedAt = new Date(getServerReceivedAtMs(params)).toISOString();
+  const submittedAt = serverReceivedAt;
   const buzzerAnswer = await writePendingRoundRevealBuzzerAnswer({
     gameSession,
     playerId: params.playerId,
     answerText,
     existingBuzzerAnswer,
+    submittedAt,
+    serverReceivedAt,
   });
 
   const { data, error } = await d1
@@ -4051,7 +4073,7 @@ export async function submitAnswer(params: {
         reveal_round: gameSession.currentRevealRound,
         player_id: params.playerId,
         answer_text: answerText,
-        submitted_at: new Date().toISOString(),
+        submitted_at: submittedAt,
       },
       {
         onConflict: "game_session_id,question_index,reveal_round,player_id",
@@ -4286,7 +4308,8 @@ export async function submitBuzzerAnswer(params: {
   const canUseClientRoundElapsedMs =
     typeof clientRoundElapsedMs === "number" &&
     clientRoundElapsedMs >= 0 &&
-    clientRoundElapsedMs >= serverRoundElapsedMs - BUZZER_CLIENT_TIME_MAX_EARLY_MS;
+    clientRoundElapsedMs >= serverRoundElapsedMs - BUZZER_CLIENT_TIME_MAX_EARLY_MS &&
+    clientRoundElapsedMs <= serverRoundElapsedMs;
   const effectiveRoundElapsedMs = canUseClientRoundElapsedMs ? clientRoundElapsedMs : serverRoundElapsedMs;
   const roundDurationMs = gameSession.roundSeconds * 1000;
 
@@ -4344,6 +4367,7 @@ export async function submitBuzzerAnswer(params: {
       player_id: params.playerId,
       answer_text: answerText,
       submitted_at: submittedAt,
+      server_received_at: new Date(serverReceivedAtMs).toISOString(),
     })
     .select()
     .single<DbBuzzerAnswer>();
@@ -4410,6 +4434,8 @@ export async function judgeBuzzerAnswer(params: {
       .eq("reveal_round", currentGameSession.current_reveal_round)
       .eq("status", "pending")
       .order("submitted_at", { ascending: true })
+      .order("server_received_at", { ascending: true })
+      .order("id", { ascending: true })
       .returns<DbBuzzerAnswer[]>(),
   ]);
 

@@ -24,6 +24,8 @@ type ActionResultMessage = {
   error?: string;
 };
 
+type ActionAcceptedMessage = { type: "action_accepted"; clientActionId?: string };
+
 type TopicState = {
   socket: WebSocket | null;
   listeners: Set<(message: ChangeMessage) => void>;
@@ -33,6 +35,7 @@ type TopicState = {
   heartbeatTimer: number | null;
   reconnectAttempts: number;
   lastPongAt: number;
+  lastActivityAt: number;
 };
 
 class WsActionError extends Error {
@@ -49,8 +52,8 @@ const ACTION_TIMEOUT_MS = 4000;
 const LONG_ACTION_TIMEOUT_MS = 30000;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 5000;
-const HEARTBEAT_INTERVAL_MS = 25000;
-const HEARTBEAT_TIMEOUT_MS = 70000;
+const HEARTBEAT_INTERVAL_MS = 60000;
+const HEARTBEAT_TIMEOUT_MS = 150000;
 const ROOM_TOPIC_PREFIX = "room:";
 
 const MUTATION_NAMES = new Set([
@@ -195,6 +198,7 @@ function getTopicState(topic: string) {
       heartbeatTimer: null,
       reconnectAttempts: 0,
       lastPongAt: Date.now(),
+      lastActivityAt: Date.now(),
     };
     topicStates.set(topic, state);
   }
@@ -256,6 +260,7 @@ function notifyChangeListeners(state: TopicState, message: ChangeMessage) {
 function startHeartbeat(topic: string, state: TopicState, socket: WebSocket) {
   clearHeartbeat(state);
   state.lastPongAt = Date.now();
+  state.lastActivityAt = Date.now();
   state.heartbeatTimer = window.setInterval(() => {
     if (state.socket !== socket || socket.readyState !== WebSocket.OPEN) {
       clearHeartbeat(state);
@@ -267,8 +272,13 @@ function startHeartbeat(topic: string, state: TopicState, socket: WebSocket) {
       return;
     }
 
+    if (Date.now() - state.lastActivityAt < HEARTBEAT_INTERVAL_MS) {
+      return;
+    }
+
     try {
-      socket.send(JSON.stringify({ type: "ping", topic }));
+      socket.send('{"type":"ping"}');
+      state.lastActivityAt = Date.now();
     } catch {
       socket.close(1011, "Heartbeat send failed.");
     }
@@ -314,7 +324,8 @@ function ensureSocket(topic: string) {
   };
 
   socket.onmessage = (event) => {
-    let message: ChangeMessage | ActionResultMessage | { type?: string };
+    state.lastActivityAt = Date.now();
+    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | { type?: string };
 
     try {
       message = JSON.parse(String(event.data)) as ChangeMessage | ActionResultMessage | { type?: string };
@@ -340,6 +351,20 @@ function ensureSocket(topic: string) {
         } else {
           pending.resolve(result.data);
         }
+      }
+      return;
+    }
+
+    if (message.type === "action_accepted") {
+      const accepted = message as ActionAcceptedMessage;
+      const pending = accepted.clientActionId ? state.pending.get(accepted.clientActionId) : null;
+      if (pending) {
+        window.clearTimeout(pending.timer);
+        pending.timer = window.setTimeout(() => {
+          state.pending.delete(accepted.clientActionId ?? "");
+          cleanupTopicStateIfIdle(topic, state);
+          pending.reject(new WsActionError("transport", "操作已被服务器接收，但处理时间异常。请刷新状态确认结果。"));
+        }, LONG_ACTION_TIMEOUT_MS);
       }
       return;
     }
@@ -443,6 +468,7 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
 
   try {
     socket.send(JSON.stringify({ type: "action", name, args, clientActionId }));
+    state.lastActivityAt = Date.now();
   } catch {
     const pending = state.pending.get(clientActionId);
     if (pending) {
