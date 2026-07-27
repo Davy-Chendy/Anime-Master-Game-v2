@@ -266,6 +266,13 @@ function getCorrectLabelAnswersFromBuzzerAnswers(answers: BuzzerAnswer[]) {
   return sortBySubmittedAt(answers.filter((answer) => answer.status === "correct").map(toLabelAnswerFromBuzzerAnswer));
 }
 
+function comparePlayerAnswerOrder(left: BuzzerAnswer, right: BuzzerAnswer) {
+  return (
+    new Date(left.submittedAt).getTime() - new Date(right.submittedAt).getTime() ||
+    left.id.localeCompare(right.id)
+  );
+}
+
 function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt" | "serverReceivedAt">, nowMs: number) {
   return nowMs - new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
@@ -943,6 +950,9 @@ function AnswerJudgementPanel({
         return row ? [row] : [];
       })
     : rows;
+  const answerOrderByPlayerId = new Map(
+    rows.filter((row) => row.answer).map((row, index) => [row.player.id, index + 1]),
+  );
   const filterOptions: Array<{ value: AnswerPanelFilter; label: string }> = [
     { value: "all", label: "全部" },
     { value: "pending", label: `待判定 ${pendingCount}` },
@@ -1035,7 +1045,7 @@ function AnswerJudgementPanel({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5">
           <div className="grid gap-2 md:grid-cols-2">
-            {filteredRows.map(({ player, answer, hasForfeited }, index) => {
+            {filteredRows.map(({ player, answer, hasForfeited }) => {
               const status = answer?.status ?? null;
               const isAnswerRevealed = Boolean(answer && canRevealAnswer(answer));
               const canJudge = Boolean(answer && isAnswerRevealed && canJudgeAnswer(answer));
@@ -1052,7 +1062,15 @@ function AnswerJudgementPanel({
                   key={player.id}
                 >
                   <span className="text-center text-xs font-bold tabular-nums text-slate-500">
-                    {status === "correct" ? <IconCheck className="mx-auto h-5 w-5 text-emerald-700" /> : status === "wrong" ? <IconXMark className="mx-auto h-5 w-5 text-rose-700" /> : index + 1}
+                    {status === "correct" ? (
+                      <IconCheck className="mx-auto h-5 w-5 text-emerald-700" />
+                    ) : status === "wrong" ? (
+                      <IconXMark className="mx-auto h-5 w-5 text-rose-700" />
+                    ) : answer ? (
+                      answerOrderByPlayerId.get(player.id)
+                    ) : (
+                      "…"
+                    )}
                   </span>
                   <div className="min-w-0">
                     <p
@@ -1067,16 +1085,19 @@ function AnswerJudgementPanel({
                           : "答案确认中…"
                         : hasForfeited
                           ? "已放弃"
-                          : "尚未回答"}
+                          : "等待回答"}
                     </p>
-                    <p className="mt-1 truncate text-xs font-medium text-slate-500" title={player.nickname}>
-                      {player.nickname}
-                    </p>
+                    {answer || hasForfeited ? (
+                      <p className="mt-1 truncate text-xs font-medium text-slate-500" title={player.nickname}>
+                        {player.nickname}
+                      </p>
+                    ) : null}
                   </div>
                   {answer && isAnswerRevealed ? (
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         aria-label={`将${player.nickname}的回答判为答对`}
+                        aria-pressed={status === "correct"}
                         className={[
                           "grid h-10 w-10 place-items-center rounded-md border focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-40",
                           status === "correct"
@@ -1092,6 +1113,7 @@ function AnswerJudgementPanel({
                       </button>
                       <button
                         aria-label={`将${player.nickname}的回答判为答错`}
+                        aria-pressed={status === "wrong"}
                         className={[
                           "grid h-10 w-10 place-items-center rounded-md border focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-40",
                           status === "wrong"
@@ -1211,6 +1233,7 @@ export function ImageRevealGame({
   const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isAnswerPanelOpen, setIsAnswerPanelOpen] = useState(false);
   const [isMarkingPendingWrong, setIsMarkingPendingWrong] = useState(false);
+  const [answerPanelCompletionCheckTick, setAnswerPanelCompletionCheckTick] = useState(0);
   const [isPublishingBeforeResult, setIsPublishingBeforeResult] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
   const [reviewedQuestionIndex, setReviewedQuestionIndex] = useState<number | null>(null);
@@ -1249,6 +1272,8 @@ export function ImageRevealGame({
   const answerJudgementFlushTimerRef = useRef<number | null>(null);
   const answerJudgementFlushPromiseRef = useRef<Promise<void> | null>(null);
   const answerJudgementContextRef = useRef<{ gameSessionId: string; questionIndex: number; revealRound: number } | null>(null);
+  const answerPanelAutoCloseArmedRef = useRef(false);
+  const answerPanelPendingJudgementIdsRef = useRef(new Set<string>());
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
   const roundSnapshotFetchRef = useRef<{
     gameSessionId: string;
@@ -1662,6 +1687,8 @@ export function ImageRevealGame({
     );
     if (didChangeRound) {
       answerJudgementQueueRef.current.clear();
+      answerPanelAutoCloseArmedRef.current = false;
+      answerPanelPendingJudgementIdsRef.current.clear();
       if (answerJudgementFlushTimerRef.current !== null) {
         window.clearTimeout(answerJudgementFlushTimerRef.current);
         answerJudgementFlushTimerRef.current = null;
@@ -2395,6 +2422,12 @@ export function ImageRevealGame({
           answer: buzzerAnswerByPlayerId.get(participantId) ?? null,
           hasForfeited: currentRoundForfeitPlayerSet.has(participantId),
         }];
+      }).sort((a, b) => {
+        if (a.answer && b.answer) return comparePlayerAnswerOrder(a.answer, b.answer);
+        if (a.answer) return -1;
+        if (b.answer) return 1;
+        if (a.hasForfeited !== b.hasForfeited) return a.hasForfeited ? -1 : 1;
+        return currentRoundParticipantIds.indexOf(a.player.id) - currentRoundParticipantIds.indexOf(b.player.id);
       }),
     [activePlayerById, buzzerAnswerByPlayerId, currentRoundForfeitPlayerSet, currentRoundParticipantIds],
   );
@@ -2684,9 +2717,21 @@ export function ImageRevealGame({
     !isCurrentPlayerCorrect;
 
   const closeAnswerPanel = useCallback(() => {
+    answerPanelAutoCloseArmedRef.current = false;
     setIsAnswerPanelOpen(false);
     window.requestAnimationFrame(() => answerPanelTriggerRef.current?.focus());
   }, []);
+
+  useEffect(() => {
+    if (!isAnswerPanelOpen || !answerPanelAutoCloseArmedRef.current) return;
+    answerPanelAutoCloseArmedRef.current = false;
+    const hasCompletedCurrentRoundJudgement =
+      answerPanelPendingCount === 0 &&
+      (answerPanelUnansweredCount === 0 || hasFirstCorrectAnswer || isQuestionReviewing);
+    if (hasCompletedCurrentRoundJudgement) {
+      closeAnswerPanel();
+    }
+  }, [answerPanelCompletionCheckTick, answerPanelPendingCount, answerPanelUnansweredCount, closeAnswerPanel, hasFirstCorrectAnswer, isAnswerPanelOpen, isQuestionReviewing]);
 
   function canJudgePanelAnswer(answer: BuzzerAnswer) {
     if (!gameSession || answer.questionIndex !== gameSession.currentQuestionIndex || answer.revealRound !== gameSession.currentRevealRound) {
@@ -3463,6 +3508,11 @@ export function ImageRevealGame({
     })
       .then(applyAnswerJudgementResult)
       .catch((error) => {
+        for (const [answerId] of queued) {
+          if (!answerJudgementQueueRef.current.has(answerId)) {
+            answerPanelPendingJudgementIdsRef.current.delete(answerId);
+          }
+        }
         catchUpRoundSnapshot();
         throw error;
       })
@@ -3486,13 +3536,24 @@ export function ImageRevealGame({
       window.clearTimeout(answerJudgementFlushTimerRef.current);
       answerJudgementFlushTimerRef.current = null;
     }
+    let didFlushJudgements = false;
     while (answerJudgementFlushPromiseRef.current || answerJudgementQueueRef.current.size > 0) {
       await flushAnswerJudgementBatch();
+      didFlushJudgements = true;
+    }
+    const didCompletePendingJudgements = answerPanelPendingJudgementIdsRef.current.size > 0;
+    answerPanelPendingJudgementIdsRef.current.clear();
+    if (didFlushJudgements && didCompletePendingJudgements && isAnswerPanelOpen) {
+      answerPanelAutoCloseArmedRef.current = true;
+      setAnswerPanelCompletionCheckTick((tick) => tick + 1);
     }
   }
 
   function queueAnswerJudgement(answer: BuzzerAnswer, isCorrect: boolean) {
     if (answer.status === (isCorrect ? "correct" : "wrong") && !answerJudgementQueueRef.current.has(answer.id)) return;
+    if (answer.status === "pending") {
+      answerPanelPendingJudgementIdsRef.current.add(answer.id);
+    }
     answerJudgementQueueRef.current.set(answer.id, isCorrect);
     setBuzzerAnswers((currentAnswers) =>
       currentAnswers.map((currentAnswer) =>
@@ -3530,6 +3591,10 @@ export function ImageRevealGame({
         expectedRevealRound: context.revealRound,
       });
       applyAnswerJudgementResult(result);
+      if (isAnswerPanelOpen) {
+        answerPanelAutoCloseArmedRef.current = true;
+        setAnswerPanelCompletionCheckTick((tick) => tick + 1);
+      }
     } catch (error) {
       onError(error instanceof Error ? error.message : "批量判错失败");
     } finally {
@@ -4204,6 +4269,7 @@ export function ImageRevealGame({
               variant="secondary"
               onClick={(event) => {
                 answerPanelTriggerRef.current = event.currentTarget;
+                answerPanelAutoCloseArmedRef.current = false;
                 setIsAnswerPanelOpen(true);
               }}
             >
@@ -4508,9 +4574,11 @@ export function ImageRevealGame({
               {hasRoundStarted ? (
                 <Button
                   type="button"
+                  variant="secondary"
                   disabled={!canOpenAnswerPanel}
                   onClick={(event) => {
                     answerPanelTriggerRef.current = event.currentTarget;
+                    answerPanelAutoCloseArmedRef.current = false;
                     setIsAnswerPanelOpen(true);
                   }}
                 >
