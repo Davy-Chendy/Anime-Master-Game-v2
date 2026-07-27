@@ -155,6 +155,7 @@ const TEAM_BATTLE_VOTE_COMPLETED_KEY_STORAGE_KEY = "team-battle-vote-completed-k
 const TEAM_BATTLE_VOTE_ALARM_RETRY_DELAY_MS = 1000;
 const TEAM_BATTLE_VOTE_ALARM_MAX_ATTEMPTS = 3;
 const BUSINESS_ALARM_RECOVERY_RETRY_DELAY_MS = 30_000;
+const BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS = 1000;
 const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
 const R2_LIST_PAGE_LIMIT = 1000;
@@ -2692,8 +2693,9 @@ export class RoomDurableObject {
     } finally {
       const nextProjectionAt = this.authority.getNextProjectionAt();
       if (nextProjectionAt != null) {
+        const scheduledProjectionAt = Math.max(nextProjectionAt, Date.now() + BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS);
         const currentAlarm = await this.state.storage.getAlarm();
-        if (currentAlarm == null || nextProjectionAt < currentAlarm) await this.state.storage.setAlarm(nextProjectionAt);
+        if (currentAlarm == null || scheduledProjectionAt < currentAlarm) await this.state.storage.setAlarm(scheduledProjectionAt);
       }
     }
   }
@@ -3973,20 +3975,23 @@ export class RoomDurableObject {
       .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
       .sort((left, right) => left - right)[0] ?? null;
     const currentAlarm = alarmAlreadyConsumed ? null : await this.state.storage.getAlarm();
+    const scheduledRunAt = nextRunAt == null
+      ? null
+      : Math.max(nextRunAt, Date.now() + BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS);
     let changed = false;
 
-    if (nextRunAt == null) {
+    if (scheduledRunAt == null) {
       if (!alarmAlreadyConsumed && currentAlarm != null) {
         await this.state.storage.deleteAlarm();
         changed = true;
       }
-    } else if (currentAlarm !== nextRunAt) {
+    } else if (currentAlarm !== scheduledRunAt) {
       const currentStillRepresentsBusinessTask =
         currentAlarm != null &&
         currentAlarm < nextRunAt &&
         (autoForfeit?.runAtMs === currentAlarm || teamBattleVote?.runAtMs === currentAlarm);
       if (!currentStillRepresentsBusinessTask) {
-        await this.state.storage.setAlarm(nextRunAt);
+        await this.state.storage.setAlarm(scheduledRunAt);
         changed = true;
       }
     }

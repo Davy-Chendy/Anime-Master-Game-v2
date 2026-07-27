@@ -2,6 +2,9 @@ import { DurableSqlDatabase } from "./durableSqlDatabase";
 
 type Row = Record<string, unknown>;
 
+const AUTHORITY_SCHEMA_VERSION = 6;
+const MUTATION_JOURNAL_VALIDATION_SCHEMA = `CREATE TABLE IF NOT EXISTS mutation_journal_validation (id INTEGER PRIMARY KEY CHECK(id=1), validated_at INTEGER NOT NULL)`;
+
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 
 const SCHEMA = [
@@ -14,7 +17,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS projected_question_archives (game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, projection_version INTEGER NOT NULL, PRIMARY KEY(game_session_id,question_index))`,
   `CREATE TABLE IF NOT EXISTS mutation_journal (id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, name TEXT NOT NULL, action_key TEXT, started_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mutation_journal_payload (id INTEGER PRIMARY KEY CHECK(id=1), payload_json TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS mutation_journal_validation (id INTEGER PRIMARY KEY CHECK(id=1), validated_at INTEGER NOT NULL)`,
+  MUTATION_JOURNAL_VALIDATION_SCHEMA,
   `CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, room_code TEXT NOT NULL UNIQUE, host_player_id TEXT NOT NULL, game_status TEXT NOT NULL, current_presenter_player_id TEXT, current_game_id TEXT, prepared_question_set_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL', lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3, lobby_round_seconds INTEGER NOT NULL DEFAULT 45, lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]')`,
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, nickname TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), role TEXT NOT NULL DEFAULT 'PLAYER')`,
   `CREATE TABLE IF NOT EXISTS question_sets (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by_player_id TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'uploaded', is_public INTEGER NOT NULL DEFAULT 0, image_urls_text TEXT, image_count INTEGER NOT NULL DEFAULT 0, rating_avg REAL NOT NULL DEFAULT 0, rating_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by_nickname TEXT, play_count INTEGER NOT NULL DEFAULT 0)`,
@@ -84,17 +87,25 @@ export class RoomGameAuthority {
   initializeSchema() {
     this.storage.sql.exec(SCHEMA[0]);
     const current = this.storage.sql.exec<Row>("SELECT version FROM authority_schema WHERE id = 1").toArray()[0];
-    if (Number(current?.version ?? 0) >= 5) return;
-    for (const statement of SCHEMA.slice(1)) this.storage.sql.exec(statement);
-    const buzzerColumns = new Set(
-      this.storage.sql.exec<{ name: string }>("PRAGMA table_info(buzzer_answers)").toArray().map((column) => column.name),
-    );
-    if (!buzzerColumns.has("server_received_at")) {
-      this.storage.sql.exec("ALTER TABLE buzzer_answers ADD COLUMN server_received_at TEXT");
+    const currentVersion = Number(current?.version ?? 0);
+    if (currentVersion >= AUTHORITY_SCHEMA_VERSION) return;
+    if (currentVersion < 5) {
+      for (const statement of SCHEMA.slice(1)) this.storage.sql.exec(statement);
+      const buzzerColumns = new Set(
+        this.storage.sql.exec<{ name: string }>("PRAGMA table_info(buzzer_answers)").toArray().map((column) => column.name),
+      );
+      if (!buzzerColumns.has("server_received_at")) {
+        this.storage.sql.exec("ALTER TABLE buzzer_answers ADD COLUMN server_received_at TEXT");
+      }
+      this.storage.sql.exec("UPDATE buzzer_answers SET server_received_at=submitted_at WHERE server_received_at IS NULL");
+      this.storage.sql.exec("CREATE INDEX IF NOT EXISTS buzzer_answers_fair_order_idx ON buzzer_answers(game_session_id,question_index,reveal_round,submitted_at,server_received_at,id)");
+    } else {
+      this.storage.sql.exec(MUTATION_JOURNAL_VALIDATION_SCHEMA);
     }
-    this.storage.sql.exec("UPDATE buzzer_answers SET server_received_at=submitted_at WHERE server_received_at IS NULL");
-    this.storage.sql.exec("CREATE INDEX IF NOT EXISTS buzzer_answers_fair_order_idx ON buzzer_answers(game_session_id,question_index,reveal_round,submitted_at,server_received_at,id)");
-    this.storage.sql.exec("INSERT INTO authority_schema(id,version) VALUES(1,5) ON CONFLICT(id) DO UPDATE SET version=excluded.version");
+    this.storage.sql.exec(
+      "INSERT INTO authority_schema(id,version) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET version=excluded.version",
+      AUTHORITY_SCHEMA_VERSION,
+    );
   }
 
   getMeta(roomId: string) {
