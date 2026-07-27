@@ -37,8 +37,8 @@
 - 合法 envelope 的业务终止拒绝会消费 seq、进入 dirty committedSeq 流并返回 terminal rejection；语法/身份/乱序拒绝不消费。
 - terminal rejection 在 durable ACK 前仍留 Outbox；重连重放返回同一拒绝，checkpoint 后才按 committed seq 清除。
 - `gameId` 不匹配时拒绝；题目级 mutation 的题号、phase 不匹配时拒绝，加入/退出/角色/踢人/解散/取消本局/返回大厅等房间级 mutation 不受题号约束；最近 actionId 集合最多 512 项，按插入顺序淘汰。
-- 普通答案：Outbox→DO 验证→分配 `serverReceivedAt/orderToken`→内存/Attachment→provisional ACK→仅主持人 answer delta。
-- 普通判定：Outbox→DO 验证→内存/主持人 Attachment→目标玩家及主持人 judgement delta→provisional ACK。
+- 普通答案：Outbox→DO 验证→分配 `serverReceivedAt/orderToken`→内存/Attachment→provisional ACK→主持人收到正文，所有连接只收到不含正文的参与状态 delta。
+- 普通判定：Outbox→DO 验证→内存/主持人 Attachment→目标玩家及主持人收到完整 judgement delta，同时全房同步不含正文的判定、积分和本题结果 delta→provisional ACK。
 - checkpoint 后发送 `checkpoint_committed(version, committedSeqByActor)`；客户端仅删除 `clientSeq <= committedSeq`。
 - 客户端收到 durable ACK 时还必须原子推进对应 actor 的 IndexedDB 序号水位；HTTP vNext mutation 的响应也携带已提交序号提示，并在 RPC 返回页面前完成本地同步，避免两条连接乱序时与 Outbox 分配出相同 `clientSeq`。
 - 握手确认当前持久化 gameId 后，客户端丢弃其他已结束 gameId 的 Outbox；旧局 envelope 在 vNext DO 明确拒绝，绝不回落 legacy。
@@ -68,7 +68,7 @@
 
 ## 广播与稳定窗口
 
-- answer 正文只发主持人；3秒稳定窗口内隐藏正文，窗口结束后立即显示并启用判定；judgement 立即发目标玩家和主持人；公开状态才广播全房。
+- answer 正文只发主持人；3秒稳定窗口内隐藏正文，窗口结束后立即显示并启用判定；judgement 立即发目标玩家和主持人；谁已作答、公开判定、积分和本题答对人数以小 delta 广播全房。
 - Worker 转发 WebSocket 到 Room DO 时必须保留 `playerId` 查询参数；Attachment 连接身份不得依赖该连接先发送 mutation 才补全。
 - 同一 payload 只 stringify 一次；普通 delta 目标小于1KB，目标玩家反馈不做延迟批处理。
 - 3秒稳定窗口使用服务端绝对时间；`orderToken=serverReceivedAtMs:actorId:clientSeq` 构成可恢复全序，窗口结束由一次性 UI 定时器触发重绘，不参与保活或持久化。
@@ -98,17 +98,18 @@
 
 ## 四模式转换与房间 mutation
 
-- `confirmRevealBlocks` 开始绝对 deadline；`submit/forfeit/cancel` 只改当前轮；`autoForfeit/settle/grade` 锁轮并强制 checkpoint。
+- `confirmRevealBlocks` 开始绝对 deadline；`submit/forfeit/cancel` 只改当前轮；deadline `autoForfeit` 只锁提交并补未行动者放弃，保留当前轮等待主持人判定；仅手动 `settle/grade` 决定下一轮或答案复盘并强制 checkpoint。
 - `ROUND_REVEAL` 的 `gradeAnswersAndAdvance` 按 roundScores 仅给首次正确者计分；全员正确进 REVIEW，否则停表等待下轮。
 - `setAnswerJudgements/markPendingWrong/judgeBuzzerAnswer` 可在答案继续到达时执行；按 actionId 去重并从结果重算累计分数。
 - `BUZZER_FIRST_CORRECT` 按 orderToken 判定；更早 pending 未判不得接受后项正确；首个正确强制 checkpoint 后进 REVIEW。
-- `BUZZER_RANKED` 判定即时定向反馈；每次更改按稳定全序重算本题名次，最终锁序在边界 checkpoint 内完成。
+- `BUZZER_RANKED` 按整道题跨轮的稳定接收顺序计分，本题初始 N 名有效玩家依次获 N..1；每次改判重建本题全部正确 result、buzzer 分值和累计分数；后续轮只统计仍在房的 PLAYER 且本题尚未答对者。
 - `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭方块，数量为 min(revealLimit,remaining)；全员投票才产生 vote deadline。
-- `finalizeTeamBattleVote` 在 deadline 后原子结算：揭格→GUESS_VOTE；guess 则→JUDGING；skip 换队、revealLimit=1、turnNumber+1。
+- `finalizeTeamBattleVote` 在 deadline 后原子结算；选格或猜测最高票同票时在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip 换队并推进回合。
 - TEAM_BATTLE 猜错换到有成员的对队、revealLimit=2、记录 previousTurnAction、turnNumber+1；全揭时直接 GUESS_VOTE。
 - TEAM_BATTLE 猜对给胜队现有成员各1分并进 REVIEW；`revealTeamBattleAnswer` 无分进 REVIEW；两者均全揭并停 deadline。
 - TEAM_BATTLE 成员离开时移除 teams/votes/memberNames；activeTeam 空则切换可行动队并清 votes/pending/deadline。
-- `advanceReviewedQuestion/skip/end/return/dissolve` 归档当前题并强制 checkpoint；切题重建 eligibility 和模式初始状态。
+- `advanceReviewedQuestion` 仅允许完整图片且 `roundStartedAt=null` 的复盘阶段；`skipCurrentQuestion` 保持显式跳题语义；二者均归档并强制 checkpoint。
+- `updateQuestionLabel` 仅允许当前题复盘时首次填写；引用来源必须是本局当前题的普通或 buzzer answer，成功后广播公开 label delta。
 - 四模式均测试前置条件、aggregate 字段、delta、deadline、计分、放弃/批判/切题，以及 legacy/vNext 等价结果。
 - active vNext 期间加入/离开/踢人/角色变化只更新 DO aggregate；ended vNext 允许玩家退出并立即 checkpoint/投影房间 roster；下一题 eligibility 从 aggregate roster 一次计算。
 - vNext 房间 mutation 必须保持原公开 RPC 返回契约；`joinRoom` 成功仍返回 `{ room, error, errorCode }`，不能以裸 `Room` 破坏调用方判断。

@@ -109,17 +109,23 @@ function envelope(actorId: string, clientSeq: number, name: string, payload: Rec
   return { actionId, actorId, clientSeq, gameId: "g1", questionIndex: 0, name, payload };
 }
 
-function createAuthority(playerCount = 50, d1: D1Database = fakeD1, questionCount = 1) {
+function createAuthority(playerCount = 50, d1: D1Database = fakeD1, questionCount = 1, random: () => number = Math.random) {
   const state = new FakeState();
   state.storage.sql.db.exec(`
     CREATE TABLE authority_vnext_active_game (id INTEGER PRIMARY KEY CHECK(id=1),room_id TEXT NOT NULL,game_id TEXT NOT NULL,authority_version INTEGER NOT NULL,schema_version INTEGER NOT NULL,cutover_state TEXT NOT NULL,state_version INTEGER NOT NULL,state_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
     CREATE TABLE authority_vnext_question_archive (game_id TEXT NOT NULL,question_index INTEGER NOT NULL,checkpoint_version INTEGER NOT NULL,state_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(game_id,question_index));
     CREATE TABLE authority_vnext_projection_outbox (id INTEGER PRIMARY KEY CHECK(id=1),payload_json TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
   `);
-  const authority = new RoomAuthorityVNext(state as unknown as DurableObjectState, d1);
+  const authority = new RoomAuthorityVNext(state as unknown as DurableObjectState, d1, random);
   authority.beginStart("r1", "g1", { startRequestId: "g1" });
   authority.activateStart(bootstrap(playerCount, questionCount));
   return { state, authority };
+}
+
+function enterReview(authority: RoomAuthorityVNext) {
+  const session = authority.getAggregate()!.gameSession!;
+  session.revealedBlocks = Array.from({ length: 45 }, (_, index) => index);
+  session.roundStartedAt = null;
 }
 
 test("v6 upgrades atomically to v7 and repeated initialization is idempotent", () => {
@@ -215,6 +221,34 @@ test("batch judgement sends each target only its own compact delta", async () =>
   }
 });
 
+test("answer progress is public without exposing answer text", () => {
+  const { state, authority } = createAuthority(2);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const now = Date.now();
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+
+  const submitted = authority.handleMutation(player, envelope("p0", 1, "submitAnswer", { playerId: "p0", answerText: "secret-answer" }), now + 1);
+  const submittedProgress = submitted.publicDeltas.find((delta) => delta.type === "answer_progress_changed");
+  assert.ok(submittedProgress && submittedProgress.type === "answer_progress_changed");
+  assert.deepEqual(submittedProgress.answers.map((answer) => answer.playerId), ["p0"]);
+  assert.deepEqual(submittedProgress.buzzerAnswers.map((answer) => [answer.playerId, answer.status]), [["p0", "pending"]]);
+  assert.equal(JSON.stringify(submittedProgress).includes("secret-answer"), false);
+  assert.ok(JSON.stringify(submittedProgress).length < 1024);
+
+  const judged = authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", {
+    presenterPlayerId: "host",
+    judgements: [{ buzzerAnswerId: "p0:1:submitAnswer:b", isCorrect: true }],
+  }), now + 4000);
+  const judgedProgress = judged.publicDeltas.find((delta) => delta.type === "answer_progress_changed");
+  assert.ok(judgedProgress && judgedProgress.type === "answer_progress_changed");
+  assert.deepEqual(judgedProgress.buzzerAnswers.map((answer) => [answer.playerId, answer.status]), [["p0", "correct"]]);
+  assert.equal(judgedProgress.scores.find((score) => score.playerId === "p0")?.score, 5);
+  assert.equal(judgedProgress.questionResults.some((result) => result.playerId === "p0"), true);
+  assert.equal(JSON.stringify(judgedProgress).includes("secret-answer"), false);
+  assert.ok(JSON.stringify(judgedProgress).length < 1024);
+});
+
 test("presenter can judge an offline player while later answers still arrive", () => {
   const { state, authority } = createAuthority(3);
   const host = socketFor(state, "host");
@@ -235,6 +269,7 @@ test("presenter can judge an offline player while later answers still arrive", (
 test("checkpoint generation does not commit an action arriving in-flight", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
   for (let seq = 1; seq <= 20; seq += 1) {
     authority.handleMutation(host, envelope("host", seq, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: `L${seq}`, source: "manual" }), Date.now() + seq);
   }
@@ -250,6 +285,9 @@ test("checkpoint generation does not commit an action arriving in-flight", async
 test("hibernation merges uncommitted Attachment exactly once", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
+  authority.handleMutation(null, envelope("p0", 1, "joinRoom", { nickname: "P0", role: "PLAYER" }), Date.now() - 1);
+  await authority.forceCheckpoint("phase-boundary");
   authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "pending", source: "manual" }), Date.now());
   const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
   await restored.restoreFromStorage();
@@ -260,6 +298,7 @@ test("hibernation merges uncommitted Attachment exactly once", async () => {
 test("50 dirty closes merge to one aggregate checkpoint", async () => {
   const { state, authority } = createAuthority(1);
   const sockets: WebSocket[] = [];
+  enterReview(authority);
   for (let seq = 1; seq <= 50; seq += 1) {
     const socket = socketFor(state, "host");
     sockets.push(socket);
@@ -273,6 +312,7 @@ test("50 dirty closes merge to one aggregate checkpoint", async () => {
 test("Attachment budget checkpoints and compacts without crashing", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
   authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "x".repeat(ATTACHMENT_BUDGET_BYTES), source: "manual" }), Date.now());
   await authority.forceCheckpoint("attachment-budget");
   const attachment = (host as unknown as FakeSocket).deserializeAttachment() as VNextSocketAttachment;
@@ -319,6 +359,7 @@ test("failed deadline checkpoint reloads durable deadline before same-instance r
 test("duplicate and out-of-order mutations never apply twice", () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
   const action = envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "once", source: "manual" }, "same");
   assert.equal(authority.handleMutation(host, action, Date.now()).duplicate, undefined);
   assert.equal(authority.handleMutation(host, action, Date.now()).duplicate, true);
@@ -359,20 +400,159 @@ test("hibernation replay remembers persist-first outcome before duplicate ACK", 
   assert.equal(replay.archiveQuestion, true);
 });
 
+test("committed advance and skip duplicates return current state after restart without reapplying", async () => {
+  for (const name of ["advanceReviewedQuestion", "skipCurrentQuestion"] as const) {
+    const { state, authority } = createAuthority(1, fakeD1, 2);
+    const host = socketFor(state, "host");
+    if (name === "advanceReviewedQuestion") enterReview(authority);
+    const action = envelope("host", 1, name, { presenterPlayerId: "host", expectedQuestionIndex: 0 });
+    const first = authority.handleMutation(host, action, Date.now());
+    assert.equal(first.forceCheckpoint, "phase-boundary");
+    await authority.forceCheckpoint(first.forceCheckpoint!, first.archiveQuestion);
+    const archiveWrites = state.storage.sql.archiveWrites;
+    const activeWrites = state.storage.sql.activeWrites;
+
+    state.sockets.length = 0;
+    const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+    await restored.restoreFromStorage();
+    const replay = restored.handleMutation(null, action, Date.now() + 1);
+    const replayData = replay.data as { gameSession?: GameSession; room?: Room | null };
+    assert.equal(replay.duplicate, true);
+    assert.equal(replay.provisional, false);
+    assert.equal(replayData.gameSession?.currentQuestionIndex, 1);
+    assert.equal(replayData.gameSession?.status, "PLAYING");
+    assert.equal(replayData.room?.currentGameId, "g1");
+    assert.equal(restored.getAggregate()?.gameSession?.currentQuestionIndex, 1);
+    assert.equal(state.storage.sql.archiveWrites, archiveWrites);
+    assert.equal(state.storage.sql.activeWrites, activeWrites);
+  }
+});
+
+test("every committed mutation duplicate preserves its public top-level RPC contract", async () => {
+  const { state, authority } = createAuthority(2, fakeD1, 2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.answers.push({ id: "preserved-answer", gameSessionId: "g1", questionIndex: 0, revealRound: 1, playerId: "p0", answerText: "current", submittedAt: new Date().toISOString() });
+  aggregate.buzzerAnswers.push({ id: "preserved-answer:b", gameSessionId: "g1", questionIndex: 0, revealRound: 1, playerId: "p0", answerText: "current", status: "pending", scoreAwarded: 0, submittedAt: new Date().toISOString(), serverReceivedAt: new Date().toISOString() });
+  authority.handleMutation(null, envelope("p0", 1, "joinRoom", { nickname: "P0", role: "PLAYER" }), Date.now());
+  aggregate.seenSeqByActor.host = 100;
+  aggregate.seenSeqByActor.p0 = 100;
+  await authority.forceCheckpoint("phase-boundary");
+  state.sockets.length = 0;
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  const before = {
+    activeWrites: state.storage.sql.activeWrites,
+    archiveWrites: state.storage.sql.archiveWrites,
+    state: JSON.stringify(restored.getAggregate()),
+  };
+
+  const isGameSession = (value: unknown) => Boolean(value && typeof value === "object" && (value as { id?: string }).id === "g1");
+  const isRoom = (value: unknown) => Boolean(value && typeof value === "object" && (value as { code?: string }).code === "ROOM01");
+  const cases: Array<{ name: string; actorId?: string; actionId?: string; payload?: Record<string, unknown>; validate: (data: unknown) => void }> = [
+    { name: "confirmRevealBlocks", validate: (data) => { assert.ok(isGameSession(data)); assert.equal("gameSession" in (data as object), false); } },
+    { name: "submitAnswer", actorId: "p0", actionId: "edit-action", payload: { answerText: "edited" }, validate: (data) => { const value = data as { id: string; buzzerAnswer?: { id: string } }; assert.equal(value.id, "preserved-answer"); assert.equal(value.buzzerAnswer?.id, "preserved-answer:b"); } },
+    { name: "submitForfeitAnswer", actorId: "p0", actionId: "forfeit-action", validate: (data) => assert.equal((data as { id?: string }).id, "preserved-answer") },
+    { name: "cancelForfeitAnswer", actorId: "p0", validate: (data) => { const value = data as { gameSession?: GameSession; canceledAnswerId?: string }; assert.ok(isGameSession(value.gameSession)); assert.ok(value.canceledAnswerId); } },
+    { name: "submitBuzzerAnswer", actorId: "p0", validate: (data) => assert.equal((data as { id?: string }).id, "preserved-answer:b") },
+    { name: "judgeBuzzerAnswer", payload: { buzzerAnswerId: "preserved-answer:b", isCorrect: true }, validate: (data) => { const value = data as { gameSession?: GameSession; judgedAnswer?: unknown; scores?: unknown[]; questionResults?: unknown[]; buzzerAnswers?: unknown[] }; assert.ok(isGameSession(value.gameSession)); assert.ok(value.judgedAnswer); assert.ok(Array.isArray(value.scores)); assert.ok(Array.isArray(value.questionResults)); assert.ok(Array.isArray(value.buzzerAnswers)); } },
+    ...["setAnswerJudgements", "markPendingRoundAnswersWrong"].map((name) => ({ name, validate: (data: unknown) => { const value = data as { gameSession?: GameSession; judgedAnswers?: unknown[]; scores?: unknown[]; questionResults?: unknown[] }; assert.ok(isGameSession(value.gameSession)); assert.ok(Array.isArray(value.judgedAnswers)); assert.ok(Array.isArray(value.scores)); assert.ok(Array.isArray(value.questionResults)); } })),
+    ...["settleBuzzerRound", "autoForfeitExpiredRound", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer"].map((name) => ({ name, validate: (data: unknown) => assert.ok(isGameSession((data as { gameSession?: GameSession }).gameSession)) })),
+    { name: "gradeAnswersAndAdvance", payload: { correctPlayerIds: ["p0"] }, validate: (data) => { const value = data as { gameSession?: GameSession; room?: Room | null; newlyScoredPlayerIds?: string[] }; assert.ok(isGameSession(value.gameSession)); assert.ok(value.room === null || isRoom(value.room)); assert.ok(Array.isArray(value.newlyScoredPlayerIds)); } },
+    ...["submitTeamBattleRevealVote", "submitTeamBattleGuessVote"].map((name) => ({ name, validate: (data: unknown) => { assert.ok(isGameSession(data)); assert.equal("gameSession" in (data as object), false); } })),
+    ...["advanceReviewedQuestion", "skipCurrentQuestion"].map((name) => ({ name, validate: (data: unknown) => { const value = data as { gameSession?: GameSession; room?: Room | null }; assert.ok(isGameSession(value.gameSession)); assert.ok(value.room === null || isRoom(value.room)); } })),
+    { name: "endCurrentGameEarly", validate: (data) => { const value = data as { gameSession?: GameSession; room?: Room }; assert.ok(isGameSession(value.gameSession)); assert.ok(isRoom(value.room)); } },
+    { name: "updateQuestionLabel", payload: { questionId: "q1" }, validate: (data) => assert.equal((data as { id?: string }).id, "q1") },
+    { name: "joinRoom", validate: (data) => { const value = data as { room?: Room | null; error?: string | null; errorCode?: string | null }; assert.ok(value.room === null || isRoom(value.room)); assert.equal(value.error, null); assert.equal(value.errorCode, null); } },
+    { name: "leaveRoom", actorId: "p0", validate: (data) => assert.ok(data === null || isRoom(data)) },
+    ...["kickPlayerFromRoom", "updatePlayerRole", "cancelCurrentRound", "returnRoomToLobby"].map((name) => ({ name, validate: (data: unknown) => assert.ok(isRoom(data)) })),
+    { name: "dissolveRoom", validate: (data) => assert.equal(data, null) },
+  ];
+  assert.equal(cases.length, 27);
+
+  for (const [index, contract] of cases.entries()) {
+    const actorId = contract.actorId ?? "host";
+    const action = { ...envelope(actorId, 1, contract.name, contract.payload ?? {}, contract.actionId ?? `duplicate-${index}`), questionIndex: 0 };
+    const replay = restored.handleMutation(null, action, Date.now() + index + 1);
+    assert.equal(replay.duplicate, true, contract.name);
+    assert.equal(replay.provisional, false, contract.name);
+    contract.validate(replay.data);
+  }
+
+  assert.equal(state.storage.sql.activeWrites, before.activeWrites);
+  assert.equal(state.storage.sql.archiveWrites, before.archiveWrites);
+  assert.equal(JSON.stringify(restored.getAggregate()), before.state);
+});
+
+test("committed answer duplicates recover edited and forfeited entity ids and archived-safe shapes", async () => {
+  const { state, authority } = createAuthority(1, fakeD1, 2);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const now = Date.now();
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  authority.handleMutation(player, envelope("p0", 1, "submitAnswer", { playerId: "p0", answerText: "first" }, "first-answer"), now + 1);
+  const editedAction = envelope("p0", 2, "submitAnswer", { playerId: "p0", answerText: "edited" }, "edit-action");
+  authority.handleMutation(player, editedAction, now + 2);
+  await authority.forceCheckpoint("phase-boundary");
+  state.sockets.length = 0;
+  const restoredEdit = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restoredEdit.restoreFromStorage();
+  const editedReplay = restoredEdit.handleMutation(null, editedAction, now + 3);
+  assert.equal((editedReplay.data as { id: string }).id, "first-answer");
+  assert.equal((editedReplay.data as { buzzerAnswer: { id: string } }).buzzerAnswer.id, "first-answer:b");
+
+  const forfeitedAction = envelope("p0", 3, "submitForfeitAnswer", { playerId: "p0" }, "forfeit-action");
+  restoredEdit.handleMutation(null, forfeitedAction, now + 4);
+  await restoredEdit.forceCheckpoint("phase-boundary");
+  const restoredForfeit = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restoredForfeit.restoreFromStorage();
+  const forfeitedReplay = restoredForfeit.handleMutation(null, forfeitedAction, now + 5);
+  assert.equal((forfeitedReplay.data as { id: string }).id, "first-answer");
+
+  const cancelAction = envelope("p0", 4, "cancelForfeitAnswer", { playerId: "p0" }, "cancel-action");
+  restoredForfeit.handleMutation(null, cancelAction, now + 6);
+  await restoredForfeit.forceCheckpoint("phase-boundary");
+  const restoredCancel = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restoredCancel.restoreFromStorage();
+  const cancelReplay = restoredCancel.handleMutation(null, cancelAction, now + 7);
+  const cancelData = cancelReplay.data as { gameSession?: GameSession; canceledAnswerId?: string };
+  assert.equal(cancelReplay.duplicate, true);
+  assert.equal(cancelData.gameSession?.id, "g1");
+  assert.ok(cancelData.canceledAnswerId);
+  assert.notEqual(cancelData.canceledAnswerId, "cancel-action");
+
+  enterReview(restoredCancel);
+  const advanceAction = envelope("host", 2, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }, "advance-after-answer");
+  const advanced = restoredCancel.handleMutation(null, advanceAction, now + 8);
+  await restoredCancel.forceCheckpoint(advanced.forceCheckpoint!, advanced.archiveQuestion);
+  const restoredArchived = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restoredArchived.restoreFromStorage();
+  const archivedReplay = restoredArchived.handleMutation(null, editedAction, now + 9);
+  const archivedData = archivedReplay.data as { id?: string; gameSessionId?: string; answerText?: string; buzzerAnswer?: { id?: string } };
+  assert.equal(archivedReplay.duplicate, true);
+  assert.equal(archivedData.id, "edit-action");
+  assert.equal(archivedData.gameSessionId, "g1");
+  assert.equal(archivedData.answerText, "edited");
+  assert.ok(archivedData.buzzerAnswer?.id);
+});
+
 test("terminal rejection replays from Attachment without blocking hibernation restore", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
+  authority.handleMutation(null, envelope("p0", 1, "joinRoom", { nickname: "P0", role: "PLAYER" }), Date.now() - 1);
+  await authority.forceCheckpoint("phase-boundary");
   const rejected = authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "missing", labelText: "bad" }), Date.now());
   assert.equal(rejected.terminal, true);
   const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
   await restored.restoreFromStorage();
   assert.equal(restored.getAggregate()?.seenSeqByActor.host, 1);
-  assert.match(restored.getAggregate()?.terminalRejections["host:1"] ?? "", /参数无效/);
+  assert.match(restored.getAggregate()?.terminalRejections["host:1"] ?? "", /当前题目不存在/);
 });
 
 test("committed terminal rejection keeps the same error after restart", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
   const action = envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "missing", labelText: "bad" });
   const rejected = authority.handleMutation(host, action, Date.now());
   assert.equal(rejected.terminal, true);
@@ -513,6 +693,148 @@ test("RANKED settlement advances only after all chances are resolved", () => {
   assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null);
 });
 
+test("RANKED deadline preserves pending answers until presenter settles manually", async () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "BUZZER_RANKED";
+  const host = socketFor(state, "host");
+  const now = Date.now();
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "pending" }), now + 10);
+  await authority.forceCheckpoint("phase-boundary");
+  const deadline = authority.getDeadline();
+  assert.ok(deadline);
+
+  const expired = await authority.executeDueDeadline(deadline!.runAtMs);
+  assert.ok(expired);
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 1);
+  assert.ok(authority.getAggregate()?.gameSession?.roundStartedAt, "deadline must keep the judgement phase open");
+  assert.equal(authority.getAggregate()?.buzzerAnswers.find((answer) => answer.playerId === "p0")?.status, "pending");
+  const forfeitDelta = expired!.outcome.publicDeltas.find((delta) => delta.type === "answer_progress_changed");
+  assert.ok(forfeitDelta && forfeitDelta.type === "answer_progress_changed");
+  assert.deepEqual(forfeitDelta.answers.map((answer) => [answer.playerId, answer.forfeited]), [["p1", true]]);
+
+  authority.handleMutation(host, envelope("host", 2, "judgeBuzzerAnswer", { presenterPlayerId: "host", buzzerAnswerId: "p0:1:submitBuzzerAnswer", isCorrect: false }), deadline!.runAtMs + 1);
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 1, "judgement alone must not advance the round");
+  authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", { presenterPlayerId: "host" }), deadline!.runAtMs + 2);
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 2);
+  assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null);
+});
+
+test("RANKED all-correct result reveals the answer only after presenter settlement", async () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "BUZZER_RANKED";
+  const host = socketFor(state, "host");
+  const now = Date.now();
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "a" }), now + 10);
+  authority.handleMutation(socketFor(state, "p1"), envelope("p1", 1, "submitBuzzerAnswer", { playerId: "p1", answerText: "b" }), now + 11);
+  authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", {
+    presenterPlayerId: "host",
+    judgements: [
+      { buzzerAnswerId: "p0:1:submitBuzzerAnswer", isCorrect: true },
+      { buzzerAnswerId: "p1:1:submitBuzzerAnswer", isCorrect: true },
+    ],
+  }), now + 3012);
+  assert.equal(authority.getAggregate()?.gameSession?.revealedBlocks.length, 1);
+  assert.ok(authority.getAggregate()?.gameSession?.roundStartedAt);
+
+  await authority.forceCheckpoint("phase-boundary");
+  const deadline = authority.getDeadline();
+  assert.ok(deadline);
+  await authority.executeDueDeadline(deadline!.runAtMs);
+  assert.equal(authority.getAggregate()?.gameSession?.revealedBlocks.length, 1);
+  assert.ok(authority.getAggregate()?.gameSession?.roundStartedAt);
+
+  authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", { presenterPlayerId: "host" }), deadline!.runAtMs + 1);
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 1);
+  assert.equal(authority.getAggregate()?.gameSession?.revealedBlocks.length, 45);
+  assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null);
+});
+
+test("RANKED final-round forfeit settles immediately after another player scored earlier", () => {
+  const { state, authority } = createAuthority(2);
+  authority.getAggregate()!.gameSession!.gameMode = "BUZZER_RANKED";
+  const host = socketFor(state, "host");
+  const p0 = socketFor(state, "p0");
+  const p1 = socketFor(state, "p1");
+  const now = Date.now();
+
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  authority.handleMutation(p0, envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "round-1-a" }), now + 1);
+  authority.handleMutation(p1, envelope("p1", 1, "submitBuzzerAnswer", { playerId: "p1", answerText: "round-1-b" }), now + 2);
+  authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [
+    { buzzerAnswerId: "p0:1:submitBuzzerAnswer", isCorrect: false },
+    { buzzerAnswerId: "p1:1:submitBuzzerAnswer", isCorrect: false },
+  ] }), now + 3003);
+  authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 3004);
+
+  authority.handleMutation(host, envelope("host", 4, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [2] }), now + 3005);
+  authority.handleMutation(p0, envelope("p0", 2, "submitBuzzerAnswer", { playerId: "p0", answerText: "round-2-a" }), now + 3006);
+  authority.handleMutation(p1, envelope("p1", 2, "submitBuzzerAnswer", { playerId: "p1", answerText: "round-2-b" }), now + 3007);
+  authority.handleMutation(host, envelope("host", 5, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [
+    { buzzerAnswerId: "p0:2:submitBuzzerAnswer", isCorrect: true },
+    { buzzerAnswerId: "p1:2:submitBuzzerAnswer", isCorrect: false },
+  ] }), now + 6008);
+  authority.handleMutation(host, envelope("host", 6, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 6009);
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 3);
+
+  authority.handleMutation(host, envelope("host", 7, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [3] }), now + 6010);
+  authority.handleMutation(p1, envelope("p1", 3, "submitForfeitAnswer", { playerId: "p1" }), now + 6011);
+  const settled = authority.handleMutation(host, envelope("host", 8, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 6012);
+
+  assert.equal(settled.forceCheckpoint, "phase-boundary");
+  assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 3);
+  assert.equal(authority.getAggregate()?.gameSession?.revealedBlocks.length, 45);
+  assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null);
+  assert.equal(authority.getAggregate()?.answers.some((answer) => answer.revealRound === 3 && answer.playerId === "p0"), false);
+});
+
+test("RANKED scores use stable correct order across rounds and fully recompute after rejudgement", () => {
+  const { state, authority } = createAuthority(3);
+  authority.getAggregate()!.gameSession!.gameMode = "BUZZER_RANKED";
+  const host = socketFor(state, "host");
+  const p0 = socketFor(state, "p0");
+  const p1 = socketFor(state, "p1");
+  const p2 = socketFor(state, "p2");
+  const now = Date.now();
+
+  authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+  authority.handleMutation(p0, envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "first" }), now + 1);
+  authority.handleMutation(p1, envelope("p1", 1, "submitBuzzerAnswer", { playerId: "p1", answerText: "wrong" }), now + 2);
+  authority.handleMutation(p2, envelope("p2", 1, "submitBuzzerAnswer", { playerId: "p2", answerText: "wrong" }), now + 3);
+  authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [
+    { buzzerAnswerId: "p0:1:submitBuzzerAnswer", isCorrect: true },
+    { buzzerAnswerId: "p1:1:submitBuzzerAnswer", isCorrect: false },
+    { buzzerAnswerId: "p2:1:submitBuzzerAnswer", isCorrect: false },
+  ] }), now + 3004);
+  authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 3005);
+
+  authority.handleMutation(host, envelope("host", 4, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [2] }), now + 3006);
+  authority.handleMutation(p1, envelope("p1", 2, "submitBuzzerAnswer", { playerId: "p1", answerText: "second" }), now + 3007);
+  authority.handleMutation(p2, envelope("p2", 2, "submitBuzzerAnswer", { playerId: "p2", answerText: "third" }), now + 3008);
+  authority.handleMutation(host, envelope("host", 5, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [
+    { buzzerAnswerId: "p1:2:submitBuzzerAnswer", isCorrect: true },
+    { buzzerAnswerId: "p2:2:submitBuzzerAnswer", isCorrect: true },
+  ] }), now + 6009);
+
+  assert.deepEqual(authority.getAggregate()!.scores.map((score) => [score.playerId, score.score]), [["p0", 3], ["p1", 2], ["p2", 1]]);
+  assert.deepEqual(authority.getAggregate()!.questionResults.map((result) => [result.playerId, result.scoredRound, result.scoreAwarded]), [["p0", 1, 3], ["p1", 2, 2], ["p2", 2, 1]]);
+
+  const rejudged = authority.handleMutation(host, envelope("host", 6, "judgeBuzzerAnswer", { presenterPlayerId: "host", buzzerAnswerId: "p1:2:submitBuzzerAnswer", isCorrect: false }), now + 6010);
+  assert.deepEqual(authority.getAggregate()!.scores.map((score) => [score.playerId, score.score, score.correctCount]), [["p0", 3, 1], ["p1", 0, 0], ["p2", 2, 1]]);
+  assert.deepEqual(authority.getAggregate()!.questionResults.map((result) => [result.playerId, result.scoredRound, result.scoreAwarded]), [["p0", 1, 3], ["p2", 2, 2]]);
+  assert.deepEqual(authority.getAggregate()!.buzzerAnswers.filter((answer) => answer.status === "correct").map((answer) => [answer.playerId, answer.scoreAwarded]), [["p0", 3], ["p2", 2]]);
+  const publicProgress = rejudged.publicDeltas.find((delta) => delta.type === "answer_progress_changed");
+  assert.ok(publicProgress && publicProgress.type === "answer_progress_changed");
+  assert.deepEqual(publicProgress.buzzerAnswers.map((answer) => [answer.playerId, answer.status, answer.scoreAwarded]), [["p1", "wrong", 0], ["p2", "correct", 2]]);
+  assert.equal(JSON.stringify(publicProgress).includes("second"), false);
+  assert.equal(JSON.stringify(publicProgress).includes("third"), false);
+  assert.deepEqual(rejudged.playerDeltas.map((delivery) => [delivery.playerId, delivery.delta.type === "answer_judgements_changed" ? delivery.delta.answers[0].scoreAwarded : null]), [["p1", 0], ["p2", 2]]);
+  assert.equal(JSON.stringify(rejudged.playerDeltas.find((delivery) => delivery.playerId === "p2")).includes("second"), false);
+});
+
 test("ROUND_REVEAL settlement returns to block selection before the next round", () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
@@ -536,9 +858,81 @@ test("ROUND_REVEAL settlement returns to block selection before the next round",
   assert.ok(authority.getAggregate()?.gameSession?.roundStartedAt);
 });
 
+test("advance requires review while explicit skip still ends the current question", () => {
+  const { state, authority } = createAuthority(1, fakeD1, 2);
+  const host = socketFor(state, "host");
+  const now = Date.now();
+  const advanced = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }), now);
+  assert.equal(advanced.terminal, true);
+  assert.match(advanced.error ?? "", /完整图片复盘阶段/);
+  assert.equal(authority.getAggregate()?.gameSession?.currentQuestionIndex, 0);
+
+  const skipped = authority.handleMutation(host, envelope("host", 2, "skipCurrentQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }), now + 1);
+  assert.equal(skipped.error, undefined);
+  assert.equal(skipped.forceCheckpoint, "phase-boundary");
+  assert.equal(authority.getAggregate()?.gameSession?.currentQuestionIndex, 1);
+});
+
+test("question labels enforce review, current question, immutability, and answer ownership", () => {
+  {
+    const { state, authority } = createAuthority(1);
+    const rejected = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "answer", source: "manual" }), Date.now());
+    assert.match(rejected.error ?? "", /完整图片复盘阶段/);
+  }
+  {
+    const { state, authority } = createAuthority(1, fakeD1, 2);
+    enterReview(authority);
+    const rejected = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q2", labelText: "answer", source: "manual" }), Date.now());
+    assert.match(rejected.error ?? "", /当前题目不存在/);
+  }
+  {
+    const { state, authority } = createAuthority(1);
+    authority.getAggregate()!.questions[0].labelText = "existing";
+    enterReview(authority);
+    const rejected = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "replacement", source: "manual" }), Date.now());
+    assert.match(rejected.error ?? "", /不能重复填写/);
+    assert.equal(authority.getAggregate()!.questions[0].labelText, "existing");
+  }
+  {
+    const { state, authority } = createAuthority(1);
+    const aggregate = authority.getAggregate()!;
+    enterReview(authority);
+    aggregate.answers.push({ id: "foreign-ordinary", gameSessionId: "other-game", questionIndex: 0, revealRound: 1, playerId: "p0", answerText: "foreign", submittedAt: new Date().toISOString() });
+    aggregate.buzzerAnswers.push({ id: "foreign-buzzer", gameSessionId: "other-game", questionIndex: 0, revealRound: 1, playerId: "p0", answerText: "foreign", status: "correct", scoreAwarded: 1, submittedAt: new Date().toISOString(), serverReceivedAt: new Date().toISOString() });
+    const host = socketFor(state, "host");
+    const ordinaryRejected = authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "answer", source: "answer", answerId: "foreign-ordinary" }), Date.now());
+    assert.match(ordinaryRejected.error ?? "", /引用的答案不存在/);
+    const buzzerRejected = authority.handleMutation(host, envelope("host", 2, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "answer", source: "answer", answerId: "foreign-buzzer" }), Date.now() + 1);
+    assert.match(buzzerRejected.error ?? "", /引用的答案不存在/);
+  }
+  {
+    const { state, authority } = createAuthority(1);
+    const host = socketFor(state, "host");
+    authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), Date.now());
+    authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "submitAnswer", { playerId: "p0", answerText: "ordinary" }), Date.now());
+    enterReview(authority);
+    const saved = authority.handleMutation(host, envelope("host", 2, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "ordinary", source: "answer", answerId: "p0:1:submitAnswer" }), Date.now() + 1);
+    assert.equal(saved.error, undefined);
+    assert.equal(authority.getAggregate()!.questions[0].labelSourceAnswerId, "p0:1:submitAnswer");
+    assert.equal(saved.publicDeltas[0]?.type, "question_label_updated");
+  }
+  {
+    const { state, authority } = createAuthority(1);
+    const host = socketFor(state, "host");
+    authority.getAggregate()!.gameSession!.gameMode = "BUZZER_RANKED";
+    authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), Date.now());
+    authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "buzzer" }), Date.now());
+    enterReview(authority);
+    const saved = authority.handleMutation(host, envelope("host", 2, "updateQuestionLabel", { presenterPlayerId: "host", questionId: "q1", labelText: "buzzer", source: "answer", answerId: "p0:1:submitBuzzerAnswer" }), Date.now() + 1);
+    assert.equal(saved.error, undefined);
+    assert.equal(authority.getAggregate()!.questions[0].labelSourceAnswerId, "p0:1:submitBuzzerAnswer");
+  }
+});
+
 test("game completion broadcasts both final results and GAME_RESULT room state", () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
+  enterReview(authority);
   const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
     presenterPlayerId: "host",
     expectedQuestionIndex: 0,
@@ -558,6 +952,7 @@ test("players can leave an ended vNext game and roster projection is forced", as
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
   const player = socketFor(state, "p0");
+  enterReview(authority);
   const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
     presenterPlayerId: "host",
     expectedQuestionIndex: 0,
@@ -582,11 +977,13 @@ test("ended room mutations ignore a stale question index", () => {
   const host = socketFor(state, "host");
   const player = socketFor(state, "p0");
   const now = Date.now();
+  enterReview(authority);
   const advanced = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
     presenterPlayerId: "host",
     expectedQuestionIndex: 0,
   }), now);
   assert.equal(advanced.error, undefined);
+  enterReview(authority);
   const ended = authority.handleMutation(host, {
     ...envelope("host", 2, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 1 }),
     questionIndex: 1,
@@ -611,6 +1008,7 @@ test("game result snapshot and final projection retain labels saved before quest
   const { state, authority } = createAuthority(1, d1, 2);
   const host = socketFor(state, "host");
   const now = Date.now();
+  enterReview(authority);
 
   authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", {
     presenterPlayerId: "host",
@@ -623,13 +1021,13 @@ test("game result snapshot and final projection retain labels saved before quest
     expectedQuestionIndex: 0,
   }), now + 1);
   await authority.forceCheckpoint(advanced.forceCheckpoint ?? "phase-boundary", true);
+  enterReview(authority);
   authority.handleMutation(host, {
     ...envelope("host", 3, "updateQuestionLabel", {
       presenterPlayerId: "host",
       questionId: "q2",
       labelText: "第二题答案",
-      source: "answer",
-      answerId: "answer-2",
+      source: "manual",
     }),
     questionIndex: 1,
   }, now + 2);
@@ -663,6 +1061,7 @@ test("ended host leave projects host transfer and the final player dissolves the
   const { state, authority } = createAuthority(1, d1);
   const host = socketFor(state, "host");
   const player = socketFor(state, "p0");
+  enterReview(authority);
   const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
     presenterPlayerId: "host",
     expectedQuestionIndex: 0,
@@ -794,6 +1193,7 @@ test("leaderboard and final projection include participants but exclude presente
   assert.deepEqual(authority.query("getPlayerScores", ["g1"]).map((score: { playerId: string }) => score.playerId), ["p0"]);
   assert.deepEqual(authority.query("getQuestionResultsForGameSession", ["g1"]), []);
   assert.deepEqual(authority.getSnapshot().questionResults, []);
+  enterReview(authority);
   const ended = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "advanceReviewedQuestion", {
     presenterPlayerId: "host",
     expectedQuestionIndex: 0,
@@ -826,6 +1226,33 @@ test("TEAM_BATTLE skip advances both turn and reveal round", () => {
   assert.equal(authority.getAggregate()?.gameSession?.teamBattleState?.turnNumber, 2);
   assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 2);
   assert.equal(authority.getAggregate()?.gameSession?.teamBattleState?.activeTeam, "blue");
+});
+
+test("TEAM_BATTLE reveal vote randomly selects within a highest-vote tie", () => {
+  const { state, authority } = createAuthority(3, fakeD1, 1, () => 0);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] }, initialTeams: { red: ["p0", "p1"], blue: ["p2"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    voteDeadlineAt: new Date(1000).toISOString(), revealVotes: { p0: [0], p1: [1] }, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 1000);
+  assert.equal(aggregate.gameSession!.revealedBlocks.length, 1);
+  assert.ok([0, 1].includes(aggregate.gameSession!.revealedBlocks[0]));
+  assert.match(aggregate.gameSession!.teamBattleState!.message ?? "", /多个方块同票，随机选择/);
+});
+
+test("TEAM_BATTLE guess vote randomly selects within a highest-vote tie", () => {
+  const { state, authority } = createAuthority(3, fakeD1, 1, () => 0);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] }, initialTeams: { red: ["p0", "p1"], blue: ["p2"] }, activeTeam: "red", phase: "GUESS_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    voteDeadlineAt: new Date(1000).toISOString(), revealVotes: {}, guessVotes: { p0: { type: "skip" }, p1: { type: "guess", answerText: "答案" } }, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 1000);
+  assert.equal(aggregate.gameSession!.teamBattleState!.previousTurnAction?.type, "skip");
+  assert.match(aggregate.gameSession!.teamBattleState!.message ?? "", /最高票选项票数相同，随机选择了不猜/);
 });
 
 test("initializing cutover survives restart with its idempotency parameters", async () => {

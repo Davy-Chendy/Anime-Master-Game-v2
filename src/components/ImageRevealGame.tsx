@@ -1827,6 +1827,43 @@ export function ImageRevealGame({
         return;
       }
 
+      if (delta.scope === "game" && delta.type === "answer_progress_changed") {
+        const activeSession = gameSessionRef.current;
+        if (!activeSession || activeSession.id !== room.currentGameId) return;
+        const didApplyGameSession = delta.gameSession ? applyGameSessionDelta(delta.gameSession) : true;
+        if (!didApplyGameSession) return;
+        const canceledPlayerIds = new Set(delta.canceledPlayerIds ?? []);
+        setAnswers((currentAnswers) => {
+          let nextAnswers = currentAnswers.filter((answer) => !canceledPlayerIds.has(answer.playerId));
+          for (const progress of delta.answers) {
+            if (progress.gameSessionId !== activeSession.id || progress.questionIndex !== activeSession.currentQuestionIndex || progress.revealRound !== activeSession.currentRevealRound) continue;
+            const existing = nextAnswers.find((answer) => answer.id === progress.id);
+            nextAnswers = upsertBySubmittedAt(nextAnswers, {
+              ...progress,
+              answerText: progress.forfeited ? FORFEIT_ANSWER_TEXT : existing?.answerText ?? "",
+            });
+          }
+          return nextAnswers;
+        });
+        setBuzzerAnswers((currentAnswers) => {
+          let nextAnswers = currentAnswers.filter((answer) => !canceledPlayerIds.has(answer.playerId));
+          for (const progress of delta.buzzerAnswers) {
+            if (progress.gameSessionId !== activeSession.id || progress.questionIndex !== activeSession.currentQuestionIndex || progress.revealRound !== activeSession.currentRevealRound) continue;
+            const existing = nextAnswers.find((answer) => answer.id === progress.id);
+            nextAnswers = upsertBySubmittedAt(nextAnswers, { ...progress, answerText: existing?.answerText ?? "" });
+          }
+          return nextAnswers;
+        });
+        if (delta.scores.length) {
+          setScores((currentScores) => delta.scores.reduce((nextScores, score) => upsertById(nextScores, score), currentScores));
+        }
+        setQuestionResults((currentResults) => delta.questionResults.reduce(
+          (nextResults, result) => upsertById(nextResults, result),
+          currentResults.filter((result) => !delta.removedQuestionResultPlayerIds?.includes(result.playerId)),
+        ));
+        return;
+      }
+
       const currentGameSession = gameSessionRef.current;
       if (delta.scope === "game" && delta.type === "answer_submitted" && currentGameSession?.id === delta.answer.gameSessionId) {
         if (

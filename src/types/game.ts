@@ -268,6 +268,12 @@ export type GameResultSnapshot = {
   questionResults: QuestionResult[];
 };
 
+export type PublicAnswerProgress = Omit<Answer, "answerText"> & {
+  forfeited: boolean;
+};
+
+export type PublicBuzzerAnswerProgress = Omit<BuzzerAnswer, "answerText">;
+
 export type RealtimeDelta =
   | {
       scope: "room";
@@ -327,6 +333,17 @@ export type RealtimeDelta =
       type: "answer_judgements_changed";
       gameSession?: GameSession;
       answers: BuzzerAnswer[];
+      scores: PlayerScore[];
+      questionResults: QuestionResult[];
+      removedQuestionResultPlayerIds?: string[];
+    }
+  | {
+      scope: "game";
+      type: "answer_progress_changed";
+      gameSession?: GameSession;
+      answers: PublicAnswerProgress[];
+      buzzerAnswers: PublicBuzzerAnswerProgress[];
+      canceledPlayerIds?: string[];
       scores: PlayerScore[];
       questionResults: QuestionResult[];
       removedQuestionResultPlayerIds?: string[];
