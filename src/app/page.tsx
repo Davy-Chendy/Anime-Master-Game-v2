@@ -15,6 +15,71 @@ const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 
+function MaintenanceAnnouncement() {
+  const [isOpen, setIsOpen] = useState(true);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setIsOpen(false);
+      if (event.key === "Tab") {
+        event.preventDefault();
+        document.getElementById("maintenance-announcement-dismiss")?.focus();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-slate-950/55 px-4 py-6">
+      <section
+        aria-describedby="maintenance-announcement-description maintenance-announcement-time"
+        aria-labelledby="maintenance-announcement-title"
+        aria-modal="true"
+        className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.28)] sm:p-7"
+        role="dialog"
+      >
+        <div className="flex h-11 w-11 items-center justify-center rounded-full bg-rose-50 text-[var(--primary)]">
+          <svg aria-hidden="true" className="h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path d="M12 8v4.5m0 3.5h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+          </svg>
+        </div>
+
+        <h2 className="mt-5 text-2xl font-bold text-slate-950" id="maintenance-announcement-title">
+          维护公告
+        </h2>
+        <p className="mt-3 text-base leading-7 text-[var(--foreground)]" id="maintenance-announcement-description">
+          游戏服务正在进行维护更新，目前暂停使用，预计明天上午 8:00 恢复。
+        </p>
+        <p className="mt-5 border-t border-[var(--line)] pt-4 text-sm text-[var(--muted)]" id="maintenance-announcement-time">
+          发布时间：2026年7月27日 15:00
+        </p>
+
+        <Button
+          autoFocus
+          className="mt-6 w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-600 focus-visible:ring-offset-2"
+          id="maintenance-announcement-dismiss"
+          onClick={() => setIsOpen(false)}
+          type="button"
+        >
+          我知道了
+        </Button>
+      </section>
+    </div>
+  );
+}
+
 function isPlayerCapacityError(errorCode: string | null | undefined) {
   return errorCode === PLAYER_CAPACITY_FULL_ERROR_CODE;
 }
@@ -230,6 +295,7 @@ export default function HomePage() {
 
   return (
     <AppShell>
+      <MaintenanceAnnouncement />
       <div className="grid min-h-[calc(100vh-64px)] content-center gap-6">
         <div className="grid items-center gap-8 lg:grid-cols-[1.1fr_0.9fr]">
           <section>
