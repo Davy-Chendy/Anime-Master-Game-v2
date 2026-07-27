@@ -24,6 +24,7 @@ import {
   returnRoomToLobby,
   selectPresenterForRound,
   startGameWithQuestionSet,
+  updateRoomGameSettings,
   updatePlayerRole,
 } from "@/lib/cloudflareRooms";
 import type {
@@ -48,6 +49,9 @@ const statusText: Record<RoomStatus, string> = {
   GAME_RESULT: "本局结算",
 };
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const START_GAME_ATTEMPT_STORAGE_PREFIX = "anime-master:start-game-attempt:";
+const START_GAME_ATTEMPT_TTL_MS = 30 * 60 * 1000;
+const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
 const gameResultSnapshotCache = new Map<string, GameResultSnapshot>();
 
 type GameSettings = {
@@ -56,6 +60,108 @@ type GameSettings = {
   roundSeconds: number;
   roundScores: number[];
 };
+
+const defaultGameSettings: GameSettings = {
+  gameMode: "ROUND_REVEAL",
+  maxRevealRounds: 3,
+  roundSeconds: 45,
+  roundScores: [5, 3, 1],
+};
+
+function createStartRequestId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `start_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+type StartGameAttempt = {
+  key: string;
+  requestId: string;
+  createdAt: number;
+};
+
+function getStoredStartGameAttempt(roomId: string): StartGameAttempt | null {
+  try {
+    const storageKey = `${START_GAME_ATTEMPT_STORAGE_PREFIX}${roomId}`;
+    const value = window.sessionStorage.getItem(storageKey);
+    if (!value) {
+      return null;
+    }
+
+    const parsed = JSON.parse(value) as { key?: unknown; requestId?: unknown; createdAt?: unknown };
+    if (
+      typeof parsed.key === "string" &&
+      typeof parsed.requestId === "string" &&
+      typeof parsed.createdAt === "number" &&
+      Date.now() - parsed.createdAt < START_GAME_ATTEMPT_TTL_MS
+    ) {
+      return { key: parsed.key, requestId: parsed.requestId, createdAt: parsed.createdAt };
+    }
+
+    window.sessionStorage.removeItem(storageKey);
+  } catch {
+    // sessionStorage may be unavailable in restricted browsing modes.
+  }
+
+  return null;
+}
+
+function storeStartGameAttempt(roomId: string, attempt: StartGameAttempt | null) {
+  try {
+    const storageKey = `${START_GAME_ATTEMPT_STORAGE_PREFIX}${roomId}`;
+    if (attempt) {
+      window.sessionStorage.setItem(storageKey, JSON.stringify(attempt));
+    } else {
+      window.sessionStorage.removeItem(storageKey);
+    }
+  } catch {
+    // The in-memory ref still preserves retries while this page remains mounted.
+  }
+}
+
+function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
+  const rawMaxRevealRounds =
+    typeof settings.maxRevealRounds === "number" && Number.isFinite(settings.maxRevealRounds)
+      ? settings.maxRevealRounds
+      : defaultGameSettings.maxRevealRounds;
+  const rawRoundSeconds =
+    typeof settings.roundSeconds === "number" && Number.isFinite(settings.roundSeconds)
+      ? settings.roundSeconds
+      : defaultGameSettings.roundSeconds;
+  const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(rawMaxRevealRounds)));
+  const sourceScores = Array.isArray(settings.roundScores) ? settings.roundScores : defaultGameSettings.roundScores;
+
+  return {
+    gameMode: settings.gameMode ?? defaultGameSettings.gameMode,
+    maxRevealRounds,
+    roundSeconds: Math.max(1, Math.min(600, Math.floor(rawRoundSeconds))),
+    roundScores: Array.from({ length: maxRevealRounds }, (_, index) => {
+      const score = sourceScores[index] ?? Math.max(1, maxRevealRounds - index);
+      return Math.max(0, Math.floor(typeof score === "number" && Number.isFinite(score) ? score : 0));
+    }),
+  };
+}
+
+function getRoomGameSettings(room: Room | null | undefined): GameSettings {
+  return normalizeGameSettings({
+    gameMode: room?.gameMode,
+    maxRevealRounds: room?.maxRevealRounds,
+    roundSeconds: room?.roundSeconds,
+    roundScores: room?.roundScores,
+  });
+}
+
+function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
+  return (
+    left.gameMode === right.gameMode &&
+    left.maxRevealRounds === right.maxRevealRounds &&
+    left.roundSeconds === right.roundSeconds &&
+    left.roundScores.length === right.roundScores.length &&
+    left.roundScores.every((score, index) => score === right.roundScores[index])
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -165,7 +271,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
       "玩家在倒计时内提交答案",
-      "猜中得当前轮分数，默认 3/2/1 分",
+      "猜中得当前轮分数，默认 5/3/1 分",
     ],
   },
   BUZZER_FIRST_CORRECT: {
@@ -271,6 +377,12 @@ function getResultRankStyles(rank: number) {
     row: "",
     badge: "bg-white text-slate-600 ring-[var(--line)]",
   };
+}
+
+function getCompetitionRankByScore<T extends { score: number }>(rows: T[], index: number): number {
+  const previousRow = rows[index - 1];
+
+  return previousRow && previousRow.score === rows[index].score ? getCompetitionRankByScore(rows, index - 1) : index + 1;
 }
 
 function getQuestionScoreClass(score: number, maxScore: number) {
@@ -475,7 +587,7 @@ function PresenterPicker({
           >
             <span className="min-w-0">
               <span className="block truncate text-sm font-semibold text-slate-950">{player.nickname}</span>
-              <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主也可以出题" : "玩家"}</span>
+              <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主" : "玩家"}</span>
             </span>
             <span className="shrink-0 text-sm font-semibold text-[var(--primary)]">
               {pendingPresenterId === player.id ? "选择中…" : "选择"}
@@ -840,7 +952,7 @@ function GameSettingsPanel({
                 type="number"
                 value={settings.roundSeconds}
                 onChange={(event) =>
-                  onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 60)) })
+                  onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 45)) })
                 }
               />
             </label>
@@ -983,9 +1095,14 @@ function GameResultPanel({
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
   const [ratingValue, setRatingValue] = useState(5);
   const [isRating, setIsRating] = useState(false);
+  const [isQuestionBrowserOpen, setIsQuestionBrowserOpen] = useState(false);
 
   const playerIds = useMemo(() => getGamePlayers(room.players).map((player) => player.id), [room.players]);
   const canRateQuestionSet = room.players.find((player) => player.id === playerId)?.role === "PLAYER";
+  const questionPreviewItems = useMemo(
+    () => (questionSet?.questions ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex),
+    [questionSet?.questions],
+  );
 
   useEffect(() => {
     if (!room.id || !currentGameId) {
@@ -1161,6 +1278,21 @@ function GameResultPanel({
     });
   }, [currentGameId, playerId, questionSet?.id, room.id]);
 
+  useEffect(() => {
+    if (!isQuestionBrowserOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsQuestionBrowserOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isQuestionBrowserOpen]);
+
   async function handleRateQuestionSet() {
     if (!questionSet || !room.id) {
       return;
@@ -1234,6 +1366,10 @@ function GameResultPanel({
           questionScores: questionIndexes.map((questionIndex) => scoreByTeamQuestion.get(`${team}:${questionIndex}`) ?? 0),
         }))
         .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+        .map((row, index, rows) => ({
+          ...row,
+          rank: getCompetitionRankByScore(rows, index),
+        }))
     : [];
   const playerRows = leaderboard.map((entry) => ({
     ...entry,
@@ -1301,13 +1437,23 @@ function GameResultPanel({
               {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
             </p>
           </div>
-          {isHost ? (
-            <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-              {isReturningToLobby ? "返回中…" : "回到房间大厅"}
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setIsQuestionBrowserOpen(true)}
+              disabled={questionPreviewItems.length === 0}
+            >
+              浏览题库
             </Button>
-          ) : (
-            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作</p>
-          )}
+            {isHost ? (
+              <Button className="sm:ml-auto" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
+                {isReturningToLobby ? "返回中…" : "回到房间大厅"}
+              </Button>
+            ) : (
+              <p className="text-sm font-medium text-[var(--muted)] sm:ml-auto">等待房主操作</p>
+            )}
+          </div>
         </Panel>
       </div>
 
@@ -1345,13 +1491,13 @@ function GameResultPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--line)] text-slate-700">
-                {teamRows.map((row, index) => {
-                  const rank = index + 1;
+                {teamRows.map((row) => {
+                  const rank = row.rank;
                   const styles = getTeamStyles(row.team);
                   const rankStyles = getResultRankStyles(rank);
 
                   return (
-                    <tr className={[rankStyles.row, index === 0 ? styles.panel : "", "transition hover:bg-slate-50"].join(" ")} key={row.team}>
+                    <tr className={[rankStyles.row, rank === 1 ? styles.panel : "", "transition hover:bg-slate-50"].join(" ")} key={row.team}>
                       <td className="px-4 py-3">
                         <span
                           className={[
@@ -1465,6 +1611,71 @@ function GameResultPanel({
           </div>
         )}
       </Panel>
+
+      {isQuestionBrowserOpen ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 px-4 py-6"
+          role="presentation"
+          onMouseDown={() => setIsQuestionBrowserOpen(false)}
+        >
+          <div
+            aria-modal="true"
+            className="flex max-h-[calc(100dvh-48px)] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl"
+            role="dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold text-slate-950">浏览题库</h2>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  {questionSet?.title ? `${questionSet.title} · ${questionPreviewItems.length} 题` : `${questionPreviewItems.length} 题`}
+                </p>
+              </div>
+              <button
+                aria-label="关闭浏览题库弹窗"
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-[var(--line)] text-xl leading-none text-slate-500 transition hover:bg-slate-50"
+                type="button"
+                onClick={() => setIsQuestionBrowserOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="min-h-0 overflow-y-auto px-5 py-4">
+              {questionPreviewItems.length > 0 ? (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {questionPreviewItems.map((question, index) => (
+                    <article className="overflow-hidden rounded-md border border-[var(--line)] bg-slate-50" key={question.id}>
+                      <div className="aspect-video bg-slate-950">
+                        <img
+                          alt={`第 ${index + 1} 题图片`}
+                          className="h-full w-full object-contain"
+                          loading="lazy"
+                          src={question.imageUrl}
+                        />
+                      </div>
+                      <div className="px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-bold text-slate-950">Q{index + 1}</p>
+                          {question.labelText ? (
+                            <span className="truncate text-xs font-semibold text-[var(--primary)]" title={question.labelText}>
+                              {question.labelText}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-md border border-[var(--line)] bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">
+                  当前没有可浏览的题目图片
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1490,15 +1701,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
   const [pendingKickPlayerId, setPendingKickPlayerId] = useState("");
+  const settingsUpdateSeqRef = useRef(0);
+  const startGameAttemptRef = useRef<StartGameAttempt | null>(null);
   const lastRoomRealtimeVersionRef = useRef<number | null>(null);
   const missedRoomRealtimeVersionRef = useRef(false);
   const roomCatchUpTargetVersionRef = useRef<number | null>(null);
-  const [gameSettings, setGameSettings] = useState<GameSettings>({
-    gameMode: "ROUND_REVEAL",
-    maxRevealRounds: 3,
-    roundSeconds: 60,
-    roundScores: [3, 2, 1],
-  });
+  const [gameSettings, setGameSettings] = useState<GameSettings>(defaultGameSettings);
+
+  useEffect(() => {
+    if (room?.status !== "QUESTION_SETUP") {
+      startGameAttemptRef.current = null;
+      if (room?.id) {
+        storeStartGameAttempt(room.id, null);
+      }
+    }
+  }, [room?.id, room?.status]);
 
   useEffect(() => {
     if (!error) {
@@ -1542,6 +1759,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
 
         const existingMember = latestRoom.players.find((player) => player.id === session.playerId);
+        if (existingMember) {
+          saveLocalSession({
+            playerId: session.playerId,
+            nickname: existingMember.nickname,
+            roomCode,
+            isHost: latestRoom.hostPlayerId === session.playerId,
+          });
+
+          if (isMounted) {
+            setNickname(existingMember.nickname);
+            setRoom(latestRoom);
+          }
+          return;
+        }
+
         if (!existingMember && latestRoom.status === "PLAYING") {
           saveLocalSession({
             playerId: session.playerId,
@@ -1562,7 +1794,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           const isCapacityFull = isPlayerCapacityError(joined.errorCode);
           if (isMounted) {
             setError(isCapacityFull ? "" : joined.error ?? "没有找到房间");
-            setRoom(isCapacityFull ? latestRoom : null);
+            setRoom(latestRoom);
           }
           return;
         }
@@ -1658,6 +1890,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
 
     let refreshPromise: Promise<void> | null = null;
+    let refreshRetryTimer: number | null = null;
+    let refreshRetryAttempt = 0;
     lastRoomRealtimeVersionRef.current = null;
     missedRoomRealtimeVersionRef.current = false;
     roomCatchUpTargetVersionRef.current = null;
@@ -1670,9 +1904,24 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       );
     }
 
+    function scheduleRoomCatchUpRetry(delay: number) {
+      if (!isActive || refreshRetryTimer != null) {
+        return;
+      }
+      refreshRetryTimer = window.setTimeout(() => {
+        refreshRetryTimer = null;
+        if (isActive && missedRoomRealtimeVersionRef.current) {
+          void refreshLatestRoom();
+        }
+      }, delay);
+    }
+
     async function refreshLatestRoom() {
       if (refreshPromise) {
         return refreshPromise;
+      }
+      if (refreshRetryTimer != null) {
+        return;
       }
 
       const startTargetVersion = roomCatchUpTargetVersionRef.current;
@@ -1681,12 +1930,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         refreshPromise = null;
       });
       void runPromise.then((didRefresh) => {
-        if (didRefresh && isActive && shouldContinueRoomCatchUp(startTargetVersion)) {
-          window.setTimeout(() => {
-            if (isActive) {
-              void refreshLatestRoom();
-            }
-          }, 0);
+        if (!isActive) {
+          return;
+        }
+        if (didRefresh) {
+          refreshRetryAttempt = 0;
+          if (shouldContinueRoomCatchUp(startTargetVersion)) {
+            scheduleRoomCatchUpRetry(0);
+          }
+          return;
+        }
+        if (missedRoomRealtimeVersionRef.current) {
+          const baseRetryDelay = Math.min(15000, 500 * 2 ** Math.min(refreshRetryAttempt, 5));
+          const retryDelay = Math.round(baseRetryDelay * (0.8 + Math.random() * 0.4));
+          refreshRetryAttempt += 1;
+          scheduleRoomCatchUpRetry(retryDelay);
         }
       });
       return refreshPromise;
@@ -1725,12 +1983,18 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
     }
 
-    let hasOpenedRealtime = false;
-
     const unsubscribe = subscribeRealtimeTopic(
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        if (message.name === "authorityRecovered") {
+          missedRoomRealtimeVersionRef.current = true;
+          if (messageVersion != null) {
+            roomCatchUpTargetVersionRef.current = Math.max(roomCatchUpTargetVersionRef.current ?? 0, messageVersion);
+          }
+          void refreshLatestRoom();
+          return;
+        }
         if (messageVersion != null) {
           const lastVersion = lastRoomRealtimeVersionRef.current;
           if (lastVersion != null && messageVersion <= lastVersion) {
@@ -1774,11 +2038,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       },
       {
         onOpen: () => {
-          if (!hasOpenedRealtime) {
-            hasOpenedRealtime = true;
-            return;
-          }
-
+          missedRoomRealtimeVersionRef.current = true;
           void refreshLatestRoom();
         },
       },
@@ -1786,6 +2046,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
     return () => {
       isActive = false;
+      if (refreshRetryTimer != null) {
+        window.clearTimeout(refreshRetryTimer);
+      }
       unsubscribe();
     };
   }, [playerId, room?.id, roomCode]);
@@ -1804,6 +2067,13 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
+
+  useEffect(() => {
+    setGameSettings((currentSettings) => {
+      const roomSettings = getRoomGameSettings(room);
+      return areGameSettingsEqual(currentSettings, roomSettings) ? currentSettings : roomSettings;
+    });
+  }, [room]);
 
   async function handleExitRoom() {
     if (!room?.id || !playerId || (room.status === "PLAYING" && isCurrentPresenter)) {
@@ -2005,25 +2275,112 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
   }
 
+  async function handleGameSettingsChange(nextSettings: GameSettings) {
+    if (!room?.id || !playerId || !isHost || (room.status !== "LOBBY" && room.status !== "QUESTION_SETUP")) {
+      return;
+    }
+
+    const normalizedSettings = normalizeGameSettings(nextSettings);
+    if (areGameSettingsEqual(normalizedSettings, gameSettings)) {
+      return;
+    }
+
+    const updateSeq = settingsUpdateSeqRef.current + 1;
+    settingsUpdateSeqRef.current = updateSeq;
+    setGameSettings(normalizedSettings);
+    setError("");
+
+    try {
+      const nextRoom = await updateRoomGameSettings({
+        roomId: room.id,
+        hostPlayerId: playerId,
+        gameMode: normalizedSettings.gameMode,
+        maxRevealRounds: normalizedSettings.maxRevealRounds,
+        roundSeconds: normalizedSettings.roundSeconds,
+        roundScores: normalizedSettings.roundScores,
+      });
+
+      if (settingsUpdateSeqRef.current === updateSeq) {
+        setRoom((currentRoom) =>
+          currentRoom
+            ? {
+                ...currentRoom,
+                ...nextRoom,
+                players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
+              }
+            : nextRoom,
+        );
+      }
+    } catch (caughtError) {
+      if (settingsUpdateSeqRef.current === updateSeq) {
+        setGameSettings(getRoomGameSettings(room));
+        setError(caughtError instanceof Error ? caughtError.message : "修改游戏模式失败，请稍后重试");
+      }
+    }
+  }
+
   async function handleStartGame() {
     if (!room?.id || !playerId || !isHost || room.status !== "QUESTION_SETUP" || !room.currentPresenterPlayerId || !room.preparedQuestionSetId) {
       return;
     }
 
+    const roomId = room.id;
+    const presenterPlayerId = room.currentPresenterPlayerId;
+    const questionSetId = room.preparedQuestionSetId;
+
     setIsStartingGame(true);
     setError("");
 
     try {
-      const started = await startGameWithQuestionSet({
-        roomId: room.id,
-        hostPlayerId: playerId,
-        presenterPlayerId: room.currentPresenterPlayerId,
-        questionSetId: room.preparedQuestionSetId,
-        gameMode: gameSettings.gameMode,
-        maxRevealRounds: gameSettings.maxRevealRounds,
-        roundSeconds: gameSettings.roundSeconds,
-        roundScores: gameSettings.roundScores,
-      });
+      const startAttemptKey = JSON.stringify([
+        roomId,
+        presenterPlayerId,
+        questionSetId,
+      ]);
+      if (!startGameAttemptRef.current) {
+        startGameAttemptRef.current = getStoredStartGameAttempt(roomId);
+      }
+      if (startGameAttemptRef.current?.key !== startAttemptKey) {
+        startGameAttemptRef.current = {
+          key: startAttemptKey,
+          requestId: createStartRequestId(),
+          createdAt: Date.now(),
+        };
+        storeStartGameAttempt(roomId, startGameAttemptRef.current);
+      }
+
+      const requestStart = (startRequestId: string) =>
+        startGameWithQuestionSet({
+          startRequestId,
+          roomId,
+          hostPlayerId: playerId,
+          presenterPlayerId,
+          questionSetId,
+          gameMode: gameSettings.gameMode,
+          maxRevealRounds: gameSettings.maxRevealRounds,
+          roundSeconds: gameSettings.roundSeconds,
+          roundScores: gameSettings.roundScores,
+        });
+
+      let started: Awaited<ReturnType<typeof requestStart>>;
+      try {
+        started = await requestStart(startGameAttemptRef.current.requestId);
+      } catch (startError) {
+        if (!(startError instanceof Error) || !startError.message.includes(START_GAME_REQUEST_ID_CONFLICT)) {
+          throw startError;
+        }
+
+        startGameAttemptRef.current = {
+          key: startAttemptKey,
+          requestId: createStartRequestId(),
+          createdAt: Date.now(),
+        };
+        storeStartGameAttempt(roomId, startGameAttemptRef.current);
+        started = await requestStart(startGameAttemptRef.current.requestId);
+      }
+
+      startGameAttemptRef.current = null;
+      storeStartGameAttempt(roomId, null);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...started.room, players: currentRoom.players } : started.room));
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "开始游戏失败，请稍后重试");
@@ -2145,22 +2502,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             playerId={playerId}
             isPresenter={isCurrentPresenter}
             isSpectator={isCurrentSpectator}
-            onError={setError}
-            onRoomUpdated={(nextRoom) =>
-              setRoom((currentRoom) =>
-                currentRoom
-                  ? {
-                      ...currentRoom,
-                      ...nextRoom,
-                      players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
-                    }
-                  : nextRoom,
-              )
-            }
-          />
-          {isHost || !isCurrentPresenter ? (
-            <div className="flex flex-wrap justify-end gap-3">
-              {isHost ? (
+            footerActions={
+              isHost ? (
                 <>
                   <Button
                     type="button"
@@ -2174,13 +2517,25 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
                     {isCancelingRound ? "取消中…" : "取消本局"}
                   </Button>
                 </>
-              ) : (
+              ) : !isCurrentPresenter ? (
                 <Button type="button" variant="secondary" onClick={handleExitRoom} disabled={isLeavingRoom}>
                   {isLeavingRoom ? "退出中…" : "退出房间"}
                 </Button>
-              )}
-            </div>
-          ) : null}
+              ) : null
+            }
+            onError={setError}
+            onRoomUpdated={(nextRoom) =>
+              setRoom((currentRoom) =>
+                currentRoom
+                  ? {
+                      ...currentRoom,
+                      ...nextRoom,
+                      players: nextRoom.players.length > 0 ? nextRoom.players : currentRoom.players,
+                    }
+                  : nextRoom,
+              )
+            }
+          />
         </main>
       ) : shouldShowLobby ? (
         <div className="grid items-stretch gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
@@ -2225,7 +2580,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             presenterName={presenterName}
             isStartingGame={isStartingGame}
             isCancelingRound={isCancelingRound}
-            onSettingsChange={setGameSettings}
+            onSettingsChange={handleGameSettingsChange}
             onOpenPresenterPicker={() => setIsPresenterPickerOpen(true)}
             onStartGame={handleStartGame}
             onCancelRound={handleRequestCancelRound}

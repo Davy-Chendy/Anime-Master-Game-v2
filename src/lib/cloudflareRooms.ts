@@ -4,6 +4,8 @@ import { callGameRpc } from "@/lib/cloudflareClient";
 import type {
   Answer,
   BuzzerAnswer,
+  CommunityQuestionSetPage,
+  CommunityQuestionSetSort,
   DbRoom,
   GameBootstrapSnapshot,
   GameMode,
@@ -181,8 +183,16 @@ export const createQuestionSetFromUrlText = (params: {
 export const getQuestionSetById = (questionSetId: string) =>
   rpc<QuestionSet | null>("getQuestionSetById", questionSetId);
 
-export const getCommunityQuestionSets = (sort: "latest" | "rating" = "latest") =>
-  rpc<QuestionSet[]>("getCommunityQuestionSets", sort);
+export const getCommunityQuestionSets = (params: {
+  sort?: CommunityQuestionSetSort;
+  search?: string;
+  offset?: number;
+  limit?: number;
+  includeTotal?: boolean;
+} = {}) => rpc<CommunityQuestionSetPage>("getCommunityQuestionSets", params);
+
+export const getCommunityQuestionSetDetail = (questionSetId: string) =>
+  rpc<QuestionSet | null>("getCommunityQuestionSetDetail", questionSetId);
 
 export const prepareQuestionSetForStart = (params: {
   roomId: string;
@@ -190,7 +200,17 @@ export const prepareQuestionSetForStart = (params: {
   questionSetId: string;
 }) => rpc<Room>("prepareQuestionSetForStart", params);
 
+export const updateRoomGameSettings = (params: {
+  roomId: string;
+  hostPlayerId: string;
+  gameMode: GameMode;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
+}) => rpc<Room>("updateRoomGameSettings", params);
+
 export const startGameWithQuestionSet = (params: {
+  startRequestId: string;
   roomId: string;
   hostPlayerId: string;
   presenterPlayerId: string;
@@ -311,6 +331,33 @@ export const judgeBuzzerAnswer = (params: {
     buzzerAnswers?: BuzzerAnswer[];
   }>("judgeBuzzerAnswer", params);
 
+export type AnswerJudgementChange = {
+  buzzerAnswerId: string;
+  isCorrect: boolean;
+};
+
+export type AnswerJudgementResult = {
+  gameSession: GameSession;
+  judgedAnswers: BuzzerAnswer[];
+  scores: PlayerScore[];
+  questionResults: QuestionResult[];
+};
+
+export const setAnswerJudgements = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+  judgements: AnswerJudgementChange[];
+}) => rpc<AnswerJudgementResult>("setAnswerJudgements", params);
+
+export const markPendingRoundAnswersWrong = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+}) => rpc<AnswerJudgementResult>("markPendingRoundAnswersWrong", params);
+
 export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
 
@@ -335,7 +382,11 @@ export const gradeAnswersAndAdvance = (params: {
   correctPlayerIds: string[];
 }) => rpc<{ gameSession: GameSession; room: Room | null; newlyScoredPlayerIds: string[] }>("gradeAnswersAndAdvance", params);
 
-export const advanceReviewedQuestion = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+export const advanceReviewedQuestion = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+}) =>
   rpc<{ gameSession: GameSession; room: Room | null }>("advanceReviewedQuestion", params);
 
 export const updateQuestionLabel = (params: {
@@ -347,7 +398,11 @@ export const updateQuestionLabel = (params: {
   answerId?: string | null;
 }) => rpc<Question>("updateQuestionLabel", params);
 
-export const skipCurrentQuestion = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+export const skipCurrentQuestion = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+}) =>
   rpc<{ gameSession: GameSession; room: Room | null }>("skipCurrentQuestion", params);
 
 export const endCurrentGameEarly = (params: { gameSessionId: string; presenterPlayerId: string }) =>

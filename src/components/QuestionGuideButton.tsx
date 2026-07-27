@@ -66,7 +66,7 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
 
               <section className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
                 <h3 className="font-semibold text-slate-950">方法二：使用动画截图工具</h3>
-                <p className="mt-2">可以用在线工具快速找到目标动画截图，构建题库</p>
+                <p className="mt-2">可以用在线工具快速找到目标动画的截图或封面图，构建题库</p>
                 <div className="mt-3">
                   <a
                     className="inline-flex min-h-11 items-center justify-center rounded-md bg-[var(--primary)] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-4 focus:ring-rose-100"

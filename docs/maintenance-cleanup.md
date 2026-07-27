@@ -2,6 +2,10 @@
 
 本项目现在使用 Cloudflare D1。下面的 SQL 可用 `wrangler d1 execute` 执行。
 
+生产环境已经通过 Worker Cron Trigger 自动清理超过 48 小时未更新的房间。自动清理会先根据房间历史游戏和当前准备题库追溯未发布题库，只删除未发布题库独占引用的 R2 图片对象，再删除房间和已无引用的未发布题库记录。公开社区题库不会被清理。
+
+不要在生产环境绕过 Worker 直接删除旧房间，否则会先丢失 `rooms -> game_sessions -> question_sets -> questions` 的追溯链，导致 R2 图片对象无法被一起清理。下面 SQL 仅用于本地排查、预览或紧急手动维护。
+
 本地预览：
 
 ```bash

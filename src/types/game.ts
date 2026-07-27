@@ -20,6 +20,17 @@ export type TeamBattleGuessVote = {
   answerText?: string;
 };
 
+export type TeamBattlePreviousTurnAction =
+  | {
+      team: TeamBattleTeam;
+      type: "skip";
+    }
+  | {
+      team: TeamBattleTeam;
+      type: "guess";
+      answerText: string;
+    };
+
 export type TeamBattleState = {
   teams: Record<TeamBattleTeam, string[]>;
   initialTeams?: Record<TeamBattleTeam, string[]>;
@@ -32,6 +43,7 @@ export type TeamBattleState = {
   voteDeadlineAt?: string | null;
   revealVotes: Record<string, number[]>;
   guessVotes: Record<string, TeamBattleGuessVote>;
+  previousTurnAction?: TeamBattlePreviousTurnAction | null;
   pendingGuess?: {
     team: TeamBattleTeam;
     answerText: string;
@@ -49,6 +61,10 @@ export type Room = {
   currentPresenterPlayerId?: string | null;
   currentGameId?: string | null;
   preparedQuestionSetId?: string | null;
+  gameMode?: GameMode;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
   createdAt: number | string;
   updatedAt?: string;
 };
@@ -61,6 +77,10 @@ export type DbRoom = {
   current_presenter_player_id: string | null;
   current_game_id: string | null;
   prepared_question_set_id?: string | null;
+  lobby_game_mode?: GameMode | null;
+  lobby_max_reveal_rounds?: number | null;
+  lobby_round_seconds?: number | null;
+  lobby_round_scores?: unknown;
   created_at: string;
   updated_at: string;
 };
@@ -77,6 +97,31 @@ export type DbPlayer = {
 
 export type QuestionSetSource = "uploaded" | "community";
 
+export type CommunityQuestionSetSort = "latest" | "rating" | "plays";
+
+export type CommunityQuestionSetSummary = {
+  id: string;
+  title: string;
+  description?: string | null;
+  createdByPlayerId: string;
+  createdByNickname?: string | null;
+  source: QuestionSetSource;
+  isPublic: boolean;
+  imageCount: number;
+  ratingAvg: number;
+  ratingCount: number;
+  playCount: number;
+  createdAt: string;
+  updatedAt?: string | null;
+};
+
+export type CommunityQuestionSetPage = {
+  items: CommunityQuestionSetSummary[];
+  total: number | null;
+  hasMore: boolean;
+  nextOffset: number;
+};
+
 export type QuestionSet = {
   id: string;
   title: string;
@@ -89,6 +134,7 @@ export type QuestionSet = {
   imageCount: number;
   ratingAvg: number;
   ratingCount: number;
+  playCount: number;
   createdAt: string;
   updatedAt?: string | null;
   questions?: Question[];
@@ -159,6 +205,7 @@ export type GameSession = {
   teamBattleState?: TeamBattleState | null;
   createdAt: string;
   endedAt?: string | null;
+  completedNormallyAt?: string | null;
 };
 
 export type Answer = {
@@ -276,6 +323,14 @@ export type RealtimeDelta =
     }
   | {
       scope: "game";
+      type: "answer_judgements_changed";
+      gameSession: GameSession;
+      answers: BuzzerAnswer[];
+      scores: PlayerScore[];
+      questionResults: QuestionResult[];
+    }
+  | {
+      scope: "game";
       type: "question_label_updated";
       question: Question;
     }
@@ -299,6 +354,7 @@ export type DbQuestionSet = {
   image_count: number;
   rating_avg: number;
   rating_count: number;
+  play_count: number;
   created_at: string;
   updated_at?: string | null;
 };
@@ -333,6 +389,7 @@ export type DbGameSession = {
   round_started_at: string | null;
   created_at: string;
   ended_at: string | null;
+  completed_normally_at?: string | null;
 };
 
 export type DbAnswer = {
@@ -374,6 +431,7 @@ export type BuzzerAnswer = {
   status: BuzzerAnswerStatus;
   scoreAwarded: number;
   submittedAt: string;
+  serverReceivedAt: string;
   judgedAt?: string | null;
   judgedByPlayerId?: string | null;
 };
@@ -388,6 +446,7 @@ export type DbBuzzerAnswer = {
   status: BuzzerAnswerStatus;
   score_awarded: number;
   submitted_at: string;
+  server_received_at: string | null;
   judged_at: string | null;
   judged_by_player_id: string | null;
 };

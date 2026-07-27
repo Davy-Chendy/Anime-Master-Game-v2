@@ -24,6 +24,9 @@ bucket_name = "anime-master-game-images"
 [images]
 binding = "IMAGES"
 
+[triggers]
+crons = ["0 0 * * *"]
+
 [vars]
 ALLOWED_ORIGIN = "https://anipeek.animaster.dpdns.org"
 R2_IMAGE_PREFIX = "question-images"

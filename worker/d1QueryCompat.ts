@@ -3,23 +3,37 @@ type QueryError = {
   code?: string;
 };
 
-type QueryResult<T = unknown> = {
+export type QueryResult<T = unknown> = {
   data: T | null;
   error: QueryError | null;
 };
 
 type Filter =
   | { kind: "eq"; column: string; value: unknown }
-  | { kind: "is"; column: string; value: null };
+  | { kind: "is"; column: string; value: null }
+  | { kind: "containsAny"; columns: string[]; value: string };
 
 type OrderBy = {
   column: string;
   ascending: boolean;
 };
 
-const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores", "team_battle_state"]);
+const D1_MAX_BOUND_PARAMETERS_PER_QUERY = 100;
+const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores", "team_battle_state", "lobby_round_scores"]);
 const BOOLEAN_COLUMNS = new Set(["is_host", "is_public"]);
 const UPDATED_AT_TABLES = new Set(["rooms", "question_sets", "question_set_ratings"]);
+const CREATED_AT_TABLES = new Set([
+  "rooms",
+  "question_sets",
+  "questions",
+  "game_sessions",
+  "question_set_ratings",
+  "question_snapshots",
+  "question_eligible_players",
+  "game_participants",
+]);
+const IMMUTABLE_ON_CONFLICT_COLUMNS = new Set(["created_at", "joined_at"]);
+const INSERT_DEFAULT_ONLY_COLUMNS = new Set(["created_at", "joined_at", "submitted_at", "server_received_at", "judged_at"]);
 const ID_TABLES = new Set([
   "rooms",
   "question_sets",
@@ -91,10 +105,7 @@ function cleanRecord(table: string, record: Record<string, unknown>) {
   }
 
   const now = nowIso();
-  if (
-    ["rooms", "question_sets", "questions", "game_sessions", "question_set_ratings"].includes(table) &&
-    !("created_at" in next)
-  ) {
+  if (CREATED_AT_TABLES.has(table) && !("created_at" in next)) {
     next.created_at = now;
   }
   if (UPDATED_AT_TABLES.has(table)) {
@@ -108,6 +119,9 @@ function cleanRecord(table: string, record: Record<string, unknown>) {
   }
   if (table === "buzzer_answers" && !("submitted_at" in next)) {
     next.submitted_at = now;
+  }
+  if (table === "buzzer_answers" && !("server_received_at" in next)) {
+    next.server_received_at = next.submitted_at ?? now;
   }
   if (table === "question_results" && !("judged_at" in next)) {
     next.judged_at = now;
@@ -158,18 +172,40 @@ function uniqueError(error: unknown): QueryError {
   };
 }
 
+export interface GamePreparedStatement {
+  bind(...values: unknown[]): GamePreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<{ results?: T[] }>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+}
+
+export interface GameDatabase {
+  prepare(query: string): GamePreparedStatement;
+  batch<T = Record<string, unknown>>(statements: GamePreparedStatement[]): Promise<Array<{ results?: T[] }>>;
+}
+
+export type GameDatabaseMutationTracker = {
+  successfulWrites: number;
+  markValidated?: () => void;
+};
+
 class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private operation: "select" | "insert" | "update" | "delete" = "select";
   private filters: Filter[] = [];
   private orderBys: OrderBy[] = [];
   private maxRows: number | null = null;
+  private offsetRows = 0;
   private selectedColumns: string[] | null = null;
+  private countMode = false;
   private payload: Record<string, unknown> | Record<string, unknown>[] | null = null;
   private conflictColumns: string[] = [];
   private ignoreDuplicates = false;
   private singleMode: "none" | "single" | "maybeSingle" = "none";
 
-  constructor(private readonly db: D1Database | null, private readonly table: string) {}
+  constructor(
+    private readonly db: GameDatabase | null,
+    private readonly table: string,
+    private readonly mutationTracker?: GameDatabaseMutationTracker,
+  ) {}
 
   select(columns = "*") {
     if (this.operation === "select") {
@@ -224,6 +260,15 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     return this;
   }
 
+  containsAny(columns: string[], value: string) {
+    const normalizedColumns = Array.from(new Set(columns.map((column) => column.trim()).filter(Boolean)));
+    const normalizedValue = value.trim();
+    if (normalizedColumns.length > 0 && normalizedValue) {
+      this.filters.push({ kind: "containsAny", columns: normalizedColumns, value: normalizedValue });
+    }
+    return this;
+  }
+
   order(column: string, options?: { ascending?: boolean }) {
     this.orderBys.push({ column, ascending: options?.ascending ?? true });
     return this;
@@ -231,6 +276,17 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
 
   limit(value: number) {
     this.maxRows = value;
+    return this;
+  }
+
+  offset(value: number) {
+    this.offsetRows = Math.max(0, Math.floor(value));
+    return this;
+  }
+
+  count() {
+    this.countMode = true;
+    this.selectedColumns = null;
     return this;
   }
 
@@ -264,6 +320,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       if (filter.kind === "is") {
         return `${sqlIdentifier(filter.column)} IS NULL`;
       }
+      if (filter.kind === "containsAny") {
+        return `(${filter.columns
+          .map((column) => {
+            params.push(filter.value);
+            return `INSTR(LOWER(COALESCE(${sqlIdentifier(column)}, '')), LOWER(?)) > 0`;
+          })
+          .join(" OR ")})`;
+      }
       params.push(normalizeValue(filter.column, filter.value));
       return `${sqlIdentifier(filter.column)} = ?`;
     });
@@ -282,7 +346,10 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 
   private limitSql() {
-    return this.maxRows == null ? "" : ` LIMIT ${Math.max(0, Math.floor(this.maxRows))}`;
+    if (this.maxRows == null) {
+      return this.offsetRows > 0 ? ` LIMIT -1 OFFSET ${this.offsetRows}` : "";
+    }
+    return ` LIMIT ${Math.max(0, Math.floor(this.maxRows))} OFFSET ${this.offsetRows}`;
   }
 
   private async execute(): Promise<QueryResult<T>> {
@@ -335,6 +402,9 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 
   private selectedSql() {
+    if (this.countMode) {
+      return 'COUNT(*) AS "count"';
+    }
     return this.selectedColumns?.length ? this.selectedColumns.map(sqlIdentifier).join(", ") : "*";
   }
 
@@ -358,12 +428,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     });
 
     if (canUseBulkInsert && cleanedRecords.length > 1) {
-      const values = cleanedRecords.flatMap((record) => columns.map((column) => record[column]));
       const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
-      const placeholders = cleanedRecords.map(() => rowPlaceholder).join(", ");
       const updateGeneratedId = explicitPrimaryKeyByIndex[0];
       const updateColumns = columns.filter(
-        (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
+        (column) =>
+          !this.conflictColumns.includes(column) &&
+          !IMMUTABLE_ON_CONFLICT_COLUMNS.has(column) &&
+          (column !== "id" || updateGeneratedId) &&
+          (!INSERT_DEFAULT_ONLY_COLUMNS.has(column) || records.every((record) => Object.prototype.hasOwnProperty.call(record, column))),
       );
       const conflict =
         this.conflictColumns.length > 0
@@ -375,11 +447,23 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
                     .join(", ")}`
             }`
           : "";
-      const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
-        .map(sqlIdentifier)
-        .join(", ")}) VALUES ${placeholders}${conflict} RETURNING ${this.selectedSql()}`;
-      const result = await this.db!.prepare(sql).bind(...values).all<Record<string, unknown>>();
-      return this.shapeRows(result.results ?? []);
+      const rowsPerStatement = Math.max(1, Math.floor(D1_MAX_BOUND_PARAMETERS_PER_QUERY / columns.length));
+      const statements: GamePreparedStatement[] = [];
+
+      for (let start = 0; start < cleanedRecords.length; start += rowsPerStatement) {
+        const chunk = cleanedRecords.slice(start, start + rowsPerStatement);
+        const values = chunk.flatMap((record) => columns.map((column) => record[column]));
+        const placeholders = chunk.map(() => rowPlaceholder).join(", ");
+        const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
+          .map(sqlIdentifier)
+          .join(", ")}) VALUES ${placeholders}${conflict} RETURNING ${this.selectedSql()}`;
+        statements.push(this.db!.prepare(sql).bind(...values));
+      }
+
+      const results = await this.db!.batch<Record<string, unknown>>(statements);
+      const affectedRows = results.flatMap((result) => result.results ?? []);
+      if (this.mutationTracker) this.mutationTracker.successfulWrites += affectedRows.length;
+      return this.shapeRows(affectedRows);
     }
 
     for (let index = 0; index < records.length; index += 1) {
@@ -390,7 +474,11 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       const values = recordColumns.map((column) => record[column]);
       const placeholders = recordColumns.map(() => "?").join(", ");
       const updateColumns = recordColumns.filter(
-        (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
+        (column) =>
+          !this.conflictColumns.includes(column) &&
+          !IMMUTABLE_ON_CONFLICT_COLUMNS.has(column) &&
+          (column !== "id" || updateGeneratedId) &&
+          (!INSERT_DEFAULT_ONLY_COLUMNS.has(column) || Object.prototype.hasOwnProperty.call(rawRecord, column)),
       );
       const conflict =
         this.conflictColumns.length > 0
@@ -406,6 +494,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
         .map(sqlIdentifier)
         .join(", ")}) VALUES (${placeholders})${conflict} RETURNING ${this.selectedSql()}`;
       const result = await this.db!.prepare(sql).bind(...values).first<Record<string, unknown>>();
+      if (this.mutationTracker && result) this.mutationTracker.successfulWrites += 1;
       if (result) {
         rows.push(result);
       }
@@ -415,9 +504,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 
   private async executeUpdate(): Promise<QueryResult<T>> {
-    const record = cleanRecord(this.table, (this.payload ?? {}) as Record<string, unknown>);
+    const rawRecord = (this.payload ?? {}) as Record<string, unknown>;
+    const record = cleanRecord(this.table, rawRecord);
     delete record.id;
     delete record.created_at;
+    delete record.joined_at;
+    for (const column of INSERT_DEFAULT_ONLY_COLUMNS) {
+      if (!Object.prototype.hasOwnProperty.call(rawRecord, column)) delete record[column];
+    }
 
     if (Object.keys(record).length === 0) {
       return { data: null, error: { message: `${this.table} 更新失败：没有可更新的字段。` } };
@@ -428,24 +522,28 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       .map((column) => `${sqlIdentifier(column)} = ?`)
       .join(", ")}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
-    return this.shapeRows(result.results ?? []);
+    const affectedRows = result.results ?? [];
+    if (this.mutationTracker) this.mutationTracker.successfulWrites += affectedRows.length;
+    return this.shapeRows(affectedRows);
   }
 
   private async executeDelete(): Promise<QueryResult<T>> {
     const params: unknown[] = [];
     const sql = `DELETE FROM ${sqlIdentifier(this.table)}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
-    return this.shapeRows(result.results ?? []);
+    const affectedRows = result.results ?? [];
+    if (this.mutationTracker) this.mutationTracker.successfulWrites += affectedRows.length;
+    return this.shapeRows(affectedRows);
   }
 }
 
-export function createD1QueryClient(db: D1Database | null) {
+export function createD1QueryClient(db: GameDatabase | null, mutationTracker?: GameDatabaseMutationTracker) {
   return {
     hasDatabase() {
       return Boolean(db);
     },
     from(table: string) {
-      return new D1QueryBuilder(db, table);
+      return new D1QueryBuilder(db, table, mutationTracker);
     },
   };
 }

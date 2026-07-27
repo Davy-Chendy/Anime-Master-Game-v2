@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode, SVGProps } from "react";
 import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
@@ -12,9 +13,10 @@ import {
   getQuestionSetById,
   getRoundSnapshot,
   judgeTeamBattleGuess,
-  judgeBuzzerAnswer,
+  markPendingRoundAnswersWrong,
   publishQuestionSetToCommunity,
   revealTeamBattleAnswer,
+  setAnswerJudgements,
   settleBuzzerRound,
   skipCurrentQuestion,
   submitAnswer,
@@ -31,7 +33,9 @@ import type {
   DbBuzzerAnswer,
   DbGameSession,
   DbQuestion,
+  GameBootstrapSnapshot,
   GameSession,
+  Player,
   PlayerScore,
   Question,
   QuestionSet,
@@ -49,6 +53,7 @@ type ImageRevealGameProps = {
   playerId: string;
   isPresenter: boolean;
   isSpectator?: boolean;
+  footerActions?: ReactNode;
   onError: (message: string) => void;
   onRoomUpdated?: (room: Room) => void;
 };
@@ -58,11 +63,91 @@ const PORTRAIT_GRID_COLUMNS = 5;
 const LANDSCAPE_TOTAL_BLOCKS = 45;
 const PORTRAIT_TOTAL_BLOCKS = 35;
 const MAX_REVEAL_BLOCKS = LANDSCAPE_TOTAL_BLOCKS;
-const DEFAULT_ROUND_SECONDS = 60;
+const DEFAULT_ROUND_SECONDS = 45;
+const ROUND_DEADLINE_GRACE_MS = 3000;
+const ANSWER_JUDGEMENT_BATCH_WINDOW_MS = 250;
+const DEFAULT_ROUND_SCORES = [5, 3, 1];
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
 const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
+const ROUND_PROMPT_SOUND_STORAGE_KEY = "animeMaster.roundPromptSoundEnabled";
+const ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY = "animeMaster.roundPromptSoundVolume";
+const ROUND_PROMPT_SOUND_URL = "/sounds/round-start.mp3";
+const DEFAULT_ROUND_PROMPT_SOUND_VOLUME = 80;
+// Temporarily disabled: browser audio is unreliable in background/minimized tabs, so the reminder feels inconsistent.
+const ROUND_PROMPT_SOUND_FEATURE_ENABLED = false;
+let roundPromptAudioElement: HTMLAudioElement | null = null;
+
+function getInitialRoundPromptSoundEnabled() {
+  if (!ROUND_PROMPT_SOUND_FEATURE_ENABLED) {
+    return false;
+  }
+
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(ROUND_PROMPT_SOUND_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveRoundPromptSoundEnabled(isEnabled: boolean) {
+  try {
+    window.localStorage.setItem(ROUND_PROMPT_SOUND_STORAGE_KEY, isEnabled ? "1" : "0");
+  } catch {
+    // Local storage can be unavailable in restricted browser modes; the in-memory toggle still works for this page.
+  }
+}
+
+function getInitialRoundPromptSoundVolume() {
+  if (typeof window === "undefined") {
+    return DEFAULT_ROUND_PROMPT_SOUND_VOLUME;
+  }
+
+  try {
+    const storedVolume = Number(window.localStorage.getItem(ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY));
+    return Number.isFinite(storedVolume) ? Math.max(0, Math.min(100, Math.round(storedVolume))) : DEFAULT_ROUND_PROMPT_SOUND_VOLUME;
+  } catch {
+    return DEFAULT_ROUND_PROMPT_SOUND_VOLUME;
+  }
+}
+
+function saveRoundPromptSoundVolume(volume: number) {
+  try {
+    window.localStorage.setItem(ROUND_PROMPT_SOUND_VOLUME_STORAGE_KEY, String(volume));
+  } catch {
+    // Local storage can be unavailable in restricted browser modes; the in-memory slider still works for this page.
+  }
+}
+
+function getRoundPromptAudioElement() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  if (!roundPromptAudioElement) {
+    roundPromptAudioElement = new Audio(ROUND_PROMPT_SOUND_URL);
+    roundPromptAudioElement.preload = "auto";
+  }
+
+  return roundPromptAudioElement;
+}
+
+function playRoundPromptSound(volume = DEFAULT_ROUND_PROMPT_SOUND_VOLUME) {
+  const audio = getRoundPromptAudioElement();
+  if (!audio) {
+    return;
+  }
+
+  audio.pause();
+  audio.currentTime = 0;
+  audio.volume = Math.max(0, Math.min(100, volume)) / 100;
+  void audio.play();
+}
 
 function isForfeitAnswer(answer: Answer | null | undefined) {
   return answer?.answerText === FORFEIT_ANSWER_TEXT;
@@ -118,7 +203,7 @@ function getHiddenRevealBlocks(blockCount: number) {
 function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
     ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
-    : [3, 2, 1];
+    : DEFAULT_ROUND_SCORES;
 
   return {
     id: gameSession.id,
@@ -156,9 +241,12 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
   return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
 }
 
-function sortBySubmittedAt<T extends { id: string; submittedAt: string }>(items: T[]) {
+function sortBySubmittedAt<T extends { id: string; submittedAt: string; serverReceivedAt?: string }>(items: T[]) {
   return [...items].sort(
-    (a, b) => new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime() || a.id.localeCompare(b.id),
+    (a, b) =>
+      new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime() ||
+      new Date(a.serverReceivedAt ?? a.submittedAt).getTime() - new Date(b.serverReceivedAt ?? b.submittedAt).getTime() ||
+      a.id.localeCompare(b.id),
   );
 }
 
@@ -178,8 +266,15 @@ function getCorrectLabelAnswersFromBuzzerAnswers(answers: BuzzerAnswer[]) {
   return sortBySubmittedAt(answers.filter((answer) => answer.status === "correct").map(toLabelAnswerFromBuzzerAnswer));
 }
 
-function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt">, nowMs: number) {
-  return nowMs - new Date(answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
+function comparePlayerAnswerOrder(left: BuzzerAnswer, right: BuzzerAnswer) {
+  return (
+    new Date(left.submittedAt).getTime() - new Date(right.submittedAt).getTime() ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt" | "serverReceivedAt">, nowMs: number) {
+  return nowMs - new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
 
 function getTeamName(team: TeamBattleTeam) {
@@ -264,6 +359,7 @@ function toBuzzerAnswer(answer: DbBuzzerAnswer): BuzzerAnswer {
     status: answer.status,
     scoreAwarded: answer.score_awarded,
     submittedAt: answer.submitted_at,
+    serverReceivedAt: answer.server_received_at ?? answer.submitted_at,
     judgedAt: answer.judged_at,
     judgedByPlayerId: answer.judged_by_player_id,
   };
@@ -292,8 +388,188 @@ type StandardScoreRowProps = {
   buzzerStatus?: BuzzerAnswer["status"];
   isBuzzerMode: boolean;
   isLeadingPendingBuzzerAnswer: boolean;
+  showSpectatorAnswer: boolean;
+  spectatorAnswerText: string;
+  spectatorAnswerStatus: SpectatorAnswerStatus;
+  spectatorAnswerLabel: string;
   onRowRef: (playerId: string, element: HTMLDivElement | null) => void;
 };
+
+type SpectatorAnswerStatus = "correct" | "wrong" | "pending" | "forfeit" | "unanswered";
+
+type SpectatorAnswerDisplay = {
+  text: string;
+  status: SpectatorAnswerStatus;
+  label: string;
+};
+
+type CompactScoreStatus = {
+  label: string;
+  className: string;
+  textClassName: string;
+  content: string | JSX.Element | null;
+};
+
+function IconListDense(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M4 6h12M4 10h12M4 14h12" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconListDetail(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M7 5h9M7 10h9M7 15h9" strokeLinecap="round" />
+      <path d="M4 5h.01M4 10h.01M4 15h.01" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconXMark(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.2" {...props}>
+      <path d="M6 6l8 8M14 6l-8 8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconHourglass(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" {...props}>
+      <path d="M4 2h12v2h-2l-3 4 3 4h2v2H4v-2h2l3-4-3-4H4V2zm4 2 2 2.5L12 4H8zm2 6.5L8 12h4l-2-1.5z" />
+    </svg>
+  );
+}
+
+function IconFlag(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M6 17V4M6 5h8l-1.5 3L14 11H6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconCheck(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.2" {...props}>
+      <path d="M5 10.5l3 3L15 6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconSpeaker(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M4 8.5h3l4-3.5v10l-4-3.5H4z" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14 7.5c.8.7 1.2 1.5 1.2 2.5s-.4 1.8-1.2 2.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function getCompactNameClass(nickname: string) {
+  const length = Array.from(nickname).length;
+
+  if (length <= 7) {
+    return "text-[13px]";
+  }
+
+  if (length <= 10) {
+    return "text-xs";
+  }
+
+  if (length <= 14) {
+    return "text-[11px]";
+  }
+
+  return "text-[10px]";
+}
+
+function getCompactScoreClass(score: number) {
+  if (Math.abs(score) >= 1000) {
+    return "text-[11px]";
+  }
+
+  if (Math.abs(score) >= 100) {
+    return "text-xs";
+  }
+
+  return "text-sm";
+}
+
+function getCompetitionRankByScore<T extends { score: number }>(rows: T[], index: number): number {
+  const previousRow = rows[index - 1];
+
+  return previousRow && previousRow.score === rows[index].score ? getCompetitionRankByScore(rows, index - 1) : index + 1;
+}
+
+function getSpectatorAnswerDisplay(params: {
+  nickname: string;
+  alreadyCorrect: boolean;
+  currentAnswer?: Answer;
+  correctAnswer?: Answer;
+  buzzerAnswer?: BuzzerAnswer;
+  hasForfeitedCurrentRound: boolean;
+  isBuzzerMode: boolean;
+  isLeadingPendingBuzzerAnswer: boolean;
+}): SpectatorAnswerDisplay {
+  const {
+    nickname,
+    alreadyCorrect,
+    currentAnswer,
+    correctAnswer,
+    buzzerAnswer,
+    hasForfeitedCurrentRound,
+    isBuzzerMode,
+    isLeadingPendingBuzzerAnswer,
+  } = params;
+
+  if (alreadyCorrect || buzzerAnswer?.status === "correct") {
+    const text = correctAnswer?.answerText ?? buzzerAnswer?.answerText ?? currentAnswer?.answerText ?? "—";
+    return { text, status: "correct", label: `${nickname}回答：${text}，判定正确` };
+  }
+
+  if (hasForfeitedCurrentRound) {
+    return { text: "放弃", status: "forfeit", label: `${nickname}本轮已放弃` };
+  }
+
+  if (buzzerAnswer?.status === "wrong") {
+    return {
+      text: buzzerAnswer.answerText,
+      status: "wrong",
+      label: `${nickname}回答：${buzzerAnswer.answerText}，判定错误`,
+    };
+  }
+
+  if (buzzerAnswer?.status === "pending" || currentAnswer) {
+    const text = buzzerAnswer?.answerText ?? currentAnswer?.answerText ?? "—";
+    const pendingLabel = isLeadingPendingBuzzerAnswer ? "判定中" : isBuzzerMode ? "排队中" : "待判定";
+    return { text, status: "pending", label: `${nickname}回答：${text}，${pendingLabel}` };
+  }
+
+  return { text: "", status: "unanswered", label: `${nickname}本轮尚未回答` };
+}
+
+function getSpectatorAnswerTone(status: SpectatorAnswerStatus) {
+  if (status === "correct") {
+    return "bg-emerald-50 text-emerald-700";
+  }
+
+  if (status === "wrong") {
+    return "bg-rose-50 text-rose-700";
+  }
+
+  if (status === "pending") {
+    return "bg-sky-50 text-sky-700";
+  }
+
+  if (status === "forfeit") {
+    return "bg-slate-200 text-slate-700";
+  }
+
+  return "bg-transparent text-slate-400";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -361,8 +637,14 @@ const StandardScoreRow = memo(function StandardScoreRow({
   buzzerStatus,
   isBuzzerMode,
   isLeadingPendingBuzzerAnswer,
+  showSpectatorAnswer,
+  spectatorAnswerText,
+  spectatorAnswerStatus,
+  spectatorAnswerLabel,
   onRowRef,
 }: StandardScoreRowProps) {
+  const hasWrongCurrentRound = buzzerStatus === "wrong";
+
   return (
     <div
       className="rounded-md bg-slate-50 px-3 py-2 text-sm"
@@ -376,31 +658,177 @@ const StandardScoreRow = memo(function StandardScoreRow({
         </div>
         <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
-        <span>答对 {correctCount} 题</span>
-        {alreadyCorrect ? (
-          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
-        ) : null}
-        {currentQuestionScoreAwarded > 0 ? (
-          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
-            +{currentQuestionScoreAwarded} 分
+      {showSpectatorAnswer ? (
+        <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
+          <span className="shrink-0">答对 {correctCount} 题</span>
+          <span className="flex min-w-0 flex-1 items-center">
+            {spectatorAnswerStatus !== "unanswered" ? (
+              <span
+                aria-label={spectatorAnswerLabel}
+                className={`inline-flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
+                title={spectatorAnswerLabel}
+              >
+                <span className="min-w-0 truncate">{spectatorAnswerText}</span>
+                {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
+              </span>
+            ) : null}
           </span>
-        ) : null}
-        {!alreadyCorrect && hasForfeitedCurrentRound ? (
-          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
-        ) : null}
-        {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound ? (
-          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
-        ) : null}
-        {isBuzzerMode && buzzerStatus === "pending" ? (
-          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
-            {isLeadingPendingBuzzerAnswer ? "判定中" : "排队中"}
-          </span>
-        ) : null}
-        {isBuzzerMode && buzzerStatus === "wrong" ? (
-          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
-        ) : null}
-      </div>
+          {currentQuestionScoreAwarded > 0 ? (
+            <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
+              +{currentQuestionScoreAwarded} 分
+            </span>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
+          <span>答对 {correctCount} 题</span>
+          {alreadyCorrect ? (
+            <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">已答对</span>
+          ) : null}
+          {currentQuestionScoreAwarded > 0 ? (
+            <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
+              +{currentQuestionScoreAwarded} 分
+            </span>
+          ) : null}
+          {!alreadyCorrect && hasForfeitedCurrentRound ? (
+            <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">已放弃</span>
+          ) : null}
+          {!alreadyCorrect && hasAnsweredCurrentRound && !hasForfeitedCurrentRound && !hasWrongCurrentRound ? (
+            <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">已回答</span>
+          ) : null}
+          {isBuzzerMode && buzzerStatus === "pending" ? (
+            <span className="rounded bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">
+              {isLeadingPendingBuzzerAnswer ? "判定中" : "排队中"}
+            </span>
+          ) : null}
+          {!alreadyCorrect && hasWrongCurrentRound ? (
+            <span className="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-700">本轮已答错</span>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+});
+
+function getCompactScoreStatus({
+  alreadyCorrect,
+  hasAnsweredCurrentRound,
+  hasForfeitedCurrentRound,
+  currentQuestionScoreAwarded,
+  buzzerStatus,
+  isBuzzerMode,
+  isLeadingPendingBuzzerAnswer,
+}: Pick<
+  StandardScoreRowProps,
+  | "alreadyCorrect"
+  | "hasAnsweredCurrentRound"
+  | "hasForfeitedCurrentRound"
+  | "currentQuestionScoreAwarded"
+  | "buzzerStatus"
+  | "isBuzzerMode"
+  | "isLeadingPendingBuzzerAnswer"
+>): CompactScoreStatus {
+  const hasWrongCurrentRound = buzzerStatus === "wrong";
+
+  if (alreadyCorrect) {
+    const isLargeScoreAward = currentQuestionScoreAwarded >= 100;
+
+    return {
+      label: currentQuestionScoreAwarded > 0 ? `本题加 ${currentQuestionScoreAwarded} 分` : "已答对",
+      className: "bg-emerald-50 text-emerald-700",
+      textClassName: currentQuestionScoreAwarded > 0 && !isLargeScoreAward ? "text-xs" : "text-[11px]",
+      content:
+        currentQuestionScoreAwarded > 0 ? (
+          `+${currentQuestionScoreAwarded}`
+        ) : (
+          <IconCheck className="h-4 w-4" />
+        ),
+    };
+  }
+
+  if (hasWrongCurrentRound) {
+    return {
+      label: "本轮已答错",
+      className: "bg-rose-50 text-rose-700",
+      textClassName: "text-[11px]",
+      content: <IconXMark className="h-4 w-4" />,
+    };
+  }
+
+  if (hasForfeitedCurrentRound) {
+    return {
+      label: "已放弃",
+      className: "bg-slate-100 text-slate-600",
+      textClassName: "text-[11px]",
+      content: <IconFlag className="h-4 w-4" />,
+    };
+  }
+
+  if ((isBuzzerMode && buzzerStatus === "pending") || hasAnsweredCurrentRound) {
+    return {
+      label: isLeadingPendingBuzzerAnswer ? "判定中" : "等待判定",
+      className: "bg-sky-50 text-sky-700",
+      textClassName: "text-[11px]",
+      content: <IconHourglass className="h-4 w-4" />,
+    };
+  }
+
+  return {
+    label: "暂无状态",
+    className: "bg-transparent text-slate-300",
+    textClassName: "text-[11px]",
+    content: null,
+  };
+}
+
+const CompactScoreRow = memo(function CompactScoreRow({
+  playerId,
+  nickname,
+  rank,
+  score,
+  alreadyCorrect,
+  hasAnsweredCurrentRound,
+  hasForfeitedCurrentRound,
+  currentQuestionScoreAwarded,
+  buzzerStatus,
+  isBuzzerMode,
+  isLeadingPendingBuzzerAnswer,
+  onRowRef,
+}: StandardScoreRowProps) {
+  const status = getCompactScoreStatus({
+    alreadyCorrect,
+    hasAnsweredCurrentRound,
+    hasForfeitedCurrentRound,
+    currentQuestionScoreAwarded,
+    buzzerStatus,
+    isBuzzerMode,
+    isLeadingPendingBuzzerAnswer,
+  });
+
+  return (
+    <div
+      className="grid h-8 grid-cols-[1rem_minmax(0,1fr)_max-content_minmax(1.75rem,max-content)] items-center gap-x-0.5 rounded-md bg-slate-50 px-1 text-sm"
+      ref={(element) => {
+        onRowRef(playerId, element);
+      }}
+    >
+      <span className="text-right text-xs font-semibold tabular-nums text-slate-500">{rank}</span>
+      <span className={`min-w-0 truncate font-semibold leading-none text-slate-950 ${getCompactNameClass(nickname)}`} title={nickname}>
+        {nickname}
+      </span>
+      <span
+        aria-label={status.label}
+        className={`grid h-5 min-w-5 justify-self-end place-items-center rounded px-0.5 font-bold leading-none ${status.textClassName} ${status.className}`}
+        title={status.label}
+      >
+        {status.content}
+      </span>
+      <span
+        className={`min-w-7 shrink-0 text-right font-bold leading-none tabular-nums text-[var(--primary)] ${getCompactScoreClass(score)}`}
+        title={`${score} 分`}
+      >
+        {score}
+      </span>
     </div>
   );
 });
@@ -417,6 +845,319 @@ function upsertById<T extends { id: string }>(items: T[], item: T) {
 
 function upsertBySubmittedAt<T extends { id: string; submittedAt: string }>(items: T[], item: T) {
   return sortBySubmittedAt(upsertById(items, item));
+}
+
+function applyCorrectBuzzerAnswerChanges(currentAnswers: Answer[], changes: BuzzerAnswer[]) {
+  return sortBySubmittedAt(
+    changes.reduce(
+      (nextAnswers, answer) =>
+        answer.status === "correct"
+          ? upsertById(nextAnswers, answer)
+          : nextAnswers.filter((currentAnswer) => currentAnswer.id !== answer.id),
+      currentAnswers,
+    ),
+  );
+}
+
+type AnswerPanelFilter = "all" | "pending" | "judged" | "unanswered";
+
+type AnswerPanelRow = {
+  player: Player;
+  answer: BuzzerAnswer | null;
+  hasForfeited: boolean;
+};
+
+type AnswerJudgementPanelProps = {
+  questionNumber: number;
+  revealRound: number;
+  countdownLabel: string;
+  rows: AnswerPanelRow[];
+  pendingCount: number;
+  correctCount: number;
+  wrongCount: number;
+  unansweredCount: number;
+  canMarkAllPendingWrong: boolean;
+  isMarkingAllPendingWrong: boolean;
+  canRevealAnswer: (answer: BuzzerAnswer) => boolean;
+  canJudgeAnswer: (answer: BuzzerAnswer) => boolean;
+  onJudge: (answer: BuzzerAnswer, isCorrect: boolean) => void;
+  onMarkAllPendingWrong: () => void;
+  onClose: () => void;
+};
+
+function AnswerJudgementPanel({
+  questionNumber,
+  revealRound,
+  countdownLabel,
+  rows,
+  pendingCount,
+  correctCount,
+  wrongCount,
+  unansweredCount,
+  canMarkAllPendingWrong,
+  isMarkingAllPendingWrong,
+  canRevealAnswer,
+  canJudgeAnswer,
+  onJudge,
+  onMarkAllPendingWrong,
+  onClose,
+}: AnswerJudgementPanelProps) {
+  const [filter, setFilter] = useState<AnswerPanelFilter>("all");
+  const [filteredPlayerIds, setFilteredPlayerIds] = useState<string[] | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusFrame = window.requestAnimationFrame(() => closeRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "Tab") {
+        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        );
+        if (!focusable?.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, [onClose]);
+
+  const matchesFilter = (row: AnswerPanelRow, nextFilter: AnswerPanelFilter) => {
+    if (nextFilter === "pending") return row.answer?.status === "pending";
+    if (nextFilter === "judged") return row.answer?.status === "correct" || row.answer?.status === "wrong";
+    if (nextFilter === "unanswered") return !row.answer && !row.hasForfeited;
+    return true;
+  };
+  const rowByPlayerId = new Map(rows.map((row) => [row.player.id, row]));
+  const filteredRows = filteredPlayerIds
+    ? filteredPlayerIds.flatMap((playerId) => {
+        const row = rowByPlayerId.get(playerId);
+        return row ? [row] : [];
+      })
+    : rows;
+  const answerOrderByPlayerId = new Map(
+    rows.filter((row) => row.answer).map((row, index) => [row.player.id, index + 1]),
+  );
+  const filterOptions: Array<{ value: AnswerPanelFilter; label: string }> = [
+    { value: "all", label: "全部" },
+    { value: "pending", label: `待判定 ${pendingCount}` },
+    { value: "judged", label: `已判定 ${correctCount + wrongCount}` },
+    { value: "unanswered", label: `未回答 ${unansweredCount}` },
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center overflow-hidden bg-slate-950/55 px-3 py-3 sm:px-5 sm:py-6"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        aria-describedby="answer-judgement-panel-description"
+        aria-labelledby="answer-judgement-panel-title"
+        aria-modal="true"
+        className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl"
+        ref={dialogRef}
+        role="dialog"
+      >
+        <header className="shrink-0 border-b border-[var(--line)] px-4 py-4 sm:px-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold text-slate-950" id="answer-judgement-panel-title">
+                  回答判定面板
+                </h2>
+                <span className="rounded bg-slate-100 px-2 py-1 text-xs font-bold text-slate-700">
+                  第 {questionNumber} 题 · 第 {revealRound} 轮
+                </span>
+                <span
+                  className={[
+                    "rounded px-2 py-1 text-sm font-bold tabular-nums",
+                    countdownLabel === "已截止" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-800",
+                  ].join(" ")}
+                >
+                  {countdownLabel}
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-[var(--muted)]" id="answer-judgement-panel-description">
+                当前轮判定实时生效
+              </p>
+            </div>
+            <button
+              className="shrink-0 rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+              ref={closeRef}
+              type="button"
+              onClick={onClose}
+            >
+              关闭
+            </button>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-semibold">
+            <span className="text-slate-700">参与 {rows.length}</span>
+            <span className="text-amber-700">待判定 {pendingCount}</span>
+            <span className="text-emerald-700">答对 {correctCount}</span>
+            <span className="text-rose-700">答错 {wrongCount}</span>
+            <span className="text-slate-500">未回答 {unansweredCount}</span>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2" aria-label="回答筛选">
+            {filterOptions.map((option) => (
+              <button
+                aria-pressed={filter === option.value}
+                className={[
+                  "rounded-md border px-3 py-1.5 text-xs font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200",
+                  filter === option.value
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-[var(--line)] bg-white text-slate-700 hover:bg-slate-50",
+                ].join(" ")}
+                key={option.value}
+                type="button"
+                onClick={() => {
+                  setFilter(option.value);
+                  setFilteredPlayerIds(
+                    option.value === "all"
+                      ? null
+                      : rows.filter((row) => matchesFilter(row, option.value)).map((row) => row.player.id),
+                  );
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5">
+          <div className="grid gap-2 md:grid-cols-2">
+            {filteredRows.map(({ player, answer, hasForfeited }) => {
+              const status = answer?.status ?? null;
+              const isAnswerRevealed = Boolean(answer && canRevealAnswer(answer));
+              const canJudge = Boolean(answer && isAnswerRevealed && canJudgeAnswer(answer));
+              return (
+                <div
+                  className={[
+                    "grid min-h-20 grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border px-3 py-2.5",
+                    status === "correct"
+                      ? "border-emerald-300 bg-emerald-50"
+                      : status === "wrong"
+                        ? "border-rose-300 bg-rose-50"
+                        : "border-[var(--line)] bg-slate-50",
+                  ].join(" ")}
+                  key={player.id}
+                >
+                  <span className="text-center text-xs font-bold tabular-nums text-slate-500">
+                    {status === "correct" ? (
+                      <IconCheck className="mx-auto h-5 w-5 text-emerald-700" />
+                    ) : status === "wrong" ? (
+                      <IconXMark className="mx-auto h-5 w-5 text-rose-700" />
+                    ) : answer ? (
+                      answerOrderByPlayerId.get(player.id)
+                    ) : (
+                      "…"
+                    )}
+                  </span>
+                  <div className="min-w-0">
+                    <p
+                      className={[
+                        "break-words text-base leading-snug",
+                        answer ? "font-semibold text-slate-950" : "font-medium text-slate-500",
+                      ].join(" ")}
+                    >
+                      {answer
+                        ? isAnswerRevealed
+                          ? answer.answerText
+                          : "答案确认中…"
+                        : hasForfeited
+                          ? "已放弃"
+                          : "等待回答"}
+                    </p>
+                    {answer || hasForfeited ? (
+                      <p className="mt-1 truncate text-xs font-medium text-slate-500" title={player.nickname}>
+                        {player.nickname}
+                      </p>
+                    ) : null}
+                  </div>
+                  {answer && isAnswerRevealed ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        aria-label={`将${player.nickname}的回答判为答对`}
+                        aria-pressed={status === "correct"}
+                        className={[
+                          "grid h-10 w-10 place-items-center rounded-md border focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-40",
+                          status === "correct"
+                            ? "border-emerald-600 bg-emerald-600 text-white"
+                            : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50",
+                        ].join(" ")}
+                        disabled={!canJudge}
+                        title="判为答对"
+                        type="button"
+                        onClick={() => onJudge(answer, true)}
+                      >
+                        <IconCheck className="h-5 w-5" />
+                      </button>
+                      <button
+                        aria-label={`将${player.nickname}的回答判为答错`}
+                        aria-pressed={status === "wrong"}
+                        className={[
+                          "grid h-10 w-10 place-items-center rounded-md border focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-40",
+                          status === "wrong"
+                            ? "border-rose-600 bg-rose-600 text-white"
+                            : "border-rose-300 bg-white text-rose-700 hover:bg-rose-50",
+                        ].join(" ")}
+                        disabled={!canJudge}
+                        title="判为答错"
+                        type="button"
+                        onClick={() => onJudge(answer, false)}
+                      >
+                        <IconXMark className="h-5 w-5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="text-xs font-semibold text-slate-400">
+                      {answer ? "确认中" : hasForfeited ? "放弃" : "等待"}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <footer className="shrink-0 border-t border-[var(--line)] bg-slate-50 px-4 py-4 sm:px-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs font-medium text-[var(--muted)]">
+              {canMarkAllPendingWrong ? "仅处理当前轮尚未判定的已提交回答" : "本轮提交结束后可批量判错"}
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!canMarkAllPendingWrong || pendingCount === 0 || isMarkingAllPendingWrong}
+              onClick={onMarkAllPendingWrong}
+            >
+              {pendingCount === 0 ? "暂无未判定回答" : "未判定回答全判错"}
+              {pendingCount > 0 ? <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs tabular-nums text-slate-800">{pendingCount}</span> : null}
+            </Button>
+          </div>
+        </footer>
+      </div>
+    </div>
+  );
 }
 
 function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, revealedBlocks: number[]) {
@@ -450,7 +1191,15 @@ function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageE
   }
 }
 
-export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = false, onError, onRoomUpdated }: ImageRevealGameProps) {
+export function ImageRevealGame({
+  room,
+  playerId,
+  isPresenter,
+  isSpectator = false,
+  footerActions,
+  onError,
+  onRoomUpdated,
+}: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
@@ -464,29 +1213,41 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [answerText, setAnswerText] = useState("");
   const [teamGuessText, setTeamGuessText] = useState("");
   const [labelInput, setLabelInput] = useState("");
+  const [selectedLabelAnswerId, setSelectedLabelAnswerId] = useState<string | null>(null);
   const [resultPublishTitle, setResultPublishTitle] = useState("");
   const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
+  const [hasRoundDeadlineGraceExpired, setHasRoundDeadlineGraceExpired] = useState(false);
+  const [buzzerQueueClockTick, setBuzzerQueueClockTick] = useState(0);
   const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
-  const [isJudgingBuzzer, setIsJudgingBuzzer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
   const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
   const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isSavingLabel, setIsSavingLabel] = useState(false);
+  const [isAnswerPanelOpen, setIsAnswerPanelOpen] = useState(false);
+  const [isMarkingPendingWrong, setIsMarkingPendingWrong] = useState(false);
+  const [answerPanelCompletionCheckTick, setAnswerPanelCompletionCheckTick] = useState(0);
   const [isPublishingBeforeResult, setIsPublishingBeforeResult] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
+  const [reviewedQuestionIndex, setReviewedQuestionIndex] = useState<number | null>(null);
+  const [reviewImageLoadFailed, setReviewImageLoadFailed] = useState(false);
   const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isSpectatorLabelOpen, setIsSpectatorLabelOpen] = useState(false);
+  const [isSpectatorAnswerViewEnabled, setIsSpectatorAnswerViewEnabled] = useState(false);
+  const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
+  const [isRoundPromptSoundEnabled, setIsRoundPromptSoundEnabled] = useState(getInitialRoundPromptSoundEnabled);
+  const [isRoundPromptSoundVolumeOpen, setIsRoundPromptSoundVolumeOpen] = useState(false);
+  const [roundPromptSoundVolume, setRoundPromptSoundVolume] = useState(getInitialRoundPromptSoundVolume);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
@@ -495,27 +1256,49 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
   const [playerImageCanvas, setPlayerImageCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [imageDisplayHeight, setImageDisplayHeight] = useState<number | null>(null);
+  const imageDisplayRef = useRef<HTMLDivElement | null>(null);
   const playerImageCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const playerLoadedImageRef = useRef<{ questionId: string; imageUrl: string; image: HTMLImageElement } | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gameSessionRef = useRef<GameSession | null>(null);
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
+  const roundPromptSoundControlsRef = useRef<HTMLDivElement | null>(null);
+  const previousReviewTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const previousReviewCloseRef = useRef<HTMLButtonElement | null>(null);
+  const answerPanelTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const answerJudgementQueueRef = useRef(new Map<string, boolean>());
+  const answerJudgementFlushTimerRef = useRef<number | null>(null);
+  const answerJudgementFlushPromiseRef = useRef<Promise<void> | null>(null);
+  const answerJudgementContextRef = useRef<{ gameSessionId: string; questionIndex: number; revealRound: number } | null>(null);
+  const answerPanelAutoCloseArmedRef = useRef(false);
+  const answerPanelPendingJudgementIdsRef = useRef(new Set<string>());
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
   const roundSnapshotFetchRef = useRef<{
     gameSessionId: string;
-    promise: Promise<RoundSnapshot>;
+    promise: Promise<GameBootstrapSnapshot>;
     targetVersion: number | null;
+    generation: number;
   } | null>(null);
   const isBootstrapLoadingRef = useRef(false);
   const lastGameRealtimeVersionRef = useRef<number | null>(null);
   const missedGameRealtimeVersionRef = useRef(false);
   const gameCatchUpTargetVersionRef = useRef<number | null>(null);
+  const gameCatchUpRetryTimerRef = useRef<number | null>(null);
+  const gameCatchUpRetryAttemptRef = useRef(0);
+  const gameCatchUpGenerationRef = useRef(0);
+  const lastRoundPromptPositionRef = useRef<string | null>(null);
+  const hasObservedRoundPromptPositionRef = useRef(false);
   const onRoomUpdatedRef = useRef(onRoomUpdated);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
     playerImageCanvasRef.current = canvas;
     setPlayerImageCanvas(canvas);
+  }, []);
+
+  const setImageDisplayRef = useCallback((element: HTMLDivElement | null) => {
+    imageDisplayRef.current = element;
   }, []);
 
   const getPlayerName = useCallback(
@@ -670,11 +1453,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         setAnswers(sortBySubmittedAt(snapshot.answers));
         setBuzzerAnswers(sortBySubmittedAt(snapshot.buzzerAnswers));
 
-        if (isPresenter) {
+        if (isPresenter || isSpectator) {
           setLabelAnswers(sortBySubmittedAt(snapshot.labelAnswers.filter((answer) => !isForfeitAnswer(answer))));
-          setMyBuzzerAnswer(null);
         } else {
           setLabelAnswers([]);
+        }
+
+        if (isPresenter) {
+          setMyBuzzerAnswer(null);
+        } else {
           setMyAnswer(snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
           setMyBuzzerAnswer(snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
         }
@@ -698,35 +1485,41 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       setMyAnswer(isPresenter ? null : snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
       setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
     },
-    [isPresenter, playerId],
+    [isPresenter, isSpectator, playerId],
   );
 
   const catchUpRoundSnapshot = useCallback(() => {
     if (!room.currentGameId) {
       return;
     }
-
-    const currentFetch = roundSnapshotFetchRef.current;
-    let snapshotFetch = currentFetch?.gameSessionId === room.currentGameId ? currentFetch : null;
-    if (!snapshotFetch) {
-      const targetVersion = gameCatchUpTargetVersionRef.current;
-      const snapshotPromise = getRoundSnapshot(room.currentGameId).finally(() => {
-        if (roundSnapshotFetchRef.current?.promise === snapshotPromise) {
-          roundSnapshotFetchRef.current = null;
-        }
-      });
-      snapshotFetch = { gameSessionId: room.currentGameId, promise: snapshotPromise, targetVersion };
-      roundSnapshotFetchRef.current = snapshotFetch;
+    if (gameCatchUpRetryTimerRef.current != null) {
+      return;
     }
+
+    const generation = gameCatchUpGenerationRef.current;
+    const currentFetch = roundSnapshotFetchRef.current;
+    if (currentFetch?.gameSessionId === room.currentGameId && currentFetch.generation === generation) {
+      return;
+    }
+    const targetVersion = gameCatchUpTargetVersionRef.current;
+    const snapshotPromise = getGameBootstrapSnapshot(room.currentGameId).finally(() => {
+      if (roundSnapshotFetchRef.current?.promise === snapshotPromise) {
+        roundSnapshotFetchRef.current = null;
+      }
+    });
+    const snapshotFetch = { gameSessionId: room.currentGameId, promise: snapshotPromise, targetVersion, generation };
+    roundSnapshotFetchRef.current = snapshotFetch;
 
     snapshotFetch.promise
       .then((snapshot) => {
-        if (snapshot.gameSession.id !== room.currentGameId) {
+        if (generation !== gameCatchUpGenerationRef.current || snapshot.gameSession.id !== room.currentGameId) {
           return;
         }
 
-        applyRoundSnapshot(snapshot);
+        setQuestions(snapshot.questions);
+        applyRoundSnapshot(snapshot.roundSnapshot);
         setImageLoadFailed(false);
+        gameCatchUpRetryAttemptRef.current = 0;
         const coveredTargetVersion = snapshotFetch.targetVersion;
         if (coveredTargetVersion != null) {
           lastGameRealtimeVersionRef.current = Math.max(
@@ -749,7 +1542,23 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         }
       })
       .catch((error) => {
-        onError(error instanceof Error ? error.message : "同步游戏快照失败");
+        if (generation !== gameCatchUpGenerationRef.current) {
+          return;
+        }
+        if (!missedGameRealtimeVersionRef.current || gameCatchUpRetryAttemptRef.current === 0) {
+          onError(error instanceof Error ? error.message : "同步游戏快照失败");
+        }
+        if (missedGameRealtimeVersionRef.current && gameCatchUpRetryTimerRef.current == null) {
+          const baseRetryDelay = Math.min(15000, 500 * 2 ** Math.min(gameCatchUpRetryAttemptRef.current, 5));
+          const retryDelay = Math.round(baseRetryDelay * (0.8 + Math.random() * 0.4));
+          gameCatchUpRetryAttemptRef.current += 1;
+          gameCatchUpRetryTimerRef.current = window.setTimeout(() => {
+            gameCatchUpRetryTimerRef.current = null;
+            if (generation === gameCatchUpGenerationRef.current) {
+              catchUpRoundSnapshot();
+            }
+          }, retryDelay);
+        }
       });
   }, [applyRoundSnapshot, onError, room.currentGameId]);
 
@@ -825,17 +1634,101 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   }, []);
 
   useEffect(() => {
+    if (!isSpectator) {
+      setIsSpectatorAnswerViewEnabled(false);
+    }
+  }, [isSpectator]);
+
+  useLayoutEffect(() => {
+    const element = imageDisplayRef.current;
+
+    if (!element) {
+      setImageDisplayHeight(null);
+      return;
+    }
+
+    const updateImageDisplayHeight = () => {
+      const nextHeight = Math.round(element.getBoundingClientRect().height);
+      setImageDisplayHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
+    };
+
+    updateImageDisplayHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateImageDisplayHeight);
+      return () => window.removeEventListener("resize", updateImageDisplayHeight);
+    }
+
+    const resizeObserver = new ResizeObserver(updateImageDisplayHeight);
+    resizeObserver.observe(element);
+
+    return () => resizeObserver.disconnect();
+  }, [gameSession?.currentQuestionIndex, gameSession?.id, imageAspectRatio, isPortraitImage]);
+
+  useEffect(() => {
     gameSessionRef.current = gameSession;
   }, [gameSession]);
+
+  useEffect(() => {
+    const nextContext = gameSession
+      ? {
+          gameSessionId: gameSession.id,
+          questionIndex: gameSession.currentQuestionIndex,
+          revealRound: gameSession.currentRevealRound,
+        }
+      : null;
+    const previousContext = answerJudgementContextRef.current;
+    const didChangeRound = Boolean(
+      previousContext &&
+      (!nextContext ||
+        previousContext.gameSessionId !== nextContext.gameSessionId ||
+        previousContext.questionIndex !== nextContext.questionIndex ||
+        previousContext.revealRound !== nextContext.revealRound),
+    );
+    if (didChangeRound) {
+      answerJudgementQueueRef.current.clear();
+      answerPanelAutoCloseArmedRef.current = false;
+      answerPanelPendingJudgementIdsRef.current.clear();
+      if (answerJudgementFlushTimerRef.current !== null) {
+        window.clearTimeout(answerJudgementFlushTimerRef.current);
+        answerJudgementFlushTimerRef.current = null;
+      }
+      setIsAnswerPanelOpen(false);
+    }
+    answerJudgementContextRef.current = nextContext;
+  }, [gameSession?.currentQuestionIndex, gameSession?.currentRevealRound, gameSession?.id]);
+
+  useEffect(() => () => {
+    if (answerJudgementFlushTimerRef.current !== null) {
+      window.clearTimeout(answerJudgementFlushTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     onRoomUpdatedRef.current = onRoomUpdated;
   }, [onRoomUpdated]);
 
   useEffect(() => {
+    gameCatchUpGenerationRef.current += 1;
+    roundSnapshotFetchRef.current = null;
     lastGameRealtimeVersionRef.current = null;
     missedGameRealtimeVersionRef.current = false;
     gameCatchUpTargetVersionRef.current = null;
+    gameCatchUpRetryAttemptRef.current = 0;
+    if (gameCatchUpRetryTimerRef.current != null) {
+      window.clearTimeout(gameCatchUpRetryTimerRef.current);
+      gameCatchUpRetryTimerRef.current = null;
+    }
+
+    return () => {
+      gameCatchUpGenerationRef.current += 1;
+      roundSnapshotFetchRef.current = null;
+      missedGameRealtimeVersionRef.current = false;
+      if (gameCatchUpRetryTimerRef.current != null) {
+        window.clearTimeout(gameCatchUpRetryTimerRef.current);
+        gameCatchUpRetryTimerRef.current = null;
+      }
+    };
   }, [room.currentGameId, room.id]);
 
   useEffect(() => {
@@ -859,7 +1752,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           setQuestions(bootstrapSnapshot.questions);
           setImageLoadFailed(false);
           applyRoundSnapshot(bootstrapSnapshot.roundSnapshot);
-          missedGameRealtimeVersionRef.current = false;
+          if (gameCatchUpTargetVersionRef.current == null) {
+            missedGameRealtimeVersionRef.current = false;
+          } else {
+            missedGameRealtimeVersionRef.current = true;
+            catchUpRoundSnapshot();
+          }
         }
       } catch (error) {
         if (isMounted) {
@@ -879,7 +1777,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       isMounted = false;
       unbindGameSessionTopic();
     };
-  }, [applyRoundSnapshot, onError, room.currentGameId, room.id]);
+  }, [applyRoundSnapshot, catchUpRoundSnapshot, onError, room.currentGameId, room.id]);
 
   const applyRealtimeDelta = useCallback(
     (delta: RealtimeDelta) => {
@@ -1008,6 +1906,21 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           }
         }
       }
+
+      if (delta.scope === "game" && delta.type === "answer_judgements_changed" && delta.gameSession.id === room.currentGameId) {
+        const didApplyGameSession = applyGameSessionDelta(delta.gameSession);
+        if (!didApplyGameSession) return;
+        setScores(delta.scores);
+        setQuestionResults(delta.questionResults);
+        setBuzzerAnswers((currentAnswers) =>
+          sortBySubmittedAt(delta.answers.reduce((nextAnswers, answer) => upsertById(nextAnswers, answer), currentAnswers)),
+        );
+        if (delta.gameSession.gameMode !== "ROUND_REVEAL" && !delta.gameSession.roundStartedAt) {
+          setLabelAnswers((currentAnswers) => applyCorrectBuzzerAnswerChanges(currentAnswers, delta.answers));
+        }
+        const ownAnswer = delta.answers.find((answer) => answer.playerId === playerId);
+        if (ownAnswer) setMyBuzzerAnswer(ownAnswer);
+      }
     },
     [applyRoundSnapshot, isPresenter, playerId, room.currentGameId, room.id, showAnswerBubble],
   );
@@ -1060,6 +1973,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        if (message.name === "authorityRecovered") {
+          missedGameRealtimeVersionRef.current = true;
+          if (messageVersion != null) {
+            gameCatchUpTargetVersionRef.current = Math.max(gameCatchUpTargetVersionRef.current ?? 0, messageVersion);
+          }
+          clearQueuedRealtimeDeltas();
+          catchUpRoundSnapshot();
+          return;
+        }
         if (messageVersion != null) {
           const lastVersion = lastGameRealtimeVersionRef.current;
           if (lastVersion != null && messageVersion <= lastVersion) {
@@ -1109,6 +2031,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           }
 
           if (!isBootstrapLoadingRef.current) {
+            missedGameRealtimeVersionRef.current = true;
             clearQueuedRealtimeDeltas();
             catchUpRoundSnapshot();
           }
@@ -1138,16 +2061,27 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
+    const updateRoundClock = () => {
+      const estimatedServerNowMs = getEstimatedServerNowMs();
       setRemainingSeconds(
-        getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds, getEstimatedServerNowMs()),
+        getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds, estimatedServerNowMs),
       );
-    }, 500);
+      const roundStartedAtMs = gameSession?.roundStartedAt ? new Date(gameSession.roundStartedAt).getTime() : Number.NaN;
+      setHasRoundDeadlineGraceExpired(
+        Number.isFinite(roundStartedAtMs) &&
+          estimatedServerNowMs >= roundStartedAtMs + (gameSession?.roundSeconds ?? DEFAULT_ROUND_SECONDS) * 1000 + ROUND_DEADLINE_GRACE_MS,
+      );
+    };
+    updateRoundClock();
+    const timer = window.setInterval(updateRoundClock, 500);
 
     return () => window.clearInterval(timer);
   }, [gameSession?.roundSeconds, gameSession?.roundStartedAt]);
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
+  const previousQuestionIndex = gameSession && gameSession.currentQuestionIndex > 0 ? gameSession.currentQuestionIndex - 1 : null;
+  const previousQuestion = previousQuestionIndex == null ? null : questions[previousQuestionIndex] ?? null;
+  const reviewedQuestion = reviewedQuestionIndex == null ? null : questions[reviewedQuestionIndex] ?? null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
   const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
   const revealGrid = getRevealGridConfig(isPortraitImage);
@@ -1278,6 +2212,46 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
 
   useEffect(() => {
+    if (reviewedQuestionIndex == null) {
+      return;
+    }
+
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusFrame = window.requestAnimationFrame(() => previousReviewCloseRef.current?.focus());
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setReviewedQuestionIndex(null);
+      }
+
+      if (event.key === "Tab") {
+        event.preventDefault();
+        previousReviewCloseRef.current?.focus();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      previousReviewTriggerRef.current?.focus();
+    };
+  }, [reviewedQuestionIndex]);
+
+  function handleOpenPreviousQuestionReview(event: React.MouseEvent<HTMLButtonElement>) {
+    if (isTeamBattleMode || previousQuestionIndex == null || !previousQuestion) {
+      return;
+    }
+
+    previousReviewTriggerRef.current = event.currentTarget;
+    setReviewImageLoadFailed(false);
+    setReviewedQuestionIndex(previousQuestionIndex);
+  }
+
+  useEffect(() => {
     setSelectedBlocks((currentBlocks) => {
       const nextBlocks = currentBlocks.filter((blockIndex) => blockIndex < visibleBlockCount && !revealedBlockSet.has(blockIndex));
 
@@ -1373,10 +2347,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     () => eligibleGuesserIds.filter((guesserId) => !correctPlayerSet.has(guesserId)),
     [correctPlayerSet, eligibleGuesserIds],
   );
+  const previousRoundCorrectPlayerSet = useMemo(
+    () => new Set(questionResults.filter((result) => result.scoredRound < currentRound).map((result) => result.playerId)),
+    [currentRound, questionResults],
+  );
+  const currentRoundParticipantIds = useMemo(
+    () => eligibleGuesserIds.filter((guesserId) => !previousRoundCorrectPlayerSet.has(guesserId)),
+    [eligibleGuesserIds, previousRoundCorrectPlayerSet],
+  );
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
+  const currentRoundAnswerByPlayerId = useMemo(
+    () => new Map(answers.filter((answer) => !isForfeitAnswer(answer)).map((answer) => [answer.playerId, answer])),
+    [answers],
+  );
   const currentRoundForfeitPlayerSet = useMemo(
     () => new Set(answers.filter((answer) => isForfeitAnswer(answer)).map((answer) => answer.playerId)),
     [answers],
+  );
+  const correctAnswerByPlayerId = useMemo(
+    () => new Map(labelAnswers.map((answer) => [answer.playerId, answer])),
+    [labelAnswers],
   );
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
   const buzzerAnswerByPlayerId = useMemo(
@@ -1395,8 +2385,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     return scoreByPlayerId;
   }, [questionResults]);
   const pendingBuzzerAnswers = useMemo(
-    () => sortBySubmittedAt(buzzerAnswers.filter((answer) => answer.status === "pending")),
-    [buzzerAnswers],
+    () =>
+      sortBySubmittedAt(
+        buzzerAnswers.filter((answer) => answer.status === "pending" && eligibleGuesserIdSet.has(answer.playerId)),
+      ),
+    [buzzerAnswers, eligibleGuesserIdSet],
   );
   const judgedBuzzerAnswerPlayerSet = useMemo(
     () => new Set(buzzerAnswers.filter((answer) => answer.status !== "pending").map((answer) => answer.playerId)),
@@ -1407,6 +2400,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     : answers.filter(
         (answer) =>
           !isForfeitAnswer(answer) &&
+          eligibleGuesserIdSet.has(answer.playerId) &&
           !correctPlayerSet.has(answer.playerId) &&
           !judgedBuzzerAnswerPlayerSet.has(answer.playerId),
       ).length;
@@ -1418,6 +2412,58 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       ? firstPendingBuzzerAnswer
       : null;
   const isWaitingForBuzzerQueueStability = Boolean(firstPendingBuzzerAnswer && !currentBuzzerAnswer);
+  const answerPanelRows = useMemo<AnswerPanelRow[]>(
+    () =>
+      currentRoundParticipantIds.flatMap((participantId) => {
+        const player = activePlayerById.get(participantId);
+        if (!player) return [];
+        return [{
+          player,
+          answer: buzzerAnswerByPlayerId.get(participantId) ?? null,
+          hasForfeited: currentRoundForfeitPlayerSet.has(participantId),
+        }];
+      }).sort((a, b) => {
+        if (a.answer && b.answer) return comparePlayerAnswerOrder(a.answer, b.answer);
+        if (a.answer) return -1;
+        if (b.answer) return 1;
+        if (a.hasForfeited !== b.hasForfeited) return a.hasForfeited ? -1 : 1;
+        return currentRoundParticipantIds.indexOf(a.player.id) - currentRoundParticipantIds.indexOf(b.player.id);
+      }),
+    [activePlayerById, buzzerAnswerByPlayerId, currentRoundForfeitPlayerSet, currentRoundParticipantIds],
+  );
+  const answerPanelPendingCount = answerPanelRows.filter((row) => row.answer?.status === "pending").length;
+  const answerPanelCorrectCount = answerPanelRows.filter((row) => row.answer?.status === "correct").length;
+  const answerPanelWrongCount = answerPanelRows.filter((row) => row.answer?.status === "wrong").length;
+  const answerPanelUnansweredCount = answerPanelRows.filter((row) => !row.answer && !row.hasForfeited).length;
+  const areAllPendingPanelAnswersReady = answerPanelRows.every(
+    (row) => !row.answer || row.answer.status !== "pending" || isBuzzerAnswerReadyForJudging(row.answer, getEstimatedServerNowMs()),
+  );
+  useEffect(() => {
+    if (!firstPendingBuzzerAnswer || !isWaitingForBuzzerQueueStability) return;
+
+    const readyAtMs =
+      new Date(firstPendingBuzzerAnswer.serverReceivedAt ?? firstPendingBuzzerAnswer.submittedAt).getTime() +
+      BUZZER_JUDGING_STABILIZE_MS;
+    const delayMs = Math.max(0, readyAtMs - getEstimatedServerNowMs());
+    const timer = window.setTimeout(() => setBuzzerQueueClockTick((tick) => tick + 1), delayMs + 20);
+    return () => window.clearTimeout(timer);
+  }, [firstPendingBuzzerAnswer, isWaitingForBuzzerQueueStability]);
+
+  useEffect(() => {
+    if (!isAnswerPanelOpen) return;
+    const nowMs = getEstimatedServerNowMs();
+    const nextReadyAtMs = buzzerAnswers.reduce<number | null>((nextReadyAt, answer) => {
+      const readyAt = new Date(answer.serverReceivedAt ?? answer.submittedAt).getTime() + BUZZER_JUDGING_STABILIZE_MS;
+      if (!Number.isFinite(readyAt) || readyAt <= nowMs) return nextReadyAt;
+      return nextReadyAt == null ? readyAt : Math.min(nextReadyAt, readyAt);
+    }, null);
+    if (nextReadyAtMs == null) return;
+    const timer = window.setTimeout(
+      () => setBuzzerQueueClockTick((tick) => tick + 1),
+      Math.max(0, nextReadyAtMs - nowMs) + 20,
+    );
+    return () => window.clearTimeout(timer);
+  }, [buzzerAnswers, buzzerQueueClockTick, isAnswerPanelOpen]);
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
@@ -1440,8 +2486,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             correctCount: playerScore?.correctCount ?? 0,
           };
         })
-        .sort((a, b) => b.score - a.score),
+        .sort((a, b) => b.score - a.score)
+        .map((row, index, rows) => ({
+          ...row,
+          rank: getCompetitionRankByScore(rows, index),
+        })),
     [gamePlayers, room.currentPresenterPlayerId, scoreByPlayerId],
+  );
+  const presenterName = useMemo(
+    () => room.players.find((player) => player.id === room.currentPresenterPlayerId)?.nickname ?? "未选择",
+    [room.currentPresenterPlayerId, room.players],
   );
   const teamBattleScoreRows = useMemo(
     () =>
@@ -1450,13 +2504,29 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             .map((team) => ({
               team,
               score: teamBattleState.teamScores[team],
+              previousTurnAction:
+                (teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE") &&
+                teamBattleState.previousTurnAction?.team === team
+                  ? teamBattleState.previousTurnAction
+                  : null,
               members: teamBattleState.teams[team].flatMap((memberId) => {
                 const player = activePlayerById.get(memberId);
+                const hasActed =
+                  team === teamBattleState.activeTeam &&
+                  (teamBattleState.phase === "REVEAL_VOTE"
+                    ? Object.prototype.hasOwnProperty.call(teamBattleState.revealVotes, memberId)
+                    : teamBattleState.phase === "GUESS_VOTE"
+                      ? Object.prototype.hasOwnProperty.call(teamBattleState.guessVotes, memberId)
+                      : false);
 
-                return player ? [{ id: memberId, nickname: player.nickname }] : [];
+                return player ? [{ id: memberId, nickname: player.nickname, hasActed }] : [];
               }),
             }))
             .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+            .map((row, index, rows) => ({
+              ...row,
+              rank: getCompetitionRankByScore(rows, index),
+            }))
         : [],
     [activePlayerById, teamBattleState],
   );
@@ -1607,7 +2677,22 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     !(!isBuzzerMode && myBuzzerAnswer?.status === "wrong");
   const canTypeTeamBattleGuess =
     teamBattleCanAct && teamBattleState?.phase === "GUESS_VOTE" && !teamBattleIsVoteClosed;
-  const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
+  const canJudgeBuzzer =
+    isPresenter &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    Boolean(gameSession) &&
+    Boolean(currentBuzzerAnswer && canJudgePanelAnswer(currentBuzzerAnswer));
+  const canOpenAnswerPanel =
+    isPresenter &&
+    !isTeamBattleMode &&
+    Boolean(gameSession) &&
+    (hasRoundStarted || isQuestionReviewing || answerPanelRows.some((row) => row.answer || row.hasForfeited));
+  const canMarkAllPendingWrong =
+    Boolean(gameSession) &&
+    answerPanelPendingCount > 0 &&
+    areAllPendingPanelAnswersReady &&
+    (hasRoundDeadlineGraceExpired || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || isQuestionReviewing);
   const canSettleBuzzerRound =
     isPresenter &&
     !isTeamBattleMode &&
@@ -1623,6 +2708,132 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     isPresenter && isTeamBattleMode && Boolean(teamBattleState) && Boolean(currentQuestion) && !isQuestionReviewing && !imageLoadFailed;
   const canPreviewSpectatorOriginal = isSpectator && Boolean(currentQuestion) && !imageLoadFailed;
   const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal || canPreviewSpectatorOriginal;
+  const canPlayRoundPromptSound =
+    !isPresenter &&
+    !isSpectator &&
+    !isTeamBattleMode &&
+    isCurrentPlayerEligibleForQuestion &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect;
+
+  const closeAnswerPanel = useCallback(() => {
+    answerPanelAutoCloseArmedRef.current = false;
+    setIsAnswerPanelOpen(false);
+    window.requestAnimationFrame(() => answerPanelTriggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!isAnswerPanelOpen || !answerPanelAutoCloseArmedRef.current) return;
+    answerPanelAutoCloseArmedRef.current = false;
+    const hasCompletedCurrentRoundJudgement =
+      answerPanelPendingCount === 0 &&
+      (answerPanelUnansweredCount === 0 || hasFirstCorrectAnswer || isQuestionReviewing);
+    if (hasCompletedCurrentRoundJudgement) {
+      closeAnswerPanel();
+    }
+  }, [answerPanelCompletionCheckTick, answerPanelPendingCount, answerPanelUnansweredCount, closeAnswerPanel, hasFirstCorrectAnswer, isAnswerPanelOpen, isQuestionReviewing]);
+
+  function canJudgePanelAnswer(answer: BuzzerAnswer) {
+    if (!gameSession || answer.questionIndex !== gameSession.currentQuestionIndex || answer.revealRound !== gameSession.currentRevealRound) {
+      return false;
+    }
+    if (gameSession.gameMode !== "BUZZER_FIRST_CORRECT") return true;
+    if (answer.status !== "pending") {
+      if (answer.status === "correct") return true;
+      const answerIndex = buzzerAnswers.findIndex((candidate) => candidate.id === answer.id);
+      return (
+        answerPanelCorrectCount === 0 &&
+        answerIndex >= 0 &&
+        buzzerAnswers.slice(0, answerIndex).every((candidate) => candidate.status === "wrong")
+      );
+    }
+    return currentBuzzerAnswer?.id === answer.id && answerPanelCorrectCount === 0;
+  }
+
+  function canRevealPanelAnswer(answer: BuzzerAnswer) {
+    return isBuzzerAnswerReadyForJudging(answer, getEstimatedServerNowMs());
+  }
+
+  function handleToggleRoundPromptSound() {
+    const nextEnabled = !isRoundPromptSoundEnabled;
+    setIsRoundPromptSoundEnabled(nextEnabled);
+    saveRoundPromptSoundEnabled(nextEnabled);
+
+    if (!nextEnabled) {
+      setIsRoundPromptSoundVolumeOpen(false);
+    }
+
+    if (nextEnabled) {
+      playRoundPromptSound(roundPromptSoundVolume);
+    }
+  }
+
+  function handleRoundPromptSoundVolumeChange(volume: number) {
+    const nextVolume = Math.max(0, Math.min(100, Math.round(volume)));
+    setRoundPromptSoundVolume(nextVolume);
+    saveRoundPromptSoundVolume(nextVolume);
+  }
+
+  function handleRoundPromptSoundVolumePreview() {
+    if (isRoundPromptSoundEnabled) {
+      playRoundPromptSound(roundPromptSoundVolume);
+    }
+  }
+
+  useEffect(() => {
+    if (!gameSession) {
+      lastRoundPromptPositionRef.current = null;
+      hasObservedRoundPromptPositionRef.current = false;
+      return;
+    }
+
+    const roundPosition = [
+      gameSession.id,
+      gameSession.currentQuestionIndex,
+      gameSession.currentRevealRound,
+      gameSession.roundStartedAt ?? "waiting",
+    ].join(":");
+    const previousRoundPosition = lastRoundPromptPositionRef.current;
+    const hasObservedRoundPosition = hasObservedRoundPromptPositionRef.current;
+
+    lastRoundPromptPositionRef.current = roundPosition;
+    hasObservedRoundPromptPositionRef.current = true;
+
+    if (
+      !hasObservedRoundPosition ||
+      previousRoundPosition === roundPosition ||
+      !gameSession.roundStartedAt ||
+      !isRoundPromptSoundEnabled ||
+      !canPlayRoundPromptSound
+    ) {
+      return;
+    }
+
+    playRoundPromptSound(roundPromptSoundVolume);
+  }, [
+    canPlayRoundPromptSound,
+    gameSession,
+    isRoundPromptSoundEnabled,
+    roundPromptSoundVolume,
+  ]);
+
+  useEffect(() => {
+    if (!isRoundPromptSoundVolumeOpen) {
+      return;
+    }
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      const controlsElement = roundPromptSoundControlsRef.current;
+      if (controlsElement && event.target instanceof Node && controlsElement.contains(event.target)) {
+        return;
+      }
+
+      setIsRoundPromptSoundVolumeOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handleDocumentPointerDown);
+    return () => document.removeEventListener("pointerdown", handleDocumentPointerDown);
+  }, [isRoundPromptSoundVolumeOpen]);
 
   useEffect(() => {
     if (!canTypeAnswer || !gameSession?.roundStartedAt) {
@@ -1702,6 +2913,31 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人打开图片";
   let standardTaskTone = "border-slate-200 bg-white";
+  let spectatorTaskTitle = isQuestionReviewing ? "本题复盘" : "玩家视角";
+  let spectatorTaskDetail = isQuestionReviewing ? "等待切换下一题" : "按住 V 可临时查看原图";
+
+  if (!isTeamBattleMode) {
+    if (isQuestionReviewing) {
+      spectatorTaskTitle = "本题复盘";
+      spectatorTaskDetail = "等待切换下一题";
+    } else if (!hasRoundStarted) {
+      spectatorTaskTitle = "等待揭图";
+      spectatorTaskDetail = "出题人正在选格";
+    } else if (!isRoundClosedForPlayerActions) {
+      spectatorTaskTitle = isBuzzerMode ? "抢答中" : "作答中";
+      spectatorTaskDetail = `${standardSubmittedCount}/${standardTotalCount} ${isBuzzerMode ? "已抢答" : "已提交"}`;
+    } else if (hasPendingJudgement) {
+      spectatorTaskTitle = "判定中";
+      spectatorTaskDetail = isWaitingForBuzzerQueueStability
+        ? isBuzzerMode
+          ? "正在确认抢答顺序"
+          : "正在确认提交顺序"
+        : `${pendingJudgementCount} 人待判定`;
+    } else {
+      spectatorTaskTitle = "本轮结束";
+      spectatorTaskDetail = `等待出题人${standardSettleActionText}`;
+    }
+  }
 
   if (!isTeamBattleMode && !isQuestionReviewing) {
     if (isPresenter) {
@@ -1842,6 +3078,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
   useEffect(() => {
     setLabelInput("");
+    setSelectedLabelAnswerId(null);
     setIsLabelModalOpen(false);
   }, [currentQuestion?.id, currentQuestionLabel]);
 
@@ -1896,6 +3133,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         currentQuestions.map((question) => (question.id === updatedQuestion.id ? updatedQuestion : question)),
       );
       setLabelInput("");
+      setSelectedLabelAnswerId(null);
       setIsLabelModalOpen(false);
     } catch (error) {
       onError(error instanceof Error ? error.message : "保存正确答案失败");
@@ -1904,19 +3142,37 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     }
   }
 
-  function handleSaveManualLabel() {
+  function handleSaveQuestionLabel() {
+    const selectedAnswer = selectedLabelAnswerId
+      ? labelAnswers.find((answer) => answer.id === selectedLabelAnswerId)
+      : null;
     const nextLabel = labelInput.trim();
 
+    if (selectedAnswer) {
+      void saveQuestionLabel({
+        labelText: selectedAnswer.answerText,
+        source: "answer",
+        answerId: selectedAnswer.id,
+      });
+      return;
+    }
+
     if (!nextLabel) {
-      onError("请先输入正确答案");
+      onError("请先选择或输入要展示的答案");
       return;
     }
 
     void saveQuestionLabel({ labelText: nextLabel, source: "manual" });
   }
 
-  function handleUseAnswerAsLabel(answer: Answer) {
-    void saveQuestionLabel({ labelText: answer.answerText, source: "answer", answerId: answer.id });
+  function handleSelectLabelAnswer(answerId: string) {
+    setSelectedLabelAnswerId(answerId);
+    setLabelInput("");
+  }
+
+  function handleLabelInputChange(value: string) {
+    setLabelInput(value);
+    setSelectedLabelAnswerId(null);
   }
 
   function handleDisableLabelPromptForGame() {
@@ -2219,41 +3475,130 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     void (isBuzzerMode ? handleSubmitBuzzerAnswer() : handleSubmitAnswer());
   }
 
+  function applyAnswerJudgementResult(result: Awaited<ReturnType<typeof setAnswerJudgements>>) {
+    if (!applyGameSessionDelta(result.gameSession)) return;
+    setScores(result.scores);
+    setQuestionResults(result.questionResults);
+    setBuzzerAnswers((currentAnswers) =>
+      sortBySubmittedAt(result.judgedAnswers.reduce((nextAnswers, answer) => upsertById(nextAnswers, answer), currentAnswers)),
+    );
+    if (result.gameSession.gameMode !== "ROUND_REVEAL" && !result.gameSession.roundStartedAt) {
+      setLabelAnswers((currentAnswers) => applyCorrectBuzzerAnswerChanges(currentAnswers, result.judgedAnswers));
+    }
+    const ownAnswer = result.judgedAnswers.find((answer) => answer.playerId === playerId);
+    if (ownAnswer) setMyBuzzerAnswer(ownAnswer);
+  }
+
+  async function flushAnswerJudgementBatch(): Promise<void> {
+    if (answerJudgementFlushPromiseRef.current) {
+      await answerJudgementFlushPromiseRef.current;
+      return;
+    }
+    const context = answerJudgementContextRef.current;
+    const queued = [...answerJudgementQueueRef.current.entries()].slice(0, 12);
+    if (!context || queued.length === 0) return;
+    for (const [answerId] of queued) answerJudgementQueueRef.current.delete(answerId);
+
+    const flushPromise = setAnswerJudgements({
+      gameSessionId: context.gameSessionId,
+      presenterPlayerId: playerId,
+      expectedQuestionIndex: context.questionIndex,
+      expectedRevealRound: context.revealRound,
+      judgements: queued.map(([buzzerAnswerId, isCorrect]) => ({ buzzerAnswerId, isCorrect })),
+    })
+      .then(applyAnswerJudgementResult)
+      .catch((error) => {
+        for (const [answerId] of queued) {
+          if (!answerJudgementQueueRef.current.has(answerId)) {
+            answerPanelPendingJudgementIdsRef.current.delete(answerId);
+          }
+        }
+        catchUpRoundSnapshot();
+        throw error;
+      })
+      .finally(() => {
+        answerJudgementFlushPromiseRef.current = null;
+        if (answerJudgementQueueRef.current.size > 0 && answerJudgementFlushTimerRef.current === null) {
+          answerJudgementFlushTimerRef.current = window.setTimeout(() => {
+            answerJudgementFlushTimerRef.current = null;
+            void drainAnswerJudgementQueue().catch((error) => {
+              onError(error instanceof Error ? error.message : "判定答案失败");
+            });
+          }, ANSWER_JUDGEMENT_BATCH_WINDOW_MS);
+        }
+      });
+    answerJudgementFlushPromiseRef.current = flushPromise;
+    await flushPromise;
+  }
+
+  async function drainAnswerJudgementQueue() {
+    if (answerJudgementFlushTimerRef.current !== null) {
+      window.clearTimeout(answerJudgementFlushTimerRef.current);
+      answerJudgementFlushTimerRef.current = null;
+    }
+    let didFlushJudgements = false;
+    while (answerJudgementFlushPromiseRef.current || answerJudgementQueueRef.current.size > 0) {
+      await flushAnswerJudgementBatch();
+      didFlushJudgements = true;
+    }
+    const didCompletePendingJudgements = answerPanelPendingJudgementIdsRef.current.size > 0;
+    answerPanelPendingJudgementIdsRef.current.clear();
+    if (didFlushJudgements && didCompletePendingJudgements && isAnswerPanelOpen) {
+      answerPanelAutoCloseArmedRef.current = true;
+      setAnswerPanelCompletionCheckTick((tick) => tick + 1);
+    }
+  }
+
+  function queueAnswerJudgement(answer: BuzzerAnswer, isCorrect: boolean) {
+    if (answer.status === (isCorrect ? "correct" : "wrong") && !answerJudgementQueueRef.current.has(answer.id)) return;
+    if (answer.status === "pending") {
+      answerPanelPendingJudgementIdsRef.current.add(answer.id);
+    }
+    answerJudgementQueueRef.current.set(answer.id, isCorrect);
+    setBuzzerAnswers((currentAnswers) =>
+      currentAnswers.map((currentAnswer) =>
+        currentAnswer.id === answer.id
+          ? { ...currentAnswer, status: isCorrect ? "correct" : "wrong", scoreAwarded: isCorrect ? currentAnswer.scoreAwarded : 0 }
+          : currentAnswer,
+      ),
+    );
+    if (answerJudgementFlushTimerRef.current !== null) return;
+    answerJudgementFlushTimerRef.current = window.setTimeout(() => {
+      answerJudgementFlushTimerRef.current = null;
+      void drainAnswerJudgementQueue().catch((error) => {
+        onError(error instanceof Error ? error.message : "判定答案失败");
+      });
+    }, ANSWER_JUDGEMENT_BATCH_WINDOW_MS);
+  }
+
   async function handleJudgeBuzzerAnswer(isCorrect: boolean) {
     if (!gameSession || !currentBuzzerAnswer) {
       return;
     }
+    queueAnswerJudgement(currentBuzzerAnswer, isCorrect);
+  }
 
-    setIsJudgingBuzzer(true);
+  async function handleMarkPendingRoundAnswersWrong() {
+    const context = answerJudgementContextRef.current;
+    if (!context) return;
+    setIsMarkingPendingWrong(true);
     try {
-      const judged = await judgeBuzzerAnswer({
-        gameSessionId: gameSession.id,
+      await drainAnswerJudgementQueue();
+      const result = await markPendingRoundAnswersWrong({
+        gameSessionId: context.gameSessionId,
         presenterPlayerId: playerId,
-        buzzerAnswerId: currentBuzzerAnswer.id,
-        isCorrect,
+        expectedQuestionIndex: context.questionIndex,
+        expectedRevealRound: context.revealRound,
       });
-      applyRoundSnapshotFromResult(judged) || applyGameSession(judged.gameSession);
-      if (judged.scores) {
-        setScores(judged.scores);
-      }
-      const judgedQuestionResults = judged.questionResults;
-      if (judgedQuestionResults) {
-        setQuestionResults((currentResults) =>
-          judgedQuestionResults.reduce((nextResults, questionResult) => upsertById(nextResults, questionResult), currentResults),
-        );
-      }
-      if (judged.buzzerAnswers) {
-        setBuzzerAnswers(sortBySubmittedAt(judged.buzzerAnswers));
-        if (judged.gameSession.gameMode !== "ROUND_REVEAL" && !judged.gameSession.roundStartedAt) {
-          setLabelAnswers(getCorrectLabelAnswersFromBuzzerAnswers(judged.buzzerAnswers));
-        }
-      } else {
-        setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, judged.judgedAnswer));
+      applyAnswerJudgementResult(result);
+      if (isAnswerPanelOpen) {
+        answerPanelAutoCloseArmedRef.current = true;
+        setAnswerPanelCompletionCheckTick((tick) => tick + 1);
       }
     } catch (error) {
-      onError(error instanceof Error ? error.message : "判定答案失败");
+      onError(error instanceof Error ? error.message : "批量判错失败");
     } finally {
-      setIsJudgingBuzzer(false);
+      setIsMarkingPendingWrong(false);
     }
   }
 
@@ -2264,6 +3609,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
     setIsSettlingBuzzerRound(true);
     try {
+      await drainAnswerJudgementQueue();
       const settled = await settleBuzzerRound({
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
@@ -2281,9 +3627,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       return;
     }
 
+    await drainAnswerJudgementQueue();
     const skipped = await skipCurrentQuestion({
       gameSessionId: gameSession.id,
       presenterPlayerId: playerId,
+      expectedQuestionIndex: gameSession.currentQuestionIndex,
     });
     applyRoundSnapshotFromResult(skipped) || applyGameSession(skipped.gameSession);
     setImageLoadFailed(false);
@@ -2347,9 +3695,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
       return;
     }
 
+    await drainAnswerJudgementQueue();
     const advanced = await advanceReviewedQuestion({
       gameSessionId: gameSession.id,
       presenterPlayerId: playerId,
+      expectedQuestionIndex: gameSession.currentQuestionIndex,
     });
     applyRoundSnapshotFromResult(advanced) || applyGameSession(advanced.gameSession);
     setImageLoadFailed(false);
@@ -2453,12 +3803,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     }
   }
 
+  const fallbackFooterActions = footerActions ? (
+    <div className="flex flex-wrap items-center justify-end gap-3">{footerActions}</div>
+  ) : null;
+
   if (isLoading) {
-    return <p className="text-sm text-[var(--muted)]">正在加载当前题目…</p>;
+    return (
+      <div className="space-y-4">
+        <p className="text-sm text-[var(--muted)]">正在加载当前题目…</p>
+        {fallbackFooterActions}
+      </div>
+    );
   }
 
   if (!gameSession || !currentQuestion) {
-    return <p className="text-sm text-red-700">没有找到当前游戏题目</p>;
+    return (
+      <div className="space-y-4">
+        <p className="text-sm text-red-700">没有找到当前游戏题目</p>
+        {fallbackFooterActions}
+      </div>
+    );
   }
 
   const currentPlayerName = room.players.find((player) => player.id === playerId)?.nickname ?? "未设置昵称";
@@ -2472,6 +3836,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           ? "个人 · 顺位得分模式"
           : "团队 · 对抗模式";
   const revealedBlocksCardValue = `${visibleRevealedBlockCount} / ${visibleBlockCount} 格`;
+  const correctPlayersCardValue = `${correctPlayerSet.size} / ${scoringEligibleGuesserIds.length} 人`;
   const teamBattleScoreCardValue = teamBattleState
     ? `红队 ${teamBattleState.teamScores.red} : ${teamBattleState.teamScores.blue} 蓝队`
     : "";
@@ -2482,11 +3847,36 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         ? "复盘"
         : `${getTeamName(teamBattleActiveTeam)} · ${teamBattlePhaseLabel}`
     : "";
+  const sidePanelHeightStyle = {
+    "--image-display-height": imageDisplayHeight ? `${imageDisplayHeight}px` : "78vh",
+  } as CSSProperties;
+  const showSpectatorAnswersInScoreboard =
+    isSpectator && isSpectatorAnswerViewEnabled && !isScoreboardCompact && !isTeamBattleMode;
 
   const scorePanel = (
-    <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+    <div
+      className="flex flex-col rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)]"
+      style={sidePanelHeightStyle}
+    >
+      <div className="mb-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+        <p className="text-sm font-semibold text-slate-900">积分榜</p>
+        <span className="min-w-0 max-w-full justify-self-end truncate rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600" title={`出题人：${presenterName}`}>
+          出题人：{presenterName}
+        </span>
+        {!isTeamBattleMode ? (
+          <button
+            aria-label={isScoreboardCompact ? "切换为详细积分榜" : "切换为紧凑积分榜"}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 transition hover:bg-slate-50 hover:text-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+            title={isScoreboardCompact ? "详细积分榜" : "紧凑积分榜"}
+            type="button"
+            onClick={() => setIsScoreboardCompact((isCompact) => !isCompact)}
+          >
+            {isScoreboardCompact ? <IconListDetail className="h-4 w-4" /> : <IconListDense className="h-4 w-4" />}
+          </button>
+        ) : null}
+      </div>
       {isTeamBattleMode && teamBattleState ? (
-        <>
+        <div className="flex min-h-0 flex-1 flex-col">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm">
             <span className="font-semibold text-slate-950">我的身份</span>
             <span
@@ -2500,32 +3890,41 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               {isPresenter ? "裁判" : teamBattlePlayerTeam ? getTeamName(teamBattlePlayerTeam) : isSpectator ? "观战" : "待分队"}
             </span>
           </div>
-          <p className="mb-2 text-sm font-semibold text-slate-900">队伍</p>
-          <div className="grid gap-2">
-            {teamBattleScoreRows.map((row, index) => {
+          <p className="mb-2 text-xs font-semibold text-[var(--muted)]">队伍</p>
+          <div className="grid gap-2 lg:min-h-0 lg:flex-1 lg:grid-rows-2">
+            {teamBattleScoreRows.map((row) => {
               const isActiveTeam = teamBattleState.activeTeam === row.team;
               const tone = getTeamTone(row.team);
 
               return (
                 <div
                   className={[
-                    "rounded-md border px-3 py-3 text-sm",
+                    "flex min-h-0 flex-col overflow-hidden rounded-md border px-3 py-3 text-sm",
                     tone.panel,
                     isActiveTeam ? `ring-2 ${tone.ring}` : "",
                   ].join(" ")}
                   key={row.team}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-[var(--muted)]">#{index + 1}</p>
-                      <p className={["font-bold", tone.text].join(" ")}>
-                        {getTeamName(row.team)}
-                        {isActiveTeam ? " · 行动中" : ""}
-                      </p>
-                    </div>
-                    <span className="text-xl font-bold text-slate-950">{row.score}</span>
+                    <p className={["min-w-0 font-bold", tone.text].join(" ")}>
+                      {getTeamName(row.team)}
+                      {isActiveTeam ? " · 行动中" : ""}
+                    </p>
+                    <span className="text-xl font-bold text-[var(--primary)]">{row.score}</span>
                   </div>
-                  <div className="mt-3 grid gap-2">
+                  {row.previousTurnAction ? (
+                    <p className="mt-2 shrink-0 break-words text-xs font-semibold leading-5 text-slate-700">
+                      {row.previousTurnAction.type === "skip" ? (
+                        "上轮：选择不猜"
+                      ) : (
+                        <>
+                          上轮：猜「<span className="font-bold text-slate-950">{row.previousTurnAction.answerText}</span>」 · 猜错
+                        </>
+                      )}
+                    </p>
+                  ) : null}
+                  <div className="my-3 h-px shrink-0 bg-slate-900/10" />
+                  <div className="grid min-h-0 gap-2 lg:flex-1 lg:auto-rows-max lg:overflow-y-auto lg:pr-1">
                     {row.members.map((member) => (
                       <div
                         className={[
@@ -2534,7 +3933,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                         ].join(" ")}
                         key={member.id}
                       >
-                        <span className="block truncate font-semibold text-slate-950">{member.nickname}</span>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate font-semibold text-slate-950">{member.nickname}</span>
+                          {member.hasActed ? (
+                            <span
+                              aria-label={`${member.nickname}已行动`}
+                              className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-100 text-emerald-700"
+                              title="已行动"
+                            >
+                              <IconCheck className="h-3.5 w-3.5" />
+                            </span>
+                          ) : null}
+                        </div>
                         {member.id === playerId ? <span className="text-xs font-semibold text-[var(--muted)]">你</span> : null}
                       </div>
                     ))}
@@ -2543,19 +3953,33 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               );
             })}
           </div>
-        </>
+        </div>
       ) : (
-        <>
-          <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-            {scoreRows.map(({ player, score, correctCount }, index) => {
+        <div className="min-h-0 overflow-y-auto pr-1">
+          <div className={isScoreboardCompact ? "grid gap-1" : "grid gap-2 sm:grid-cols-2 lg:grid-cols-1"}>
+            {scoreRows.map(({ player, rank, score, correctCount }) => {
               const alreadyCorrect = correctPlayerSet.has(player.id);
               const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
               const hasForfeitedCurrentRound = currentRoundForfeitPlayerSet.has(player.id);
               const buzzerAnswer = buzzerAnswerByPlayerId.get(player.id);
               const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
+              const isLeadingPendingBuzzerAnswer = pendingBuzzerAnswers[0]?.id === buzzerAnswer?.id;
+              const spectatorAnswer = showSpectatorAnswersInScoreboard
+                ? getSpectatorAnswerDisplay({
+                    nickname: player.nickname,
+                    alreadyCorrect,
+                    currentAnswer: currentRoundAnswerByPlayerId.get(player.id),
+                    correctAnswer: correctAnswerByPlayerId.get(player.id),
+                    buzzerAnswer,
+                    hasForfeitedCurrentRound,
+                    isBuzzerMode,
+                    isLeadingPendingBuzzerAnswer,
+                  })
+                : null;
+              const ScoreRow = isScoreboardCompact ? CompactScoreRow : StandardScoreRow;
+
               return (
-                <StandardScoreRow
+                <ScoreRow
                   alreadyCorrect={alreadyCorrect}
                   buzzerStatus={buzzerAnswer?.status}
                   correctCount={correctCount}
@@ -2563,18 +3987,22 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                   hasAnsweredCurrentRound={hasAnsweredCurrentRound}
                   hasForfeitedCurrentRound={hasForfeitedCurrentRound}
                   isBuzzerMode={isBuzzerMode}
-                  isLeadingPendingBuzzerAnswer={pendingBuzzerAnswers[0]?.id === buzzerAnswer?.id}
+                  isLeadingPendingBuzzerAnswer={isLeadingPendingBuzzerAnswer}
                   key={player.id}
                   nickname={player.nickname}
                   onRowRef={registerScoreRow}
                   playerId={player.id}
-                  rank={index + 1}
+                  rank={rank}
                   score={score}
+                  showSpectatorAnswer={showSpectatorAnswersInScoreboard}
+                  spectatorAnswerLabel={spectatorAnswer?.label ?? ""}
+                  spectatorAnswerStatus={spectatorAnswer?.status ?? "unanswered"}
+                  spectatorAnswerText={spectatorAnswer?.text ?? ""}
                 />
               );
             })}
           </div>
-        </>
+        </div>
       )}
     </div>
   );
@@ -2583,6 +4011,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
     <div className="bg-white">
       <div
         className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
+        ref={setImageDisplayRef}
         style={{
           aspectRatio: imageAspectRatio,
           maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
@@ -2738,7 +4167,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
   );
 
   const actionPanel = (
-    <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+    <div
+      className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
+      style={sidePanelHeightStyle}
+    >
       {isSpectator ? (
         <div className="space-y-4">
           <section className="rounded-md border border-slate-200 bg-white p-4">
@@ -2750,28 +4182,62 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                 </span>
               ) : null}
             </div>
-            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">
-              {isQuestionReviewing ? "本题复盘" : "玩家视角"}
-            </p>
-            <p className="mt-1 text-sm font-medium text-[var(--muted)]">
-              {isQuestionReviewing ? "等待切换下一题" : "按住 V 可临时查看原图"}
-            </p>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{spectatorTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{spectatorTaskDetail}</p>
+            {!isTeamBattleMode && !isQuestionReviewing ? (
+              <p className="mt-3 text-xs font-medium text-[var(--muted)]">按住 V 可临时查看原图</p>
+            ) : null}
           </section>
 
-          {!isQuestionReviewing ? (
+          {!isQuestionReviewing || !isTeamBattleMode ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              {!isTeamBattleMode ? (
+                <>
+                  <button
+                    aria-checked={isSpectatorAnswerViewEnabled}
+                    aria-label="在详细积分榜显示玩家答案"
+                    className="flex w-full items-center justify-between gap-3 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2"
+                    role="switch"
+                    type="button"
+                    onClick={() => setIsSpectatorAnswerViewEnabled((isEnabled) => !isEnabled)}
+                  >
+                    <span className="min-w-0">
+                      <span className="block font-semibold text-slate-950">玩家回答</span>
+                      <span className="mt-0.5 block text-xs font-medium text-[var(--muted)]">在详细积分榜显示答案</span>
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={[
+                        "relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200",
+                        isSpectatorAnswerViewEnabled ? "bg-slate-900" : "bg-slate-200",
+                      ].join(" ")}
+                    >
+                      <span
+                        className={[
+                          "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-out",
+                          isSpectatorAnswerViewEnabled ? "translate-x-5" : "translate-x-0",
+                        ].join(" ")}
+                      />
+                    </span>
+                  </button>
+                  <div className="my-3 h-px bg-[var(--line)]" />
+                </>
+              ) : null}
+
               <div className="flex items-center justify-between gap-3">
-                <p className="font-semibold text-slate-950">图片标签</p>
-                <Button
-                  className="h-9 px-3"
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
-                >
-                  {isSpectatorLabelOpen ? "隐藏" : "展开"}
-                </Button>
+                <p className="font-semibold text-slate-950">正确答案</p>
+                {!isQuestionReviewing ? (
+                  <Button
+                    className="h-9 min-w-16 px-3"
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setIsSpectatorLabelOpen((isOpen) => !isOpen)}
+                  >
+                    {isSpectatorLabelOpen ? "隐藏" : "展开"}
+                  </Button>
+                ) : null}
               </div>
-              {isSpectatorLabelOpen ? (
+              {isQuestionReviewing || isSpectatorLabelOpen ? (
                 <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
                   {currentQuestionLabel || "暂无"}
                 </p>
@@ -2793,7 +4259,21 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           </div>
           {canAddQuestionLabel ? (
             <Button className="mt-3 w-full" type="button" variant="secondary" onClick={() => setIsLabelModalOpen(true)}>
-              填写正确答案
+              向玩家展示答案
+            </Button>
+          ) : null}
+          {isPresenter && canOpenAnswerPanel ? (
+            <Button
+              className="mt-3 w-full"
+              type="button"
+              variant="secondary"
+              onClick={(event) => {
+                answerPanelTriggerRef.current = event.currentTarget;
+                answerPanelAutoCloseArmedRef.current = false;
+                setIsAnswerPanelOpen(true);
+              }}
+            >
+              回答判定面板{answerPanelPendingCount > 0 ? `（${answerPanelPendingCount}）` : ""}
             </Button>
           ) : null}
           {isPresenter ? (
@@ -3057,23 +4537,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
             {hasRoundStarted ? (
               <div className="mb-3 rounded-md bg-white p-3 text-sm">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="font-semibold text-slate-950">{isBuzzerMode ? "抢答队列" : "待判定答案"}</p>
-                  <span className="text-xs font-semibold text-[var(--muted)]">{pendingJudgementCount} 人待判定</span>
-                </div>
+                <p className="font-semibold text-slate-950">{isBuzzerMode ? "抢答队列" : "待判定答案"}</p>
                 {currentBuzzerAnswer ? (
                   <div className="mt-2 rounded-md bg-slate-50 p-3">
                     <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
                     <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
                     <div className="mt-3 grid grid-cols-2 gap-2">
-                      <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer || isJudgingBuzzer}>
+                      <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer}>
                         答对
                       </Button>
                       <Button
                         type="button"
                         variant="secondary"
                         onClick={() => handleJudgeBuzzerAnswer(false)}
-                        disabled={!canJudgeBuzzer || isJudgingBuzzer}
+                        disabled={!canJudgeBuzzer}
                       >
                         答错
                       </Button>
@@ -3094,9 +4571,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
             ) : null}
 
             <div className="grid gap-2">
-              <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
-                {isConfirmingReveal ? "打开中…" : selectedBlocks.length > 0 ? `打开 ${selectedBlocks.length} 格` : "打开所选格子"}
-              </Button>
+              {hasRoundStarted ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={!canOpenAnswerPanel}
+                  onClick={(event) => {
+                    answerPanelTriggerRef.current = event.currentTarget;
+                    answerPanelAutoCloseArmedRef.current = false;
+                    setIsAnswerPanelOpen(true);
+                  }}
+                >
+                  打开回答判定面板
+                </Button>
+              ) : (
+                <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
+                  {isConfirmingReveal ? "打开中…" : selectedBlocks.length > 0 ? `打开 ${selectedBlocks.length} 格` : "打开所选格子"}
+                </Button>
+              )}
               {canPreviewSelectedBlocks ? (
                 <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
                   按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 预览玩家视角
@@ -3116,117 +4608,125 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           </section>
         </div>
       ) : (
-        <div className="space-y-4">
-          <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
-            <div className="flex items-center justify-between gap-3">
-              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
-              <span
-                className={[
-                  "rounded px-2 py-1 text-xs font-bold",
-                  hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
-                ].join(" ")}
-              >
-                {hasRoundStarted ? `${displayedRemainingSeconds}s` : "未开始"}
-              </span>
-            </div>
-            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
-            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
-          </section>
-
-          {hasRoundStarted ? (
-            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
-                <span className="font-bold text-slate-950">
-                  {standardSubmittedCount}/{standardTotalCount}
+        <div className="flex min-h-full flex-col">
+          <div className="space-y-4">
+            <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
+              <div className="flex items-center justify-between gap-3">
+                <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
+                <span
+                  className={[
+                    "rounded px-2 py-1 text-xs font-bold",
+                    hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
+                  ].join(" ")}
+                >
+                  {hasRoundStarted ? `${displayedRemainingSeconds}s` : "未开始"}
                 </span>
               </div>
-              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div
-                  className="h-full rounded-full bg-slate-900"
-                  style={{ width: `${Math.min(100, standardProgress)}%` }}
-                />
-              </div>
+              <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
+              <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
             </section>
-          ) : null}
 
-          <section className="border-t border-[var(--line)] pt-4">
-            <p className="mb-3 text-sm font-semibold text-slate-950">操作</p>
-            {isCurrentPlayerCorrect ? (
-              <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
-                你已答对本题
-              </p>
-            ) : !hasRoundStarted ? (
-              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人打开图片</p>
-            ) : (
-              <div className="space-y-3">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
-                  <input
-                    ref={answerInputRef}
-                    className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                    disabled={
-                      !isRoundActive ||
-                      isRoundClosedForPlayerActions ||
-                      (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
-                      (isBuzzerMode && myHasForfeited) ||
-                      (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
-                    }
-                    maxLength={80}
-                    placeholder="输入动画名称"
-                    value={answerText}
-                    onChange={(event) => setAnswerText(event.target.value)}
-                    onKeyDown={handleAnswerInputKeyDown}
+            {hasRoundStarted ? (
+              <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
+                  <span className="font-bold text-slate-950">
+                    {standardSubmittedCount}/{standardTotalCount}
+                  </span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-slate-900"
+                    style={{ width: `${Math.min(100, standardProgress)}%` }}
                   />
-                </label>
-                <Button
-                  className="w-full"
-                  type="button"
-                  onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
-                  disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
-                >
-                  {isSubmittingAnswer
-                    ? "提交中…"
-                    : isBuzzerMode
-                      ? "提交抢答（回车）"
-                      : myHasForfeited
-                        ? "提交答案（回车）"
-                        : myAnswer
-                          ? "修改答案（回车）"
-                          : "提交答案（回车）"}
-                </Button>
-                {!isTeamBattleMode ? (
+                </div>
+              </section>
+            ) : null}
+
+            <section className="border-t border-[var(--line)] pt-4">
+              <p className="mb-3 text-sm font-semibold text-slate-950">操作</p>
+              {isCurrentPlayerCorrect ? (
+                <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                  你已答对本题
+                </p>
+              ) : !hasRoundStarted ? (
+                <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人打开图片</p>
+              ) : (
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
+                    <input
+                      ref={answerInputRef}
+                      className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                      disabled={
+                        !isRoundActive ||
+                        isRoundClosedForPlayerActions ||
+                        (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
+                        (isBuzzerMode && myHasForfeited) ||
+                        (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
+                      }
+                      maxLength={80}
+                      placeholder="输入动画名称"
+                      value={answerText}
+                      onChange={(event) => setAnswerText(event.target.value)}
+                      onKeyDown={handleAnswerInputKeyDown}
+                    />
+                  </label>
                   <Button
                     className="w-full"
                     type="button"
-                    variant="secondary"
-                    onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
-                    disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
+                    onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
+                    disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
                   >
-                    {isSubmittingAnswer ? "处理中…" : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                    {isSubmittingAnswer
+                      ? "提交中…"
+                      : isBuzzerMode
+                        ? "提交抢答（回车）"
+                        : myHasForfeited
+                          ? "提交答案（回车）"
+                          : myAnswer
+                            ? "修改答案（回车）"
+                            : "提交答案（回车）"}
                   </Button>
-                ) : null}
-                <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
-                  {isBuzzerMode
-                    ? myHasForfeited
-                      ? "本轮已放弃"
-                      : myBuzzerAnswer
-                      ? `本轮已抢答：${myBuzzerAnswer.answerText}`
-                      : isRoundEnded
-                      ? "本轮已自动放弃"
-                      : "本轮尚未抢答"
-                    : myBuzzerAnswer?.status === "wrong"
-                      ? `本轮已答错：${myBuzzerAnswer.answerText}`
-                    : isRoundEnded && !myAnswer
-                      ? "本轮已自动放弃"
-                    : myAnswer
-                      ? getAnswerDisplayText(myAnswer)
-                      : "本轮尚未提交答案"}
-                  {isRoundEnded ? "，本轮已结束" : ""}
-                </p>
-              </div>
-            )}
-          </section>
+                  {!isTeamBattleMode ? (
+                    <Button
+                      className="w-full"
+                      type="button"
+                      variant="secondary"
+                      onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
+                      disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
+                    >
+                      {isSubmittingAnswer ? "处理中…" : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                    </Button>
+                  ) : null}
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                    {isBuzzerMode
+                      ? myHasForfeited
+                        ? "本轮已放弃"
+                        : myBuzzerAnswer
+                        ? `本轮已抢答：${myBuzzerAnswer.answerText}`
+                        : isRoundEnded
+                        ? "本轮已自动放弃"
+                        : "本轮尚未抢答"
+                      : myBuzzerAnswer?.status === "wrong"
+                        ? `本轮已答错：${myBuzzerAnswer.answerText}`
+                      : isRoundEnded && !myAnswer
+                        ? "本轮已自动放弃"
+                      : myAnswer
+                        ? getAnswerDisplayText(myAnswer)
+                        : "本轮尚未提交答案"}
+                    {isRoundEnded ? "，本轮已结束" : ""}
+                  </p>
+                </div>
+              )}
+            </section>
+          </div>
+
+          {/*
+            Round-start sound controls are intentionally hidden for now.
+            Browser audio is unreliable when the tab is backgrounded or the window is minimized,
+            which makes this reminder feel inconsistent during real play.
+          */}
         </div>
       )}
     </div>
@@ -3299,8 +4799,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
               <p className="mt-1 text-lg font-semibold text-slate-950">{scoreCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">已打开</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">{revealedBlocksCardValue}</p>
+              <p className="text-[var(--muted)]">本题答对</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{correctPlayersCardValue}</p>
             </div>
           </>
         )}
@@ -3311,6 +4811,113 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
         <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
         {actionPanel}
       </div>
+
+      {!isTeamBattleMode || footerActions ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {!isTeamBattleMode ? (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!previousQuestion}
+              title={previousQuestion ? `回顾第 ${previousQuestionIndex! + 1} 题` : "暂无上题"}
+              onClick={handleOpenPreviousQuestionReview}
+            >
+              回顾上题
+            </Button>
+          ) : null}
+          {footerActions ? <div className="ml-auto flex flex-wrap items-center justify-end gap-3">{footerActions}</div> : null}
+        </div>
+      ) : null}
+
+      {isAnswerPanelOpen && canRenderPortal && gameSession && isPresenter && !isTeamBattleMode
+        ? createPortal(
+            <AnswerJudgementPanel
+              canRevealAnswer={canRevealPanelAnswer}
+              canJudgeAnswer={canJudgePanelAnswer}
+              canMarkAllPendingWrong={canMarkAllPendingWrong}
+              correctCount={answerPanelCorrectCount}
+              countdownLabel={isQuestionReviewing || displayedRemainingSeconds === 0 ? "已截止" : `${displayedRemainingSeconds}s`}
+              isMarkingAllPendingWrong={isMarkingPendingWrong}
+              pendingCount={answerPanelPendingCount}
+              questionNumber={gameSession.currentQuestionIndex + 1}
+              revealRound={gameSession.currentRevealRound}
+              rows={answerPanelRows}
+              unansweredCount={answerPanelUnansweredCount}
+              wrongCount={answerPanelWrongCount}
+              onClose={closeAnswerPanel}
+              onJudge={queueAnswerJudgement}
+              onMarkAllPendingWrong={() => void handleMarkPendingRoundAnswersWrong()}
+            />,
+            document.body,
+          )
+        : null}
+
+      {reviewedQuestion && reviewedQuestionIndex != null && canRenderPortal
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/55 px-4 py-6"
+              role="presentation"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) {
+                  setReviewedQuestionIndex(null);
+                }
+              }}
+            >
+              <div
+                aria-describedby="previous-question-review-description"
+                aria-labelledby="previous-question-review-title"
+                aria-modal="true"
+                className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl"
+                role="dialog"
+              >
+                <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
+                  <div>
+                    <p className="text-lg font-semibold text-slate-950" id="previous-question-review-title">
+                      上一题回顾 · 第 {reviewedQuestionIndex + 1} 题
+                    </p>
+                    <p className="mt-1 text-sm text-[var(--muted)]" id="previous-question-review-description">
+                      当前题仍在进行，倒计时不会暂停
+                    </p>
+                  </div>
+                  <button
+                    className="shrink-0 rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+                    ref={previousReviewCloseRef}
+                    type="button"
+                    onClick={() => setReviewedQuestionIndex(null)}
+                  >
+                    关闭
+                  </button>
+                </div>
+
+                <div className="min-h-0 overflow-y-auto px-5 py-5">
+                  <div className="grid min-h-48 place-items-center overflow-hidden rounded-md bg-slate-950">
+                    {reviewImageLoadFailed ? (
+                      <div className="px-4 py-16 text-center text-white">
+                        <p className="font-semibold">图片加载失败</p>
+                        <p className="mt-2 text-sm text-slate-300">可能是图片链接失效或当前网络异常</p>
+                      </div>
+                    ) : (
+                      <img
+                        alt={`第 ${reviewedQuestionIndex + 1} 题原图`}
+                        className="max-h-[60vh] w-full object-contain"
+                        src={reviewedQuestion.imageUrl}
+                        onError={() => setReviewImageLoadFailed(true)}
+                      />
+                    )}
+                  </div>
+
+                  <div className="mt-4 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3">
+                    <p className="text-xs font-semibold text-[var(--muted)]">正确答案</p>
+                    <p className="mt-1 break-words text-lg font-semibold text-slate-950">
+                      {reviewedQuestion.labelText?.trim() || "本题未填写答案"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {(isPresenter || isSpectator) && currentQuestion && isRevealPreviewOpen && canRenderPortal
         ? createPortal(
@@ -3368,8 +4975,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
           <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
             <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-start">
               <div>
-                <p className="text-lg font-semibold text-slate-950">填写正确答案</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">可选玩家答案，也可手动输入。保存后不能修改。</p>
+                <p className="text-lg font-semibold text-slate-950">向玩家展示答案</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  保存后建议等待几秒，等玩家看清答案后再进入下一题。
+                </p>
               </div>
               <button
                 className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
@@ -3382,21 +4991,38 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
 
             <div className="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
               <div>
-                <p className="text-sm font-semibold text-slate-950">选择玩家回答</p>
+                <p className="text-sm font-semibold text-slate-950">选择玩家答案</p>
                 <div className="mt-2 space-y-2">
                   {labelAnswers.length > 0 ? (
-                    labelAnswers.map((answer) => (
-                      <button
-                        className="w-full rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                        disabled={isSavingLabel}
-                        key={answer.id}
-                        type="button"
-                        onClick={() => handleUseAnswerAsLabel(answer)}
-                      >
-                        <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
-                        <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
-                      </button>
-                    ))
+                    labelAnswers.map((answer) => {
+                      const isSelected = selectedLabelAnswerId === answer.id;
+
+                      return (
+                        <button
+                          aria-pressed={isSelected}
+                          className={[
+                            "w-full rounded-md border px-3 py-2 text-left text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
+                            isSelected
+                              ? "border-[var(--primary)] bg-rose-50 ring-2 ring-rose-100"
+                              : "border-[var(--line)] bg-slate-50 hover:border-rose-300 hover:bg-rose-50",
+                          ].join(" ")}
+                          disabled={isSavingLabel}
+                          key={answer.id}
+                          type="button"
+                          onClick={() => handleSelectLabelAnswer(answer.id)}
+                        >
+                          <span className="flex items-center justify-between gap-3">
+                            <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
+                            {isSelected ? (
+                              <span className="shrink-0 rounded bg-[var(--primary)] px-2 py-0.5 text-xs font-semibold text-white">
+                                已选择
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
+                        </button>
+                      );
+                    })
                   ) : (
                     <p className="rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">
                       本题还没有可选择的玩家回答
@@ -3412,9 +5038,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                   maxLength={80}
                   placeholder="例如：动画名称"
                   value={labelInput}
-                  onChange={(event) => setLabelInput(event.target.value)}
+                  onChange={(event) => handleLabelInputChange(event.target.value)}
                 />
               </label>
+              <p className="text-sm text-[var(--muted)]">答案保存后不能修改。</p>
             </div>
 
             <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
@@ -3422,10 +5049,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, isSpectator = fal
                 本局不再提示
               </Button>
               <div className="flex flex-col gap-2 sm:flex-row">
-                <Button type="button" variant="secondary" onClick={() => setIsLabelModalOpen(false)}>
-                  稍后再说
-                </Button>
-                <Button type="button" onClick={handleSaveManualLabel} disabled={isSavingLabel || !labelInput.trim()}>
+                <Button
+                  type="button"
+                  onClick={handleSaveQuestionLabel}
+                  disabled={isSavingLabel || (!selectedLabelAnswerId && !labelInput.trim())}
+                >
                   {isSavingLabel ? "保存中…" : "保存答案"}
                 </Button>
               </div>
