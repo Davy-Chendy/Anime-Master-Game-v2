@@ -1094,7 +1094,7 @@ export class RoomGameAuthority {
       if (conflicts) appendUpserts(statements, table, rows, conflicts);
     }
     // Keep the runtime image and its per-question archives atomic. Supported
-    // question sets are capped at 120, which keeps this below D1's 50-query
+    // question sets are capped at 30, which keeps this below D1's 50-query
     // Free-plan invocation limit even after rows are chunked for bind limits.
     if (statements.length) await this.d1.batch(statements);
   }

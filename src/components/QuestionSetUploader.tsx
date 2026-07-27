@@ -40,7 +40,7 @@ type QuestionSetUploaderProps = {
 };
 
 type SetupMode = "upload" | "urlText" | "community";
-const maxUploadImageCount = 120;
+const maxUploadImageCount = 30;
 const maxUploadImageBytes = 20 * 1024 * 1024;
 const communityPageSize = 24;
 

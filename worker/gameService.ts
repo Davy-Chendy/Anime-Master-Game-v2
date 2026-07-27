@@ -61,7 +61,7 @@ type DbGameParticipant = {
 const d1Context = new AsyncLocalStorage<D1QueryClient>();
 const unboundD1 = createD1QueryClient(null);
 const DEFAULT_ROUND_SCORES = [5, 3, 1];
-const MAX_QUESTION_SET_QUESTIONS = 120;
+const MAX_QUESTION_SET_QUESTIONS = 30;
 const d1: D1QueryClient = {
   hasDatabase() {
     return getD1().hasDatabase();
