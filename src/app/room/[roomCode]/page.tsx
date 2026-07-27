@@ -1759,6 +1759,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
 
         const existingMember = latestRoom.players.find((player) => player.id === session.playerId);
+        if (existingMember) {
+          saveLocalSession({
+            playerId: session.playerId,
+            nickname: existingMember.nickname,
+            roomCode,
+            isHost: latestRoom.hostPlayerId === session.playerId,
+          });
+
+          if (isMounted) {
+            setNickname(existingMember.nickname);
+            setRoom(latestRoom);
+          }
+          return;
+        }
+
         if (!existingMember && latestRoom.status === "PLAYING") {
           saveLocalSession({
             playerId: session.playerId,
@@ -1779,7 +1794,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           const isCapacityFull = isPlayerCapacityError(joined.errorCode);
           if (isMounted) {
             setError(isCapacityFull ? "" : joined.error ?? "没有找到房间");
-            setRoom(isCapacityFull ? latestRoom : null);
+            setRoom(latestRoom);
           }
           return;
         }
@@ -1875,6 +1890,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
 
     let refreshPromise: Promise<void> | null = null;
+    let refreshRetryTimer: number | null = null;
+    let refreshRetryAttempt = 0;
     lastRoomRealtimeVersionRef.current = null;
     missedRoomRealtimeVersionRef.current = false;
     roomCatchUpTargetVersionRef.current = null;
@@ -1887,9 +1904,24 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       );
     }
 
+    function scheduleRoomCatchUpRetry(delay: number) {
+      if (!isActive || refreshRetryTimer != null) {
+        return;
+      }
+      refreshRetryTimer = window.setTimeout(() => {
+        refreshRetryTimer = null;
+        if (isActive && missedRoomRealtimeVersionRef.current) {
+          void refreshLatestRoom();
+        }
+      }, delay);
+    }
+
     async function refreshLatestRoom() {
       if (refreshPromise) {
         return refreshPromise;
+      }
+      if (refreshRetryTimer != null) {
+        return;
       }
 
       const startTargetVersion = roomCatchUpTargetVersionRef.current;
@@ -1898,12 +1930,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         refreshPromise = null;
       });
       void runPromise.then((didRefresh) => {
-        if (didRefresh && isActive && shouldContinueRoomCatchUp(startTargetVersion)) {
-          window.setTimeout(() => {
-            if (isActive) {
-              void refreshLatestRoom();
-            }
-          }, 0);
+        if (!isActive) {
+          return;
+        }
+        if (didRefresh) {
+          refreshRetryAttempt = 0;
+          if (shouldContinueRoomCatchUp(startTargetVersion)) {
+            scheduleRoomCatchUpRetry(0);
+          }
+          return;
+        }
+        if (missedRoomRealtimeVersionRef.current) {
+          const baseRetryDelay = Math.min(15000, 500 * 2 ** Math.min(refreshRetryAttempt, 5));
+          const retryDelay = Math.round(baseRetryDelay * (0.8 + Math.random() * 0.4));
+          refreshRetryAttempt += 1;
+          scheduleRoomCatchUpRetry(retryDelay);
         }
       });
       return refreshPromise;
@@ -1948,6 +1989,14 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        if (message.name === "authorityRecovered") {
+          missedRoomRealtimeVersionRef.current = true;
+          if (messageVersion != null) {
+            roomCatchUpTargetVersionRef.current = Math.max(roomCatchUpTargetVersionRef.current ?? 0, messageVersion);
+          }
+          void refreshLatestRoom();
+          return;
+        }
         if (messageVersion != null) {
           const lastVersion = lastRoomRealtimeVersionRef.current;
           if (lastVersion != null && messageVersion <= lastVersion) {
@@ -2003,6 +2052,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
     return () => {
       isActive = false;
+      if (refreshRetryTimer != null) {
+        window.clearTimeout(refreshRetryTimer);
+      }
       unsubscribe();
     };
   }, [playerId, room?.id, roomCode]);

@@ -943,11 +943,15 @@ export function ImageRevealGame({
     gameSessionId: string;
     promise: Promise<RoundSnapshot>;
     targetVersion: number | null;
+    generation: number;
   } | null>(null);
   const isBootstrapLoadingRef = useRef(false);
   const lastGameRealtimeVersionRef = useRef<number | null>(null);
   const missedGameRealtimeVersionRef = useRef(false);
   const gameCatchUpTargetVersionRef = useRef<number | null>(null);
+  const gameCatchUpRetryTimerRef = useRef<number | null>(null);
+  const gameCatchUpRetryAttemptRef = useRef(0);
+  const gameCatchUpGenerationRef = useRef(0);
   const lastRoundPromptPositionRef = useRef<string | null>(null);
   const hasObservedRoundPromptPositionRef = useRef(false);
   const onRoomUpdatedRef = useRef(onRoomUpdated);
@@ -1152,28 +1156,33 @@ export function ImageRevealGame({
     if (!room.currentGameId) {
       return;
     }
-
-    const currentFetch = roundSnapshotFetchRef.current;
-    let snapshotFetch = currentFetch?.gameSessionId === room.currentGameId ? currentFetch : null;
-    if (!snapshotFetch) {
-      const targetVersion = gameCatchUpTargetVersionRef.current;
-      const snapshotPromise = getRoundSnapshot(room.currentGameId).finally(() => {
-        if (roundSnapshotFetchRef.current?.promise === snapshotPromise) {
-          roundSnapshotFetchRef.current = null;
-        }
-      });
-      snapshotFetch = { gameSessionId: room.currentGameId, promise: snapshotPromise, targetVersion };
-      roundSnapshotFetchRef.current = snapshotFetch;
+    if (gameCatchUpRetryTimerRef.current != null) {
+      return;
     }
+
+    const generation = gameCatchUpGenerationRef.current;
+    const currentFetch = roundSnapshotFetchRef.current;
+    if (currentFetch?.gameSessionId === room.currentGameId && currentFetch.generation === generation) {
+      return;
+    }
+    const targetVersion = gameCatchUpTargetVersionRef.current;
+    const snapshotPromise = getRoundSnapshot(room.currentGameId).finally(() => {
+      if (roundSnapshotFetchRef.current?.promise === snapshotPromise) {
+        roundSnapshotFetchRef.current = null;
+      }
+    });
+    const snapshotFetch = { gameSessionId: room.currentGameId, promise: snapshotPromise, targetVersion, generation };
+    roundSnapshotFetchRef.current = snapshotFetch;
 
     snapshotFetch.promise
       .then((snapshot) => {
-        if (snapshot.gameSession.id !== room.currentGameId) {
+        if (generation !== gameCatchUpGenerationRef.current || snapshot.gameSession.id !== room.currentGameId) {
           return;
         }
 
         applyRoundSnapshot(snapshot);
         setImageLoadFailed(false);
+        gameCatchUpRetryAttemptRef.current = 0;
         const coveredTargetVersion = snapshotFetch.targetVersion;
         if (coveredTargetVersion != null) {
           lastGameRealtimeVersionRef.current = Math.max(
@@ -1196,7 +1205,23 @@ export function ImageRevealGame({
         }
       })
       .catch((error) => {
-        onError(error instanceof Error ? error.message : "同步游戏快照失败");
+        if (generation !== gameCatchUpGenerationRef.current) {
+          return;
+        }
+        if (!missedGameRealtimeVersionRef.current || gameCatchUpRetryAttemptRef.current === 0) {
+          onError(error instanceof Error ? error.message : "同步游戏快照失败");
+        }
+        if (missedGameRealtimeVersionRef.current && gameCatchUpRetryTimerRef.current == null) {
+          const baseRetryDelay = Math.min(15000, 500 * 2 ** Math.min(gameCatchUpRetryAttemptRef.current, 5));
+          const retryDelay = Math.round(baseRetryDelay * (0.8 + Math.random() * 0.4));
+          gameCatchUpRetryAttemptRef.current += 1;
+          gameCatchUpRetryTimerRef.current = window.setTimeout(() => {
+            gameCatchUpRetryTimerRef.current = null;
+            if (generation === gameCatchUpGenerationRef.current) {
+              catchUpRoundSnapshot();
+            }
+          }, retryDelay);
+        }
       });
   }, [applyRoundSnapshot, onError, room.currentGameId]);
 
@@ -1312,9 +1337,26 @@ export function ImageRevealGame({
   }, [onRoomUpdated]);
 
   useEffect(() => {
+    gameCatchUpGenerationRef.current += 1;
+    roundSnapshotFetchRef.current = null;
     lastGameRealtimeVersionRef.current = null;
     missedGameRealtimeVersionRef.current = false;
     gameCatchUpTargetVersionRef.current = null;
+    gameCatchUpRetryAttemptRef.current = 0;
+    if (gameCatchUpRetryTimerRef.current != null) {
+      window.clearTimeout(gameCatchUpRetryTimerRef.current);
+      gameCatchUpRetryTimerRef.current = null;
+    }
+
+    return () => {
+      gameCatchUpGenerationRef.current += 1;
+      roundSnapshotFetchRef.current = null;
+      missedGameRealtimeVersionRef.current = false;
+      if (gameCatchUpRetryTimerRef.current != null) {
+        window.clearTimeout(gameCatchUpRetryTimerRef.current);
+        gameCatchUpRetryTimerRef.current = null;
+      }
+    };
   }, [room.currentGameId, room.id]);
 
   useEffect(() => {
@@ -1338,7 +1380,12 @@ export function ImageRevealGame({
           setQuestions(bootstrapSnapshot.questions);
           setImageLoadFailed(false);
           applyRoundSnapshot(bootstrapSnapshot.roundSnapshot);
-          missedGameRealtimeVersionRef.current = false;
+          if (gameCatchUpTargetVersionRef.current == null) {
+            missedGameRealtimeVersionRef.current = false;
+          } else {
+            missedGameRealtimeVersionRef.current = true;
+            catchUpRoundSnapshot();
+          }
         }
       } catch (error) {
         if (isMounted) {
@@ -1358,7 +1405,7 @@ export function ImageRevealGame({
       isMounted = false;
       unbindGameSessionTopic();
     };
-  }, [applyRoundSnapshot, onError, room.currentGameId, room.id]);
+  }, [applyRoundSnapshot, catchUpRoundSnapshot, onError, room.currentGameId, room.id]);
 
   const applyRealtimeDelta = useCallback(
     (delta: RealtimeDelta) => {
@@ -1539,6 +1586,15 @@ export function ImageRevealGame({
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        if (message.name === "authorityRecovered") {
+          missedGameRealtimeVersionRef.current = true;
+          if (messageVersion != null) {
+            gameCatchUpTargetVersionRef.current = Math.max(gameCatchUpTargetVersionRef.current ?? 0, messageVersion);
+          }
+          clearQueuedRealtimeDeltas();
+          catchUpRoundSnapshot();
+          return;
+        }
         if (messageVersion != null) {
           const lastVersion = lastGameRealtimeVersionRef.current;
           if (lastVersion != null && messageVersion <= lastVersion) {

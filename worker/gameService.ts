@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRoomCode } from "../src/lib/id";
-import { createD1QueryClient, type GameDatabase } from "./d1QueryCompat";
+import { createD1QueryClient, type GameDatabase, type GameDatabaseMutationTracker } from "./d1QueryCompat";
 import type {
   Answer,
   BuzzerAnswer,
@@ -74,8 +74,8 @@ function getD1() {
   return d1Context.getStore() ?? unboundD1;
 }
 
-export function runWithGameDatabase<T>(db: GameDatabase, callback: () => Promise<T>) {
-  return d1Context.run(createD1QueryClient(db), callback);
+export function runWithGameDatabase<T>(db: GameDatabase, callback: () => Promise<T>, mutationTracker?: GameDatabaseMutationTracker) {
+  return d1Context.run(createD1QueryClient(db, mutationTracker), callback);
 }
 
 function assertD1Env() {

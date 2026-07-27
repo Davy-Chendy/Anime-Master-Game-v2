@@ -1,7 +1,7 @@
 ﻿import * as gameService from "./gameService";
 
 import { RoomGameAuthority, type AuthorityVersion } from "./roomGameAuthority";
-import type { GameDatabase } from "./d1QueryCompat";
+import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
 
 import type {
   Answer,
@@ -1287,6 +1287,7 @@ async function handleRpc(
     localInvalidateRoundSnapshots?: (gameSessionId: string) => void;
     localScheduleAutoForfeit?: (message: AutoForfeitScheduleMessage) => Promise<void>;
     gameDatabase?: GameDatabase;
+    mutationTracker?: GameDatabaseMutationTracker;
     localAuthorityCommit?: (name: string, result: unknown, clientActionId?: string) => AuthorityVersion | null | Promise<AuthorityVersion | null>;
     receivedAtMs?: number;
     body?: RpcBody;
@@ -1358,7 +1359,7 @@ async function handleRpc(
     return json({ data: responseResult }, {}, request, env);
   };
   return options.gameDatabase
-    ? await gameService.runWithGameDatabase(options.gameDatabase, execute)
+    ? await gameService.runWithGameDatabase(options.gameDatabase, execute, options.mutationTracker)
     : await runWithGameDatabase(env, execute);
 }
 
@@ -2598,8 +2599,11 @@ export class RoomDurableObject {
     }
     const recovered = this.authority.recoverIncompleteMutation(roomId);
     if (recovered) {
+      this.clearAllSnapshotCaches();
       const gapVersion = this.authority.bumpVersion(roomId).stateVersion;
       this.broadcast(JSON.stringify({ type: "change", name: "authorityRecovered", topic: this.authorityTopic, version: gapVersion, deltas: [] }));
+      const flush = this.flushAuthorityProjections();
+      this.state.waitUntil(flush);
     }
     return roomId;
   }
@@ -2920,6 +2924,7 @@ export class RoomDurableObject {
   }
 
   private async handleQueuedR2BoundRpc(request: Request, receivedAtMs = Date.now()) {
+    let mutationTracker: GameDatabaseMutationTracker | null = null;
     try {
       const localTopic = request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER);
       const body = await readRpcBody(request);
@@ -2944,6 +2949,7 @@ export class RoomDurableObject {
       }
       if (useAuthority && mutationDeadlinePolicy != null && localRoomId && AUTHORITY_JOURNALED_NAMES.has(body.name ?? "")) {
         this.authority.beginMutation(localRoomId, body.name ?? "", body.clientActionId ? `${body.name}:${body.clientActionId}` : null, body.args ?? []);
+        mutationTracker = { successfulWrites: 0 };
       }
       const response = await handleRpc(request, this.env, {
         body,
@@ -2964,6 +2970,7 @@ export class RoomDurableObject {
         }),
         receivedAtMs,
         gameDatabase: useAuthority ? this.authority.database : undefined,
+        mutationTracker: mutationTracker ?? undefined,
         localAuthorityCommit: localRoomId
           ? async (name, result, clientActionId) => {
               const isBoundary = useAuthority && AUTHORITY_PROJECTION_BOUNDARY_NAMES.has(name);
@@ -2987,8 +2994,7 @@ export class RoomDurableObject {
       return response;
     } catch (error) {
       const failedRoomId = getRoomIdFromTopic(request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER));
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (failedRoomId && /[^\x00-\x7F]/.test(errorMessage)) this.authority.abortMutation(failedRoomId);
+      if (failedRoomId && mutationTracker?.successfulWrites === 0) this.authority.abortMutation(failedRoomId);
       return errorResponse(error, request, this.env);
     }
   }
@@ -3358,6 +3364,7 @@ export class RoomDurableObject {
     const actionTopic = socketAttachment?.topic;
     let actionArgs: unknown[] = [];
     let actionLogContext: GameRpcErrorLogContext = {};
+    let mutationTracker: GameDatabaseMutationTracker | null = null;
     try {
       const payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as {
         type?: string;
@@ -3461,12 +3468,15 @@ export class RoomDurableObject {
           roomId && (ROOM_AUTHORITY_MEMBERSHIP_NAMES.has(payload.name) || ROOM_AUTHORITY_ACTIVE_ONLY_NAMES.has(payload.name)) && this.authority.isAuthoritative(roomId),
         );
       }
-      if (useAuthority && isMutation && roomId && AUTHORITY_JOURNALED_NAMES.has(payload.name)) this.authority.beginMutation(roomId, payload.name, actionKey || null, payload.args ?? []);
+      if (useAuthority && isMutation && roomId && AUTHORITY_JOURNALED_NAMES.has(payload.name)) {
+        this.authority.beginMutation(roomId, payload.name, actionKey || null, payload.args ?? []);
+        mutationTracker = { successfulWrites: 0 };
+      }
       if (useAuthority && !isMutation && typeof payload.args?.[0] === "string" && GAME_SESSION_ID_STRING_ARG_NAMES.has(payload.name)) {
         await this.authority.loadGameProjection(payload.args[0]);
       }
       const execution = useAuthority
-        ? await gameService.runWithGameDatabase(this.authority.database, executeAction)
+        ? await gameService.runWithGameDatabase(this.authority.database, executeAction, mutationTracker ?? undefined)
         : await runWithGameDatabase(this.env, executeAction);
       if (payload.name === "startGameWithQuestionSet" && actionTopic) {
         await this.ensureAuthority(actionTopic, true);
@@ -3535,8 +3545,7 @@ export class RoomDurableObject {
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult, authority: authorityVersion }));
     } catch (error) {
       const failedRoomId = getRoomIdFromTopic(actionTopic);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (failedRoomId && /[^\x00-\x7F]/.test(errorMessage)) this.authority.abortMutation(failedRoomId);
+      if (failedRoomId && mutationTracker?.successfulWrites === 0) this.authority.abortMutation(failedRoomId);
       this.logGameRpcError({
         name: actionName,
         args: actionArgs,

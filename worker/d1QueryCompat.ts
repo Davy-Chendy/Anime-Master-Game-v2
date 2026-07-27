@@ -22,6 +22,18 @@ const D1_MAX_BOUND_PARAMETERS_PER_QUERY = 100;
 const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores", "team_battle_state", "lobby_round_scores"]);
 const BOOLEAN_COLUMNS = new Set(["is_host", "is_public"]);
 const UPDATED_AT_TABLES = new Set(["rooms", "question_sets", "question_set_ratings"]);
+const CREATED_AT_TABLES = new Set([
+  "rooms",
+  "question_sets",
+  "questions",
+  "game_sessions",
+  "question_set_ratings",
+  "question_snapshots",
+  "question_eligible_players",
+  "game_participants",
+]);
+const IMMUTABLE_ON_CONFLICT_COLUMNS = new Set(["created_at", "joined_at"]);
+const INSERT_DEFAULT_ONLY_COLUMNS = new Set(["created_at", "joined_at", "submitted_at", "server_received_at", "judged_at"]);
 const ID_TABLES = new Set([
   "rooms",
   "question_sets",
@@ -93,10 +105,7 @@ function cleanRecord(table: string, record: Record<string, unknown>) {
   }
 
   const now = nowIso();
-  if (
-    ["rooms", "question_sets", "questions", "game_sessions", "question_set_ratings"].includes(table) &&
-    !("created_at" in next)
-  ) {
+  if (CREATED_AT_TABLES.has(table) && !("created_at" in next)) {
     next.created_at = now;
   }
   if (UPDATED_AT_TABLES.has(table)) {
@@ -110,6 +119,9 @@ function cleanRecord(table: string, record: Record<string, unknown>) {
   }
   if (table === "buzzer_answers" && !("submitted_at" in next)) {
     next.submitted_at = now;
+  }
+  if (table === "buzzer_answers" && !("server_received_at" in next)) {
+    next.server_received_at = next.submitted_at ?? now;
   }
   if (table === "question_results" && !("judged_at" in next)) {
     next.judged_at = now;
@@ -171,6 +183,10 @@ export interface GameDatabase {
   batch<T = Record<string, unknown>>(statements: GamePreparedStatement[]): Promise<Array<{ results?: T[] }>>;
 }
 
+export type GameDatabaseMutationTracker = {
+  successfulWrites: number;
+};
+
 class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private operation: "select" | "insert" | "update" | "delete" = "select";
   private filters: Filter[] = [];
@@ -184,7 +200,11 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private ignoreDuplicates = false;
   private singleMode: "none" | "single" | "maybeSingle" = "none";
 
-  constructor(private readonly db: GameDatabase | null, private readonly table: string) {}
+  constructor(
+    private readonly db: GameDatabase | null,
+    private readonly table: string,
+    private readonly mutationTracker?: GameDatabaseMutationTracker,
+  ) {}
 
   select(columns = "*") {
     if (this.operation === "select") {
@@ -410,7 +430,11 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
       const updateGeneratedId = explicitPrimaryKeyByIndex[0];
       const updateColumns = columns.filter(
-        (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
+        (column) =>
+          !this.conflictColumns.includes(column) &&
+          !IMMUTABLE_ON_CONFLICT_COLUMNS.has(column) &&
+          (column !== "id" || updateGeneratedId) &&
+          (!INSERT_DEFAULT_ONLY_COLUMNS.has(column) || records.every((record) => Object.prototype.hasOwnProperty.call(record, column))),
       );
       const conflict =
         this.conflictColumns.length > 0
@@ -436,6 +460,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       }
 
       const results = await this.db!.batch<Record<string, unknown>>(statements);
+      if (this.mutationTracker) this.mutationTracker.successfulWrites += statements.length;
       return this.shapeRows(results.flatMap((result) => result.results ?? []));
     }
 
@@ -447,7 +472,11 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       const values = recordColumns.map((column) => record[column]);
       const placeholders = recordColumns.map(() => "?").join(", ");
       const updateColumns = recordColumns.filter(
-        (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
+        (column) =>
+          !this.conflictColumns.includes(column) &&
+          !IMMUTABLE_ON_CONFLICT_COLUMNS.has(column) &&
+          (column !== "id" || updateGeneratedId) &&
+          (!INSERT_DEFAULT_ONLY_COLUMNS.has(column) || Object.prototype.hasOwnProperty.call(rawRecord, column)),
       );
       const conflict =
         this.conflictColumns.length > 0
@@ -463,6 +492,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
         .map(sqlIdentifier)
         .join(", ")}) VALUES (${placeholders})${conflict} RETURNING ${this.selectedSql()}`;
       const result = await this.db!.prepare(sql).bind(...values).first<Record<string, unknown>>();
+      if (this.mutationTracker) this.mutationTracker.successfulWrites += 1;
       if (result) {
         rows.push(result);
       }
@@ -472,9 +502,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   }
 
   private async executeUpdate(): Promise<QueryResult<T>> {
-    const record = cleanRecord(this.table, (this.payload ?? {}) as Record<string, unknown>);
+    const rawRecord = (this.payload ?? {}) as Record<string, unknown>;
+    const record = cleanRecord(this.table, rawRecord);
     delete record.id;
     delete record.created_at;
+    delete record.joined_at;
+    for (const column of INSERT_DEFAULT_ONLY_COLUMNS) {
+      if (!Object.prototype.hasOwnProperty.call(rawRecord, column)) delete record[column];
+    }
 
     if (Object.keys(record).length === 0) {
       return { data: null, error: { message: `${this.table} 更新失败：没有可更新的字段。` } };
@@ -485,6 +520,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
       .map((column) => `${sqlIdentifier(column)} = ?`)
       .join(", ")}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
+    if (this.mutationTracker) this.mutationTracker.successfulWrites += 1;
     return this.shapeRows(result.results ?? []);
   }
 
@@ -492,17 +528,18 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     const params: unknown[] = [];
     const sql = `DELETE FROM ${sqlIdentifier(this.table)}${this.whereSql(params)} RETURNING ${this.selectedSql()}`;
     const result = await this.db!.prepare(sql).bind(...params).all<Record<string, unknown>>();
+    if (this.mutationTracker) this.mutationTracker.successfulWrites += 1;
     return this.shapeRows(result.results ?? []);
   }
 }
 
-export function createD1QueryClient(db: GameDatabase | null) {
+export function createD1QueryClient(db: GameDatabase | null, mutationTracker?: GameDatabaseMutationTracker) {
   return {
     hasDatabase() {
       return Boolean(db);
     },
     from(table: string) {
-      return new D1QueryBuilder(db, table);
+      return new D1QueryBuilder(db, table, mutationTracker);
     },
   };
 }

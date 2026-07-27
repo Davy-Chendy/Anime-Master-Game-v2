@@ -13,17 +13,17 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS mutation_journal (id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, name TEXT NOT NULL, action_key TEXT, started_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mutation_journal_payload (id INTEGER PRIMARY KEY CHECK(id=1), payload_json TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, room_code TEXT NOT NULL UNIQUE, host_player_id TEXT NOT NULL, game_status TEXT NOT NULL, current_presenter_player_id TEXT, current_game_id TEXT, prepared_question_set_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL', lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3, lobby_round_seconds INTEGER NOT NULL DEFAULT 60, lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]')`,
-  `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, nickname TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'PLAYER')`,
+  `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, nickname TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), role TEXT NOT NULL DEFAULT 'PLAYER')`,
   `CREATE TABLE IF NOT EXISTS question_sets (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by_player_id TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'uploaded', is_public INTEGER NOT NULL DEFAULT 0, image_urls_text TEXT, image_count INTEGER NOT NULL DEFAULT 0, rating_avg REAL NOT NULL DEFAULT 0, rating_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by_nickname TEXT, play_count INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, question_set_id TEXT NOT NULL, image_url TEXT NOT NULL, order_index INTEGER NOT NULL, label_text TEXT, label_source TEXT, label_source_answer_id TEXT, label_updated_by_player_id TEXT, label_updated_at TEXT, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS game_sessions (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, question_set_id TEXT NOT NULL, presenter_player_id TEXT NOT NULL, status TEXT NOT NULL, game_mode TEXT NOT NULL, current_question_index INTEGER NOT NULL DEFAULT 0, current_reveal_round INTEGER NOT NULL DEFAULT 1, revealed_blocks TEXT NOT NULL DEFAULT '[]', max_reveal_rounds INTEGER NOT NULL DEFAULT 3, round_seconds INTEGER NOT NULL DEFAULT 60, round_scores TEXT NOT NULL DEFAULT '[5,3,1]', team_battle_state TEXT, round_started_at TEXT, created_at TEXT NOT NULL, ended_at TEXT, completed_normally_at TEXT)`,
-  `CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, reveal_round INTEGER NOT NULL, player_id TEXT NOT NULL, answer_text TEXT NOT NULL, submitted_at TEXT NOT NULL, UNIQUE(game_session_id, question_index, reveal_round, player_id))`,
+  `CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, reveal_round INTEGER NOT NULL, player_id TEXT NOT NULL, answer_text TEXT NOT NULL, submitted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(game_session_id, question_index, reveal_round, player_id))`,
   `CREATE TABLE IF NOT EXISTS buzzer_answers (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, reveal_round INTEGER NOT NULL, player_id TEXT NOT NULL, answer_text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', score_awarded INTEGER NOT NULL DEFAULT 0, submitted_at TEXT NOT NULL, server_received_at TEXT, judged_at TEXT, judged_by_player_id TEXT, UNIQUE(game_session_id, question_index, reveal_round, player_id))`,
   `CREATE TABLE IF NOT EXISTS player_scores (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, player_id TEXT NOT NULL, score INTEGER NOT NULL DEFAULT 0, correct_count INTEGER NOT NULL DEFAULT 0, UNIQUE(game_session_id, player_id))`,
-  `CREATE TABLE IF NOT EXISTS question_results (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, player_id TEXT NOT NULL, scored_round INTEGER NOT NULL, score_awarded INTEGER NOT NULL, judged_by_player_id TEXT NOT NULL, judged_at TEXT NOT NULL, UNIQUE(game_session_id, question_index, player_id))`,
-  `CREATE TABLE IF NOT EXISTS question_snapshots (game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, eligible_player_count INTEGER NOT NULL, eligible_player_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, PRIMARY KEY(game_session_id, question_index))`,
-  `CREATE TABLE IF NOT EXISTS question_eligible_players (game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, player_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(game_session_id, question_index, player_id))`,
-  `CREATE TABLE IF NOT EXISTS game_participants (game_session_id TEXT NOT NULL, player_id TEXT NOT NULL, nickname TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'PLAYER', joined_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(game_session_id, player_id))`,
+  `CREATE TABLE IF NOT EXISTS question_results (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, player_id TEXT NOT NULL, scored_round INTEGER NOT NULL, score_awarded INTEGER NOT NULL, judged_by_player_id TEXT NOT NULL, judged_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(game_session_id, question_index, player_id))`,
+  `CREATE TABLE IF NOT EXISTS question_snapshots (game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, eligible_player_count INTEGER NOT NULL, eligible_player_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), PRIMARY KEY(game_session_id, question_index))`,
+  `CREATE TABLE IF NOT EXISTS question_eligible_players (game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, player_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), PRIMARY KEY(game_session_id, question_index, player_id))`,
+  `CREATE TABLE IF NOT EXISTS game_participants (game_session_id TEXT NOT NULL, player_id TEXT NOT NULL, nickname TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'PLAYER', joined_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), PRIMARY KEY(game_session_id, player_id))`,
   `CREATE TABLE IF NOT EXISTS completed_question_set_plays (game_session_id TEXT PRIMARY KEY, question_set_id TEXT NOT NULL, completed_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS question_set_ratings (id TEXT PRIMARY KEY, question_set_id TEXT NOT NULL, player_id TEXT NOT NULL, rating INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(question_set_id, player_id))`,
   `DROP TRIGGER IF EXISTS increment_local_question_set_play_count`,
@@ -210,6 +210,103 @@ export class RoomGameAuthority {
       // A correct result is the durable scoring fact. Repair denormalized score
       // and buzzer rows if an isolate stopped between gameService statements.
       const name = String(journal.name);
+      let questionTransitionRecovered = false;
+      if (name === "joinRoom") {
+        const playerId = Array.isArray(actionArgs) && typeof actionArgs[1] === "string" ? actionArgs[1] : null;
+        const room = this.storage.sql.exec<Row>("SELECT current_game_id,game_status FROM rooms WHERE id = ?", roomId).toArray()[0];
+        const player = playerId
+          ? this.storage.sql.exec<Row>("SELECT * FROM players WHERE id = ? AND room_id = ?", playerId, roomId).toArray()[0]
+          : null;
+        if (room?.game_status === "PLAYING" && typeof room.current_game_id === "string" && player?.role === "PLAYER") {
+          const now = new Date().toISOString();
+          this.storage.sql.exec(
+            `INSERT INTO game_participants(game_session_id,player_id,nickname,role,joined_at,created_at)
+             VALUES(?,?,?,?,?,?) ON CONFLICT(game_session_id,player_id) DO UPDATE SET
+             nickname=excluded.nickname,role=excluded.role`,
+            room.current_game_id,
+            player.id,
+            player.nickname,
+            player.role,
+            player.joined_at ?? now,
+            now,
+          );
+        }
+      }
+      if (name === "advanceReviewedQuestion" || name === "skipCurrentQuestion") {
+        const params = (Array.isArray(actionArgs) ? actionArgs[0] : null) as { gameSessionId?: unknown; expectedQuestionIndex?: unknown } | null;
+        const gameSessionId = typeof params?.gameSessionId === "string" ? params.gameSessionId : null;
+        const expectedQuestionIndex = typeof params?.expectedQuestionIndex === "number" && Number.isInteger(params.expectedQuestionIndex)
+          ? params.expectedQuestionIndex
+          : null;
+        const session = gameSessionId
+          ? this.storage.sql.exec<Row>("SELECT * FROM game_sessions WHERE id = ? AND room_id = ?", gameSessionId, roomId).toArray()[0]
+          : null;
+        if (session && expectedQuestionIndex != null) {
+          const currentQuestionIndex = Number(session.current_question_index);
+          const nextQuestionIndex = expectedQuestionIndex + 1;
+          if (session.status === "PLAYING" && currentQuestionIndex === expectedQuestionIndex) {
+            // The eligibility snapshot is written before the session advances. If
+            // that sequence stopped halfway, remove the orphan so a retry can
+            // recreate one coherent snapshot from the then-current roster.
+            this.storage.sql.exec(
+              "DELETE FROM question_eligible_players WHERE game_session_id = ? AND question_index = ?",
+              gameSessionId,
+              nextQuestionIndex,
+            );
+            this.storage.sql.exec(
+              "DELETE FROM question_snapshots WHERE game_session_id = ? AND question_index = ?",
+              gameSessionId,
+              nextQuestionIndex,
+            );
+          } else if (session.status === "PLAYING" && currentQuestionIndex === nextQuestionIndex) {
+            const existingSnapshot = this.storage.sql.exec<Row>(
+              "SELECT eligible_player_ids FROM question_snapshots WHERE game_session_id = ? AND question_index = ?",
+              gameSessionId,
+              nextQuestionIndex,
+            ).toArray()[0];
+            let eligiblePlayerIds: string[] = [];
+            if (typeof existingSnapshot?.eligible_player_ids === "string") {
+              try {
+                const parsed = JSON.parse(existingSnapshot.eligible_player_ids);
+                if (Array.isArray(parsed)) eligiblePlayerIds = parsed.filter((id): id is string => typeof id === "string");
+              } catch {
+                eligiblePlayerIds = [];
+              }
+            }
+            if (!existingSnapshot) {
+              eligiblePlayerIds = this.storage.sql.exec<Row>(
+                "SELECT id FROM players WHERE room_id = ? AND role = 'PLAYER' AND id != ? ORDER BY joined_at,id",
+                roomId,
+                session.presenter_player_id,
+              ).toArray().map((row) => String(row.id));
+            }
+            const now = new Date().toISOString();
+            this.storage.sql.exec(
+              `INSERT INTO question_snapshots(game_session_id,question_index,eligible_player_count,eligible_player_ids,created_at)
+               VALUES(?,?,?,?,?) ON CONFLICT(game_session_id,question_index) DO UPDATE SET
+               eligible_player_count=excluded.eligible_player_count,eligible_player_ids=excluded.eligible_player_ids`,
+              gameSessionId,
+              nextQuestionIndex,
+              eligiblePlayerIds.length,
+              JSON.stringify(eligiblePlayerIds),
+              now,
+            );
+            for (const playerId of eligiblePlayerIds) {
+              this.storage.sql.exec(
+                `INSERT OR IGNORE INTO question_eligible_players(game_session_id,question_index,player_id,created_at)
+                 VALUES(?,?,?,?)`,
+                gameSessionId,
+                nextQuestionIndex,
+                playerId,
+                now,
+              );
+            }
+            questionTransitionRecovered = true;
+          } else if (session.status === "GAME_RESULT" && currentQuestionIndex === expectedQuestionIndex) {
+            questionTransitionRecovered = true;
+          }
+        }
+      }
       if (name === "gradeAnswersAndAdvance") {
         const params = (Array.isArray(actionArgs) ? actionArgs[0] : null) as { correctPlayerIds?: unknown[]; presenterPlayerId?: string } | null;
         const session = this.storage.sql.exec<Row>("SELECT * FROM game_sessions WHERE room_id = ? AND status = 'PLAYING' LIMIT 1", roomId).toArray()[0];
@@ -256,6 +353,9 @@ export class RoomGameAuthority {
           SELECT 1 FROM answers WHERE answers.game_session_id=buzzer_answers.game_session_id AND answers.question_index=buzzer_answers.question_index
             AND answers.reveal_round=buzzer_answers.reveal_round AND answers.player_id=buzzer_answers.player_id)`);
       this.storage.sql.exec(`UPDATE rooms SET game_status='GAME_RESULT', updated_at=? WHERE current_game_id IN (SELECT id FROM game_sessions WHERE status='GAME_RESULT') AND game_status='PLAYING'`, new Date().toISOString());
+      this.storage.sql.exec(`INSERT OR IGNORE INTO completed_question_set_plays(game_session_id,question_set_id,completed_at)
+        SELECT id,question_set_id,completed_normally_at FROM game_sessions
+        WHERE room_id=? AND status='GAME_RESULT' AND completed_normally_at IS NOT NULL`, roomId);
       this.storage.sql.exec(`UPDATE game_sessions SET revealed_blocks=?,round_started_at=NULL
         WHERE game_mode='BUZZER_FIRST_CORRECT' AND status='PLAYING' AND EXISTS(
           SELECT 1 FROM question_results WHERE question_results.game_session_id=game_sessions.id AND question_results.question_index=game_sessions.current_question_index)`,
@@ -324,11 +424,15 @@ export class RoomGameAuthority {
       const canReturnRecoveredReceipt = [
         "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer",
         "joinRoom", "leaveRoom", "kickPlayerFromRoom", "updatePlayerRole", "judgeTeamBattleGuess", "gradeAnswersAndAdvance",
-      ].includes(name) || handoffApplied;
+      ].includes(name) || handoffApplied || questionTransitionRecovered;
       if (canReturnRecoveredReceipt && typeof journal.action_key === "string" && journal.action_key) {
         this.rememberAction(journal.action_key, { __authorityRecovered: true });
       }
-      if (handoffApplied) {
+      const shouldProjectRecoveredState = [
+        "revealTeamBattleAnswer", "gradeAnswersAndAdvance", "advanceReviewedQuestion", "updateQuestionLabel",
+        "skipCurrentQuestion", "endCurrentGameEarly", "joinRoom", "leaveRoom", "kickPlayerFromRoom", "updatePlayerRole",
+      ].includes(name) || handoffApplied;
+      if (shouldProjectRecoveredState) {
         this.enqueueProjection(roomId, name);
       }
       this.storage.sql.exec("DELETE FROM mutation_journal WHERE id = 1");
