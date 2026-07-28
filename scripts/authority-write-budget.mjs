@@ -30,15 +30,17 @@ const vnextProjectionRows = 2;
 const vnextRows = vnextCheckpointRows + vnextBoundaryRows + vnextProjectionRows;
 
 // D1 billing is based on rows read/written, not SQL statement count. The new
-// result archive is one aggregate row. Question labels and the existing full
-// room-roster/index synchronization remain unchanged in this change.
+// result archive is one aggregate row. Roster reconciliation writes nothing
+// when the expected D1 roster is already current; genuinely changed members
+// still pay for their table row and affected index rows.
 const d1ArchiveRows = 1;
 const d1QuestionRows = questions;
 const d1RoomSessionAndCompletionRows = 3;
-const d1RosterAndIndexRowsConservative = { lower: 200, upper: 450 };
+const d1UnchangedRosterRows = 0;
+const d1NonRosterIndexOverheadConservative = { lower: 1, upper: 35 };
 const d1EstimatedRows = {
-  lower: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1RosterAndIndexRowsConservative.lower,
-  upper: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1RosterAndIndexRowsConservative.upper,
+  lower: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.lower,
+  upper: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.upper,
 };
 const avoidedNormalizedResultRows = players + players + answers;
 
@@ -69,9 +71,11 @@ console.log(JSON.stringify({
     aggregateArchiveRows: d1ArchiveRows,
     questionLabelRowsAtMost: d1QuestionRows,
     roomSessionAndCompletionRows: d1RoomSessionAndCompletionRows,
-    existingRosterAndIndexRowsConservative: d1RosterAndIndexRowsConservative,
-    estimatedRowsWritten: d1EstimatedRows,
+    unchangedRosterRows: d1UnchangedRosterRows,
+    changedMemberRowsIncludingIndexesEach: { insertOrDelete: "about 4-5", replace: "about 8-10" },
+    nonRosterIndexOverheadConservative: d1NonRosterIndexOverheadConservative,
+    typicalEstimatedRowsWrittenWithUnchangedRoster: d1EstimatedRows,
     normalizedParticipantScoreAndQuestionResultRowsAvoidedAtMost: avoidedNormalizedResultRows,
-    note: "The roster/index range is intentionally unchanged; SQL statement count is not treated as rows_written.",
+    note: "Only real roster changes are billed; SQL statement count is not treated as rows_written.",
   },
 }, null, 2));

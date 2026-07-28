@@ -426,6 +426,12 @@ async function main() {
       (SELECT COUNT(*) FROM question_results) AS result_rows`);
     metrics.hotD1RowsDuringGame = hotRows;
     assert.deepEqual(hotRows, { answer_rows: 0, buzzer_answer_rows: 0, score_rows: 0, result_rows: 0 }, "vNext wrote D1 hot-path rows during play");
+    await queryLocalD1(persistTo, `
+      CREATE TABLE runtime_player_write_audit(kind TEXT NOT NULL,player_id TEXT NOT NULL);
+      CREATE TRIGGER runtime_audit_player_insert AFTER INSERT ON players BEGIN INSERT INTO runtime_player_write_audit VALUES('insert',new.id); END;
+      CREATE TRIGGER runtime_audit_player_update AFTER UPDATE ON players BEGIN INSERT INTO runtime_player_write_audit VALUES('update',new.id); END;
+      CREATE TRIGGER runtime_audit_player_delete AFTER DELETE ON players BEGIN INSERT INTO runtime_player_write_audit VALUES('delete',old.id); END;
+    `);
     for (const context of contexts) for (const client of context.clients.values()) client.close();
     await worker.start();
     await Promise.all(contexts.map((context) => connectRoom(worker, metrics, context, true)));
@@ -469,9 +475,20 @@ async function main() {
       (SELECT COUNT(*) FROM game_result_archives) AS archive_rows,
       (SELECT COUNT(*) FROM game_participants) AS participant_rows,
       (SELECT COUNT(*) FROM player_scores) AS score_rows,
-      (SELECT COUNT(*) FROM question_results) AS result_rows`);
+      (SELECT COUNT(*) FROM question_results) AS result_rows,
+      (SELECT COUNT(*) FROM runtime_player_write_audit WHERE kind='insert') AS roster_inserts,
+      (SELECT COUNT(*) FROM runtime_player_write_audit WHERE kind='update') AS roster_updates,
+      (SELECT COUNT(*) FROM runtime_player_write_audit WHERE kind='delete') AS roster_deletes`);
     metrics.finalD1Rows = finalRows;
-    assert.deepEqual(finalRows, { archive_rows: ROOM_COUNT, participant_rows: 0, score_rows: 0, result_rows: 0 }, "vNext final projection wrote unexpected normalized result rows");
+    assert.deepEqual(finalRows, {
+      archive_rows: ROOM_COUNT,
+      participant_rows: 0,
+      score_rows: 0,
+      result_rows: 0,
+      roster_inserts: 0,
+      roster_updates: 0,
+      roster_deletes: 0,
+    }, "vNext final projection wrote unchanged roster or normalized result rows");
     const archiveRows = await queryLocalD1(persistTo, "SELECT game_session_id,result_json FROM game_result_archives ORDER BY game_session_id");
     assert.equal(archiveRows.length, ROOM_COUNT);
     for (const row of archiveRows) {

@@ -201,7 +201,7 @@ type LegacyProjectionGame = {
   questionResults: QuestionResult[];
 };
 
-type ArchiveProjectionGame = {
+type ArchiveProjectionGameV2 = {
   projectionVersion: 2;
   roomId: string;
   dissolved?: boolean;
@@ -212,7 +212,13 @@ type ArchiveProjectionGame = {
   archive: GameResultArchive;
 };
 
-type ProjectionPayload = { games: Array<LegacyProjectionGame | ArchiveProjectionGame> };
+type ArchiveProjectionGameV3 = Omit<ArchiveProjectionGameV2, "projectionVersion"> & {
+  projectionVersion: 3;
+  rosterStrategy: "reconcile";
+};
+
+type ProjectionGame = LegacyProjectionGame | ArchiveProjectionGameV2 | ArchiveProjectionGameV3;
+type ProjectionPayload = { games: ProjectionGame[] };
 
 class TerminalMutationError extends Error {}
 
@@ -300,6 +306,7 @@ export class RoomAuthorityVNext {
     maxActiveGameBytes: 0,
     checkpointTriggers: {} as Record<string, number>,
   };
+  private projectionFlushInFlight: Promise<boolean> | null = null;
 
   constructor(
     private readonly state: DurableObjectState,
@@ -1114,7 +1121,7 @@ export class RoomAuthorityVNext {
   }
 
   private joinRoom(action: VNextPendingMutation): VNextMutationOutcome {
-    const aggregate = this.requireActive();
+    const aggregate = this.requireActiveOrEnded();
     const nickname = getString(action.payload.nickname) ?? "玩家";
     const role = action.payload.role === "SPECTATOR" ? "SPECTATOR" as const : "PLAYER" as const;
     let player = aggregate.players.find((item) => item.id === action.actorId);
@@ -1124,10 +1131,17 @@ export class RoomAuthorityVNext {
       player = { id: action.actorId, roomId: aggregate.roomId, nickname, isHost: false, role, joinedAt: nowIso(action.serverReceivedAtMs), lastSeenAt: nowIso(action.serverReceivedAtMs) };
       aggregate.players.push(player);
     }
-    if (role === "PLAYER") this.ensurePlayerScore(player.id);
+    if (role === "PLAYER" && aggregate.cutoverState === "active") this.ensurePlayerScore(player.id);
     if (aggregate.room) aggregate.room.players = aggregate.players;
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room!) };
-    return { data: { room: clone(aggregate.room), error: null, errorCode: null }, provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [] };
+    return {
+      data: { room: clone(aggregate.room), error: null, errorCode: null },
+      provisional: true,
+      publicDeltas: [delta],
+      presenterDeltas: [],
+      playerDeltas: [],
+      ...(aggregate.cutoverState === "ended" ? { forceCheckpoint: "projection" as const } : {}),
+    };
   }
 
   private leaveRoom(action: VNextPendingMutation, targetPlayerId: string): VNextMutationOutcome {
@@ -1176,16 +1190,23 @@ export class RoomAuthorityVNext {
   }
 
   private updatePlayerRole(action: VNextPendingMutation): VNextMutationOutcome {
-    const aggregate = this.requireActive();
+    const aggregate = this.requireActiveOrEnded();
     if (aggregate.room?.hostPlayerId !== action.actorId) throw new TerminalMutationError("只有房主可以修改身份。");
     const target = getString(action.payload.targetPlayerId);
     const player = aggregate.players.find((item) => item.id === target);
     if (!player || (action.payload.role !== "PLAYER" && action.payload.role !== "SPECTATOR")) throw new TerminalMutationError("玩家身份参数无效。");
     player.role = action.payload.role;
-    if (player.role === "PLAYER") this.ensurePlayerScore(player.id);
+    if (player.role === "PLAYER" && aggregate.cutoverState === "active") this.ensurePlayerScore(player.id);
     if (aggregate.room) aggregate.room.players = aggregate.players;
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room!) };
-    return { data: clone(aggregate.room), provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [] };
+    return {
+      data: clone(aggregate.room),
+      provisional: true,
+      publicDeltas: [delta],
+      presenterDeltas: [],
+      playerDeltas: [],
+      ...(aggregate.cutoverState === "ended" ? { forceCheckpoint: "projection" as const } : {}),
+    };
   }
 
   private ensurePlayerScore(playerId: string) {
@@ -1404,6 +1425,17 @@ export class RoomAuthorityVNext {
   }
 
   async flushFinalProjection() {
+    if (this.projectionFlushInFlight) return await this.projectionFlushInFlight;
+    const task = this.flushFinalProjectionOnce();
+    this.projectionFlushInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (this.projectionFlushInFlight === task) this.projectionFlushInFlight = null;
+    }
+  }
+
+  private async flushFinalProjectionOnce() {
     const row = this.state.storage.sql.exec<{ payload_json: string; attempts: number }>("SELECT payload_json,attempts FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
     if (!row) return true;
     const payload = JSON.parse(row.payload_json) as ProjectionPayload;
@@ -1419,28 +1451,48 @@ export class RoomAuthorityVNext {
           statements.push(this.d1.prepare("DELETE FROM rooms WHERE id=?").bind(game.roomId));
         } else {
           if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_game_id=?,updated_at=? WHERE id=?").bind(game.room.hostPlayerId, game.room.status, game.room.currentGameId ?? null, nowIso(), game.room.id));
-          statements.push(this.d1.prepare("DELETE FROM players WHERE room_id=?").bind(game.roomId));
+          const players = game.players.map((player) => ({ ...player, joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt, lastSeenAt: player.lastSeenAt ?? nowIso() }));
+          const playersJson = JSON.stringify(players);
+          if (game.projectionVersion === 3) {
+            statements.push(this.d1.prepare(`WITH desired AS (
+              SELECT json_extract(value,'$.id') AS id,json_extract(value,'$.roomId') AS room_id,
+                json_extract(value,'$.nickname') AS nickname,json_extract(value,'$.isHost') AS is_host,
+                json_extract(value,'$.lastSeenAt') AS last_seen_at,json_extract(value,'$.role') AS role
+              FROM json_each(?)
+            )
+            DELETE FROM players WHERE room_id=? AND (
+              NOT EXISTS (SELECT 1 FROM desired WHERE desired.id=players.id)
+              OR EXISTS (SELECT 1 FROM desired WHERE desired.id=players.id AND (
+                players.room_id IS NOT desired.room_id OR players.nickname IS NOT desired.nickname
+                OR players.is_host IS NOT desired.is_host OR players.last_seen_at IS NOT desired.last_seen_at
+                OR players.role IS NOT desired.role
+              ))
+            )`).bind(playersJson, game.roomId));
+          } else {
+            statements.push(this.d1.prepare("DELETE FROM players WHERE room_id=?").bind(game.roomId));
+          }
           if (game.players.length) {
-            const players = game.players.map((player) => ({ ...player, joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt, lastSeenAt: player.lastSeenAt ?? nowIso() }));
             statements.push(this.d1.prepare(`INSERT INTO players(id,room_id,nickname,is_host,joined_at,last_seen_at,role)
               SELECT json_extract(value,'$.id'),json_extract(value,'$.roomId'),json_extract(value,'$.nickname'),json_extract(value,'$.isHost'),json_extract(value,'$.joinedAt'),json_extract(value,'$.lastSeenAt'),json_extract(value,'$.role') FROM json_each(?) WHERE true
-              ON CONFLICT(id) DO UPDATE SET room_id=excluded.room_id,nickname=excluded.nickname,is_host=excluded.is_host,last_seen_at=excluded.last_seen_at,role=excluded.role`).bind(JSON.stringify(players)));
+              ON CONFLICT(id) DO UPDATE SET room_id=excluded.room_id,nickname=excluded.nickname,is_host=excluded.is_host,last_seen_at=excluded.last_seen_at,role=excluded.role
+              ${game.projectionVersion === 3 ? `WHERE players.room_id IS NOT excluded.room_id OR players.nickname IS NOT excluded.nickname
+                OR players.is_host IS NOT excluded.is_host OR players.last_seen_at IS NOT excluded.last_seen_at OR players.role IS NOT excluded.role` : ""}`).bind(playersJson));
           }
           if (game.gameSession) {
             statements.push(this.d1.prepare("UPDATE game_sessions SET status=?,current_question_index=?,current_reveal_round=?,revealed_blocks=?,team_battle_state=?,round_started_at=?,ended_at=?,completed_normally_at=? WHERE id=?").bind(game.gameSession.status, game.gameSession.currentQuestionIndex, game.gameSession.currentRevealRound, JSON.stringify(game.gameSession.revealedBlocks), game.gameSession.teamBattleState == null ? null : JSON.stringify(game.gameSession.teamBattleState), game.gameSession.roundStartedAt ?? null, game.gameSession.endedAt ?? null, game.gameSession.completedNormallyAt ?? null, game.gameSession.id));
-            const participants = game.projectionVersion === 2 ? [] : game.participants ?? game.players.filter((player) => player.role === "PLAYER");
+            const participants = game.projectionVersion == null ? game.participants ?? game.players.filter((player) => player.role === "PLAYER") : [];
             if (participants.length) statements.push(this.d1.prepare(`INSERT INTO game_participants(game_session_id,player_id,nickname,role,joined_at)
               SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.nickname'),json_extract(value,'$.role'),json_extract(value,'$.joinedAt') FROM json_each(?) WHERE true
               ON CONFLICT(game_session_id,player_id) DO UPDATE SET nickname=excluded.nickname,role=excluded.role`).bind(game.gameSession.id, JSON.stringify(participants.map((player) => ({ ...player, role: "PLAYER", joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt })))));
             if (game.gameSession.completedNormallyAt) statements.push(this.d1.prepare("INSERT OR IGNORE INTO completed_question_set_plays(game_session_id,question_set_id,completed_at) VALUES(?,?,?)").bind(game.gameSession.id, game.gameSession.questionSetId, game.gameSession.completedNormallyAt));
           }
-          if (game.projectionVersion !== 2 && game.scores.length) statements.push(this.d1.prepare(`INSERT INTO player_scores(id,game_session_id,player_id,score,correct_count)
+          if (game.projectionVersion == null && game.scores.length) statements.push(this.d1.prepare(`INSERT INTO player_scores(id,game_session_id,player_id,score,correct_count)
             SELECT json_extract(value,'$.id'),json_extract(value,'$.gameSessionId'),json_extract(value,'$.playerId'),json_extract(value,'$.score'),json_extract(value,'$.correctCount') FROM json_each(?) WHERE true
             ON CONFLICT(game_session_id,player_id) DO UPDATE SET score=excluded.score,correct_count=excluded.correct_count`).bind(JSON.stringify(game.scores)));
-          if (game.projectionVersion !== 2 && game.questionResults.length) statements.push(this.d1.prepare(`INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at)
+          if (game.projectionVersion == null && game.questionResults.length) statements.push(this.d1.prepare(`INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at)
             SELECT json_extract(value,'$.id'),json_extract(value,'$.gameSessionId'),json_extract(value,'$.questionIndex'),json_extract(value,'$.playerId'),json_extract(value,'$.scoredRound'),json_extract(value,'$.scoreAwarded'),json_extract(value,'$.judgedByPlayerId'),json_extract(value,'$.judgedAt') FROM json_each(?) WHERE true
             ON CONFLICT(game_session_id,question_index,player_id) DO UPDATE SET scored_round=excluded.scored_round,score_awarded=excluded.score_awarded,judged_by_player_id=excluded.judged_by_player_id,judged_at=excluded.judged_at`).bind(JSON.stringify(game.questionResults)));
-          if (game.projectionVersion === 2 && game.gameSession) {
+          if (game.projectionVersion != null && game.gameSession) {
             statements.push(this.d1.prepare(`INSERT INTO game_result_archives(game_session_id,room_id,question_set_id,archive_version,completed_at,result_json)
               VALUES(?,?,?,?,?,?) ON CONFLICT(game_session_id) DO UPDATE SET room_id=excluded.room_id,question_set_id=excluded.question_set_id,
               archive_version=excluded.archive_version,completed_at=excluded.completed_at,result_json=excluded.result_json`).bind(
@@ -1458,11 +1510,13 @@ export class RoomAuthorityVNext {
         this.metrics.d1Writes += statements.length;
       }
       payload.games.shift();
-      if (payload.games.length) this.state.storage.sql.exec("UPDATE authority_vnext_projection_outbox SET payload_json=?,attempts=0,updated_at=? WHERE id=1", JSON.stringify(payload), Date.now());
-      else this.state.storage.sql.exec("DELETE FROM authority_vnext_projection_outbox WHERE id=1");
+      const current = this.state.storage.sql.exec<{ payload_json: string }>("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
+      if (current?.payload_json !== row.payload_json) return false;
+      if (payload.games.length) this.state.storage.sql.exec("UPDATE authority_vnext_projection_outbox SET payload_json=?,attempts=0,updated_at=? WHERE id=1 AND payload_json=?", JSON.stringify(payload), Date.now(), row.payload_json);
+      else this.state.storage.sql.exec("DELETE FROM authority_vnext_projection_outbox WHERE id=1 AND payload_json=?", row.payload_json);
       return payload.games.length === 0;
     } catch (error) {
-      this.state.storage.sql.exec("UPDATE authority_vnext_projection_outbox SET attempts=attempts+1,updated_at=? WHERE id=1", Date.now());
+      this.state.storage.sql.exec("UPDATE authority_vnext_projection_outbox SET attempts=attempts+1,updated_at=? WHERE id=1 AND payload_json=?", Date.now(), row.payload_json);
       if (isPermanentSchemaError(error)) console.error(JSON.stringify({ event: "authority_vnext_projection_permanent_error", authorityVersion: 2, error: String(error) }));
       else console.warn(JSON.stringify({ event: "authority_vnext_projection_deferred", authorityVersion: 2, error: String(error) }));
       return false;
@@ -1478,11 +1532,43 @@ export class RoomAuthorityVNext {
     return Boolean(this.state.storage.sql.exec<{ id: number }>("SELECT id FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0]);
   }
 
+  hasPendingRoomHandoff() {
+    const payloadJson = this.pendingProjectionPayloadJson();
+    if (!payloadJson) return false;
+    try {
+      const payload = JSON.parse(payloadJson) as ProjectionPayload;
+      return payload.games.some((game) => !game.dissolved && game.room?.status === "LOBBY");
+    } catch {
+      return true;
+    }
+  }
+
+  async flushRoomHandoff() {
+    for (let remaining = this.pendingProjectionGameCount(); remaining > 0 && this.hasPendingRoomHandoff(); remaining -= 1) {
+      const before = this.pendingProjectionPayloadJson();
+      await this.flushFinalProjection();
+      if (!this.hasPendingRoomHandoff()) return true;
+      if (this.pendingProjectionPayloadJson() === before) return false;
+    }
+    return !this.hasPendingRoomHandoff();
+  }
+
+  private pendingProjectionPayloadJson() {
+    return this.state.storage.sql.exec<{ payload_json: string }>("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0]?.payload_json ?? null;
+  }
+
+  private pendingProjectionGameCount() {
+    const payloadJson = this.pendingProjectionPayloadJson();
+    if (!payloadJson) return 0;
+    try { return (JSON.parse(payloadJson) as ProjectionPayload).games.length; } catch { return 1; }
+  }
+
   private mergeProjectionOutbox(aggregate: VNextAggregate) {
     const existing = this.state.storage.sql.exec<{ payload_json: string }>("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
     const payload = existing ? JSON.parse(existing.payload_json) as ProjectionPayload : { games: [] };
-    const game: ArchiveProjectionGame = {
-      projectionVersion: 2,
+    const game: ArchiveProjectionGameV3 = {
+      projectionVersion: 3,
+      rosterStrategy: "reconcile",
       roomId: aggregate.roomId,
       dissolved: aggregate.dissolved,
       room: aggregate.room,

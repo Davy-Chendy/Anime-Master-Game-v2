@@ -3054,8 +3054,13 @@ export class RoomDurableObject {
         const gameId = typeof startParams.startRequestId === "string" ? startParams.startRequestId : null;
         if (!gameId) throw new Error("authority vNext 开局请求缺少 startRequestId。");
         if (this.authorityVNext.hasPendingFinalProjection()) {
-          const flushed = await this.authorityVNext.flushFinalProjection();
-          if (!flushed && !this.authorityVNext.canStartAnotherGame()) throw new Error("上一局长期结果队列接近容量上限，请稍后再开始新游戏。");
+          if (this.authorityVNext.hasPendingRoomHandoff()) {
+            const handoffReady = await this.authorityVNext.flushRoomHandoff();
+            if (!handoffReady) throw new Error("上一局房间成员仍在同步，请稍后再开始新游戏。");
+          } else {
+            await this.authorityVNext.flushFinalProjection();
+          }
+          if (this.authorityVNext.hasPendingFinalProjection() && !this.authorityVNext.canStartAnotherGame()) throw new Error("上一局长期结果队列接近容量上限，请稍后再开始新游戏。");
         }
         this.authorityVNext.beginStart(localRoomId, gameId, startParams);
         const result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [startParams], receivedAtMs));
@@ -3076,7 +3081,7 @@ export class RoomDurableObject {
       if (localTopic && body.name && ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name) && this.authorityVNext.hasStoredState()) {
         await this.authorityVNext.restoreFromStorage();
         const aggregate = this.authorityVNext.getAggregate();
-        if (aggregate?.cutoverState !== "initializing" && aggregate?.room?.status !== "LOBBY") {
+        if (aggregate?.cutoverState !== "initializing" && (aggregate?.room?.status !== "LOBBY" || this.authorityVNext.hasPendingRoomHandoff())) {
           return Response.json({ data: this.authorityVNext.query(body.name, body.args ?? []) });
         }
       }
@@ -3085,7 +3090,7 @@ export class RoomDurableObject {
         await this.resumeInitializingVNextStart();
         const aggregate = this.authorityVNext.getAggregate();
         const positional = getVNextPositionalMutation(body.name, body.args ?? []);
-        if (aggregate?.gameSession && aggregate.cutoverState !== "initializing" && aggregate.room?.status !== "LOBBY" && positional) {
+        if (aggregate?.gameSession && aggregate.cutoverState !== "initializing" && (aggregate.room?.status !== "LOBBY" || this.authorityVNext.hasPendingRoomHandoff()) && positional) {
           const seen = aggregate.seenSeqByActor[positional.actorId] ?? aggregate.committedSeqByActor[positional.actorId] ?? 0;
           const envelope: VNextMutationEnvelope = {
             actionId: body.clientActionId || crypto.randomUUID(),

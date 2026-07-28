@@ -85,6 +85,77 @@ const fakeD1 = {
   async batch() { return []; },
 } as unknown as D1Database;
 
+class SqliteProjectionStatement {
+  bindings: unknown[] = [];
+  constructor(readonly db: DatabaseSync, readonly sql: string) {}
+  bind(...bindings: unknown[]) { this.bindings = bindings; return this; }
+  run() { this.db.prepare(this.sql).run(...this.bindings); }
+}
+
+class SqliteProjectionD1 {
+  readonly db = new DatabaseSync(":memory:");
+  batchCalls = 0;
+
+  constructor() {
+    this.db.exec(`
+      PRAGMA foreign_keys=ON;
+      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_game_id TEXT,updated_at TEXT NOT NULL);
+      CREATE TABLE players(id TEXT PRIMARY KEY,room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,nickname TEXT NOT NULL,is_host INTEGER NOT NULL,joined_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,role TEXT NOT NULL);
+      CREATE UNIQUE INDEX players_room_nickname_unique ON players(room_id,lower(nickname));
+      CREATE INDEX players_room_id_idx ON players(room_id);
+      CREATE INDEX players_room_role_idx ON players(room_id,role);
+      CREATE TABLE questions(id TEXT PRIMARY KEY,label_text TEXT,label_source TEXT,label_source_answer_id TEXT,label_updated_by_player_id TEXT,label_updated_at TEXT);
+      CREATE TABLE game_sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,current_question_index INTEGER NOT NULL,current_reveal_round INTEGER NOT NULL,revealed_blocks TEXT NOT NULL,team_battle_state TEXT,round_started_at TEXT,ended_at TEXT,completed_normally_at TEXT);
+      CREATE TABLE completed_question_set_plays(game_session_id TEXT PRIMARY KEY,question_set_id TEXT NOT NULL,completed_at TEXT NOT NULL);
+      CREATE TABLE game_result_archives(game_session_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,question_set_id TEXT NOT NULL,archive_version INTEGER NOT NULL,completed_at TEXT NOT NULL,result_json TEXT NOT NULL);
+      CREATE TABLE player_write_audit(kind TEXT NOT NULL,player_id TEXT NOT NULL);
+      CREATE TRIGGER audit_player_insert AFTER INSERT ON players BEGIN INSERT INTO player_write_audit VALUES('insert',new.id); END;
+      CREATE TRIGGER audit_player_update AFTER UPDATE ON players BEGIN INSERT INTO player_write_audit VALUES('update',new.id); END;
+      CREATE TRIGGER audit_player_delete AFTER DELETE ON players BEGIN INSERT INTO player_write_audit VALUES('delete',old.id); END;
+    `);
+  }
+
+  prepare(sql: string) { return new SqliteProjectionStatement(this.db, sql); }
+
+  async batch(statements: D1PreparedStatement[]) {
+    this.batchCalls += 1;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const statement of statements as unknown as SqliteProjectionStatement[]) statement.run();
+      this.db.exec("COMMIT");
+      return [];
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+}
+
+function createSqliteProjectionAuthority(playerCount: number) {
+  const d1 = new SqliteProjectionD1();
+  const created = createAuthority(playerCount, d1 as unknown as D1Database);
+  const aggregate = created.authority.getAggregate()!;
+  const fixedLastSeenAt = "2026-07-28T00:00:00.000Z";
+  for (const player of aggregate.players) player.lastSeenAt = fixedLastSeenAt;
+  aggregate.room!.players = aggregate.players;
+  d1.db.prepare("INSERT INTO rooms VALUES(?,?,?,?,?,?)").run("r1", "ROOM01", "host", "PLAYING", "g1", fixedLastSeenAt);
+  for (const player of aggregate.players) {
+    d1.db.prepare("INSERT INTO players VALUES(?,?,?,?,?,?,?)").run(
+      player.id,
+      player.roomId,
+      player.nickname,
+      player.isHost ? 1 : 0,
+      typeof player.joinedAt === "number" ? new Date(player.joinedAt).toISOString() : player.joinedAt,
+      player.lastSeenAt,
+      player.role,
+    );
+  }
+  d1.db.prepare("INSERT INTO questions(id) VALUES(?)").run("q1");
+  d1.db.prepare("INSERT INTO game_sessions VALUES(?,?,?,?,?,?,?,?,?)").run("g1", "PLAYING", 0, 1, "[]", null, null, null, null);
+  d1.db.exec("DELETE FROM player_write_audit");
+  return { ...created, d1 };
+}
+
 function socketFor(state: FakeState, playerId: string) {
   const socket = new FakeSocket();
   const attachment: VNextSocketAttachment = { attachmentVersion: 1, topic: "room:r1", playerId, pending: [], serializedBytes: 0 };
@@ -1312,7 +1383,7 @@ test("archive failure cannot commit an advanced active_game", async () => {
   assert.equal(restored.getAggregate()?.gameSession?.status, "PLAYING");
 });
 
-test("final projection uses a dissolved tombstone and full roster replacement", async () => {
+test("final projection uses a dissolved tombstone and versioned roster projection", async () => {
   const statements: Array<{ sql: string; bindings: unknown[] }> = [];
   const d1 = {
     prepare(sql: string) { return { bind(...bindings: unknown[]) { const statement = { sql, bindings }; statements.push(statement); return statement; } }; },
@@ -1353,11 +1424,56 @@ test("D1 projection failure retains the aggregate outbox until a later retry suc
   const outcome = authority.handleMutation(host, envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now());
   await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
   assert.equal(await authority.flushFinalProjection(), false);
+  assert.equal(authority.hasPendingRoomHandoff(), true);
+  assert.equal(await authority.flushRoomHandoff(), false);
+  assert.equal((authority.query("getRoomWithPlayers", []) as Room).status, "LOBBY");
+  const joined = authority.handleMutation(null, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), Date.now() + 1);
+  assert.equal(joined.error, undefined);
+  assert.equal(joined.forceCheckpoint, "projection");
+  await authority.forceCheckpoint(joined.forceCheckpoint);
   assert.equal(authority.canStartAnotherGame(), true);
   assert.equal(state.storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_projection_outbox").get().count, 1);
   shouldFail = false;
-  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(await authority.flushRoomHandoff(), true);
+  assert.equal(authority.hasPendingRoomHandoff(), false);
   assert.equal(state.storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_projection_outbox").get().count, 0);
+});
+
+test("an in-flight projection cannot erase a newer lobby roster payload", async () => {
+  let releaseBatch!: () => void;
+  let markBatchEntered!: () => void;
+  const batchGate = new Promise<void>((resolve) => { releaseBatch = resolve; });
+  const batchEntered = new Promise<void>((resolve) => { markBatchEntered = resolve; });
+  let batchCalls = 0;
+  const d1 = {
+    prepare(sql: string) { return { bind(...bindings: unknown[]) { return { sql, bindings }; } }; },
+    async batch() {
+      batchCalls += 1;
+      if (batchCalls === 1) {
+        markBatchEntered();
+        await batchGate;
+      }
+      return [];
+    },
+  } as unknown as D1Database;
+  const { state, authority } = createAuthority(1, d1);
+  const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now());
+  await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
+
+  const firstFlush = authority.flushFinalProjection();
+  const coalescedFlush = authority.flushFinalProjection();
+  await batchEntered;
+  assert.equal(batchCalls, 1, "concurrent flush calls must share one D1 batch");
+  const joined = authority.handleMutation(null, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), Date.now() + 1);
+  await authority.forceCheckpoint(joined.forceCheckpoint ?? "projection");
+  releaseBatch();
+  assert.equal(await firstFlush, false);
+  assert.equal(await coalescedFlush, false);
+  const pending = state.storage.sql.db.prepare("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").get() as { payload_json: string };
+  assert.match(pending.payload_json, /\"id\":\"late\"/);
+
+  assert.equal(await authority.flushRoomHandoff(), true);
+  assert.equal(batchCalls, 2);
 });
 
 test("legacy projection outbox without a projection version still writes normalized result tables", async () => {
@@ -1399,6 +1515,83 @@ test("legacy projection outbox without a projection version still writes normali
   assert.ok(statements.some((statement) => /INSERT INTO player_scores/.test(statement.sql)));
   assert.ok(statements.some((statement) => /INSERT INTO question_results/.test(statement.sql)));
   assert.equal(statements.some((statement) => /INSERT INTO game_result_archives/.test(statement.sql)), false);
+});
+
+test("v3 roster reconciliation writes zero player rows when all 50 members are unchanged", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(49);
+  const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now());
+  await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
+  const outbox = state.storage.sql.db.prepare("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").get() as { payload_json: string };
+  const payload = JSON.parse(outbox.payload_json) as { games: Array<{ projectionVersion?: number; rosterStrategy?: string }> };
+  assert.equal(payload.games[0]?.projectionVersion, 3);
+  assert.equal(payload.games[0]?.rosterStrategy, "reconcile");
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit").get().count, 0);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM players WHERE room_id='r1'").get().count, 50);
+
+  state.storage.sql.db.prepare("INSERT INTO authority_vnext_projection_outbox(id,payload_json,attempts,updated_at) VALUES(1,?,0,?)").run(outbox.payload_json, Date.now());
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit").get().count, 0, "replayed reconciliation must be write-idempotent");
+});
+
+test("v2 aggregate projection outbox keeps its legacy full roster replacement semantics", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(2);
+  const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now());
+  await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
+  const outbox = state.storage.sql.db.prepare("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").get() as { payload_json: string };
+  const payload = JSON.parse(outbox.payload_json) as { games: Array<{ projectionVersion?: number; rosterStrategy?: string }> };
+  payload.games[0]!.projectionVersion = 2;
+  delete payload.games[0]!.rosterStrategy;
+  state.storage.sql.db.prepare("UPDATE authority_vnext_projection_outbox SET payload_json=? WHERE id=1").run(JSON.stringify(payload));
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.deepEqual(
+    d1.db.prepare("SELECT kind,COUNT(*) count FROM player_write_audit GROUP BY kind ORDER BY kind").all().map((row) => ({ ...row })),
+    [{ kind: "delete", count: 3 }, { kind: "insert", count: 3 }],
+  );
+});
+
+test("v3 roster reconciliation writes only changed members and safely supports nickname swaps", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(2);
+  const p0 = socketFor(state, "p0");
+  const p1 = socketFor(state, "p1");
+  authority.handleMutation(p0, envelope("p0", 1, "joinRoom", { nickname: "P1", role: "PLAYER" }), Date.now());
+  authority.handleMutation(p1, envelope("p1", 1, "joinRoom", { nickname: "P0", role: "PLAYER" }), Date.now() + 1);
+  const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now() + 2);
+  await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.deepEqual(
+    d1.db.prepare("SELECT id,nickname FROM players WHERE id IN ('p0','p1') ORDER BY id").all().map((row) => ({ ...row })),
+    [{ id: "p0", nickname: "P1" }, { id: "p1", nickname: "P0" }],
+  );
+  assert.deepEqual(
+    d1.db.prepare("SELECT kind,COUNT(*) count FROM player_write_audit GROUP BY kind ORDER BY kind").all().map((row) => ({ ...row })),
+    [{ kind: "delete", count: 2 }, { kind: "insert", count: 2 }],
+  );
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit WHERE player_id='host'").get().count, 0);
+});
+
+test("v3 roster reconciliation preserves leave, host transfer, and role changes", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(2);
+  authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "leaveRoom", { playerId: "host" }), Date.now());
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), Date.now() + 1);
+  const outcome = authority.handleMutation(socketFor(state, "p0"), envelope("p0", 2, "returnRoomToLobby", { hostPlayerId: "p0" }), Date.now() + 2);
+  await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.deepEqual(
+    d1.db.prepare("SELECT id,is_host,role FROM players ORDER BY id").all().map((row) => ({ ...row })),
+    [
+      { id: "p0", is_host: 1, role: "PLAYER" },
+      { id: "p1", is_host: 0, role: "SPECTATOR" },
+    ],
+  );
+  assert.deepEqual(
+    d1.db.prepare("SELECT kind,COUNT(*) count FROM player_write_audit GROUP BY kind ORDER BY kind").all().map((row) => ({ ...row })),
+    [{ kind: "delete", count: 3 }, { kind: "insert", count: 2 }],
+  );
 });
 
 test("final participants retain scored players after leaving or becoming spectators", async () => {
@@ -1458,8 +1651,8 @@ test("realtime authority source has no heartbeat, keepalive, or periodic checkpo
 test("WebSocket projection boundaries flush the D1 aggregate outbox", () => {
   const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(worker, /outcome\.forceCheckpoint === "game-end" \|\| outcome\.forceCheckpoint === "projection"[\s\S]{0,160}flushFinalProjection/);
-  assert.match(worker, /aggregate\?\.room\?\.status !== "LOBBY"/);
-  assert.match(worker, /aggregate\.room\?\.status !== "LOBBY" && positional/);
+  assert.match(worker, /aggregate\?\.room\?\.status !== "LOBBY" \|\| this\.authorityVNext\.hasPendingRoomHandoff\(\)/);
+  assert.match(worker, /aggregate\.room\?\.status !== "LOBBY" \|\| this\.authorityVNext\.hasPendingRoomHandoff\(\)/);
 });
 
 test("WebSocket proxy preserves player identity for targeted vNext deltas", () => {

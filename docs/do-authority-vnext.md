@@ -88,14 +88,16 @@
 ## D1 最终投影
 
 - 游戏结束 checkpoint 同时 UPSERT 唯一最终 projection outbox row，然后立即 best-effort 批量投影。
-- 每个 outbox game entry 自带 `projectionVersion`：新 vNext 为 v2；无版本的已持久化旧 entry 继续走旧 normalized 投影，同一队列允许新旧格式并存。
+- 每个 outbox game entry 自带 `projectionVersion`：聚合归档为 v2，差量 roster 为 v3；无版本旧 entry 继续旧 normalized 投影，同一队列允许各版本并存。
 - 结算快照中的 `questionSet.questions` 必须来自 authority 聚合的最新 `questions`，确保本局填写的正确答案无需等待 D1 投影即可在题库浏览中显示。
 - 单行 outbox payload 是按 gameId 去重的有界聚合批次；新局结束只合并、不覆盖尚未成功的旧局结果。
 - payload 上限1MiB并为下一局最坏聚合预留400KiB；接近上限时先同步排空，仍失败才禁止下一局，绝不覆盖/丢弃旧结果。
 - D1 临时失败不回滚已结束游戏；小 outbox 不阻止下一局，后续真实事件继续重试且不设置投影 Alarm。
 - 每次真实事件最多投影一个 game；新 vNext 只 UPSERT 一条结算归档，内容仅为最终排行榜与稀疏正分 `questionScores`，不得包含答案、判定详情或每动作历史。
 - 新 vNext 不写 `game_participants`、`player_scores`、`question_results`；旧数据无归档时仍从三张旧表读取，旧 outbox 仍可写旧格式。
-- 房间 roster 完整替换、题目标签、room/session/completed play 投影保持不变；本次不同时优化其约200–450行保守写入。
+- v3 roster 使用期望列表对账：只删除离开/变化成员，只插入新增/变化成员；未变化成员不得触发 UPDATE，昵称互换必须先统一删除变化行再插入。
+- 返回大厅的 roster handoff 未投影成功时，DO 继续提供大厅成员查询和 mutation；下一局开局前必须收敛 handoff，不能从过期 D1 roster 启动。
+- 同一 outbox 只允许单个 in-flight flush；D1 外部 I/O 期间若 outbox 被新 mutation 替换，旧 flush 不得删除或覆盖新 payload。
 - D1 migration `0012_game_result_archives.sql` 只追加且可重复执行；极端局最终 D1 计费写入目标≤500行，不能把约36条 SQL statements 当作 rows_written。
 - 投影一个 game 后从 outbox 移除该项，全部排空才删除 outbox；新旧历史结果读取协议统一返回最终排行榜和逐题得分。
 - 最终 waitUntil 是首轮收敛；若无后续事件仍失败，持久 outbox 保留到重连/下一局事件，不用 Alarm 违反休眠约束。
@@ -118,7 +120,7 @@
 - active vNext 期间加入/离开/踢人/角色变化只更新 DO aggregate；ended vNext 允许玩家退出并立即 checkpoint/投影房间 roster；下一题 eligibility 从 aggregate roster 一次计算。
 - vNext 房间 mutation 必须保持原公开 RPC 返回契约；`joinRoom` 成功仍返回 `{ room, error, errorCode }`，不能以裸 `Room` 破坏调用方判断。
 - 本局首次成为非出题人的 PLAYER 时进入只增不减的参赛者快照；出题人和从未参赛的观战者不得进入积分、逐题结果、排行榜或参赛者投影，离房或参赛后转观众不删除历史参赛身份。
-- 游戏中不投影 D1 roster；结束/回大厅时连同房间长期索引批量投影。房间码发现可读 D1 索引，但实时 roster 必须从 DO 恢复 snapshot 获取。
+- 游戏中不投影 D1 roster；结束/回大厅时差量对账。房间码发现可读 D1 索引；handoff 成功前实时 roster 必须从 DO 恢复。
 
 ## v7 迁移验收
 
@@ -135,11 +137,11 @@
 
 ## 当前阶段与风险
 
-- 当前阶段：历史结算聚合归档实现、审查与回归验证。
+- 当前阶段：历史结算聚合归档与 v3 roster 差量对账、handoff 安全边界均已完成并通过本地验证。
 - 已完成：前三阶段及独立复核；阶段四50×30压力测试、Alarm/重放/断线/完整投影回归、四模式随机状态机，以及本地 workerd 10房间/230人/30题/进程重启压力测试。
 - 已确认问题：normalized SQL 热写、每动作 journal、全量 projection、D1/旧表恢复、Alarm 混用、客户端心跳、无 durable Outbox。
 - 剩余工作：生产发布前应用 D1 0012 migration；生产真实网络与 Cloudflare 额度观测；本次不部署。
-- 主要风险：保留的 roster 完整同步仍是 D1 最终写入主体；生产投影延迟与工程测量不代表 Cloudflare SLA。
+- 主要风险：极端情况下全员 roster 都真实变化仍会产生对应索引写入；生产投影延迟与工程测量不代表 Cloudflare SLA。
 
 ## 官方依据
 
