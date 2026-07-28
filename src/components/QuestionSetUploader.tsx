@@ -961,17 +961,17 @@ export function QuestionSetUploader({
                 </Button>
               </div>
             </div>
-            <div className="grid max-h-[54vh] gap-3 overflow-y-auto pr-1">
+            <div className="grid min-w-0 max-h-[54vh] gap-3 overflow-x-hidden overflow-y-auto pr-1">
               {communitySets.map((item) => (
                 <div
-                  className="rounded-md border border-[var(--line)] bg-white p-3 text-left transition hover:border-rose-300 hover:bg-rose-50"
+                  className="min-w-0 rounded-md border border-[var(--line)] bg-white p-3 text-left transition hover:border-rose-300 hover:bg-rose-50"
                   key={item.id}
                 >
-                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-3">
+                  <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-3">
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-semibold text-slate-950">{item.title}</p>
                       {item.description?.trim() ? (
-                        <p className="mt-1 truncate text-sm leading-5 text-[var(--muted)]" title={item.description}>
+                        <p className="mt-1 whitespace-pre-wrap text-sm leading-5 text-[var(--muted)] [overflow-wrap:anywhere]">
                           {item.description}
                         </p>
                       ) : null}
