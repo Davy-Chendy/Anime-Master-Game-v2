@@ -29,10 +29,24 @@ const vnextBoundaryRows = questions * 2;
 const vnextProjectionRows = 2;
 const vnextRows = vnextCheckpointRows + vnextBoundaryRows + vnextProjectionRows;
 
+// D1 billing is based on rows read/written, not SQL statement count. The new
+// result archive is one aggregate row. Question labels and the existing full
+// room-roster/index synchronization remain unchanged in this change.
+const d1ArchiveRows = 1;
+const d1QuestionRows = questions;
+const d1RoomSessionAndCompletionRows = 3;
+const d1RosterAndIndexRowsConservative = { lower: 200, upper: 450 };
+const d1EstimatedRows = {
+  lower: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1RosterAndIndexRowsConservative.lower,
+  upper: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1RosterAndIndexRowsConservative.upper,
+};
+const avoidedNormalizedResultRows = players + players + answers;
+
 assert.equal(answers, players * questions);
 assert.equal(judgements, players * questions);
 if (players === 50 && questions === 30) {
   assert.ok(vnextRows >= 150 && vnextRows <= 300, `vNext write target missed: ${vnextRows}`);
+  assert.ok(d1EstimatedRows.upper <= 500, `D1 final projection target missed: ${d1EstimatedRows.upper}`);
 }
 
 console.log(JSON.stringify({
@@ -50,5 +64,14 @@ console.log(JSON.stringify({
     questionBoundaryRows: vnextBoundaryRows,
     finalProjectionRows: vnextProjectionRows,
     estimatedRowsWritten: vnextRows,
+  },
+  d1FinalProjection: {
+    aggregateArchiveRows: d1ArchiveRows,
+    questionLabelRowsAtMost: d1QuestionRows,
+    roomSessionAndCompletionRows: d1RoomSessionAndCompletionRows,
+    existingRosterAndIndexRowsConservative: d1RosterAndIndexRowsConservative,
+    estimatedRowsWritten: d1EstimatedRows,
+    normalizedParticipantScoreAndQuestionResultRowsAvoidedAtMost: avoidedNormalizedResultRows,
+    note: "The roster/index range is intentionally unchanged; SQL statement count is not treated as rows_written.",
   },
 }, null, 2));

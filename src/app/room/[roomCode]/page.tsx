@@ -29,12 +29,12 @@ import {
 } from "@/lib/cloudflareRooms";
 import type {
   GameMode,
+  GameResultQuestionScore,
   GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
   Player,
   PlayerRole,
-  QuestionResult,
   QuestionSet,
   RealtimeDelta,
   Room,
@@ -181,7 +181,7 @@ function isGameResultSnapshot(value: unknown): value is GameResultSnapshot {
     isRecord(value.gameSession) &&
     Array.isArray(value.leaderboard) &&
     ("questionSet" in value) &&
-    Array.isArray(value.questionResults)
+    Array.isArray(value.questionScores)
   );
 }
 
@@ -248,13 +248,13 @@ function applyCachedGameResultSnapshot(
     setLeaderboard: (leaderboard: LeaderboardEntry[]) => void;
     setGameSession: (gameSession: GameSession) => void;
     setQuestionSet: (questionSet: QuestionSet | null) => void;
-    setQuestionResults: (questionResults: QuestionResult[]) => void;
+    setQuestionScores: (questionScores: GameResultQuestionScore[]) => void;
   },
 ) {
   setters.setLeaderboard(snapshot.leaderboard);
   setters.setGameSession(snapshot.gameSession);
   setters.setQuestionSet(snapshot.questionSet);
-  setters.setQuestionResults(snapshot.questionResults);
+  setters.setQuestionScores(snapshot.questionScores);
 }
 
 type GameModeCopy = {
@@ -1090,7 +1090,7 @@ function GameResultPanel({
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
-  const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
+  const [questionScores, setQuestionScores] = useState<GameResultQuestionScore[]>([]);
   const [ratingProgress, setRatingProgress] = useState<RatingProgress | null>(null);
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
   const [ratingValue, setRatingValue] = useState(5);
@@ -1133,7 +1133,7 @@ function GameResultPanel({
         setLeaderboard,
         setGameSession,
         setQuestionSet,
-        setQuestionResults,
+        setQuestionScores,
       });
     }, { playerId });
   }, [currentGameId, playerId, room.id]);
@@ -1146,7 +1146,7 @@ function GameResultPanel({
         setLeaderboard([]);
         setGameSession(null);
         setQuestionSet(null);
-        setQuestionResults([]);
+        setQuestionScores([]);
         setRatingProgress(null);
         return;
       }
@@ -1157,7 +1157,7 @@ function GameResultPanel({
           setLeaderboard,
           setGameSession,
           setQuestionSet,
-          setQuestionResults,
+          setQuestionScores,
         });
         return;
       }
@@ -1172,7 +1172,7 @@ function GameResultPanel({
             setLeaderboard,
             setGameSession,
             setQuestionSet,
-            setQuestionResults,
+            setQuestionScores,
           });
         }
       } catch (caughtError) {
@@ -1336,7 +1336,7 @@ function GameResultPanel({
   const scoreByPlayerQuestion = new Map<string, number>();
   const scoreByTeamQuestion = new Map<string, number>();
 
-  for (const result of questionResults) {
+  for (const result of questionScores) {
     const playerKey = `${result.playerId}:${result.questionIndex}`;
     scoreByPlayerQuestion.set(playerKey, (scoreByPlayerQuestion.get(playerKey) ?? 0) + result.scoreAwarded);
 

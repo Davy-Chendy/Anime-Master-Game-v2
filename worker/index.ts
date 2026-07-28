@@ -824,7 +824,7 @@ function asGameResultSnapshot(value: unknown): GameResultSnapshot | null {
     asGameSession(value.gameSession) &&
     Array.isArray(value.leaderboard) &&
     "questionSet" in value &&
-    Array.isArray(value.questionResults)
+    Array.isArray(value.questionScores)
     ? (value as GameResultSnapshot)
     : null;
 }
@@ -3557,6 +3557,12 @@ export class RoomDurableObject {
     if (this.authorityVNext.isActiveGame(gameSessionId)) {
       await this.authorityVNext.restoreFromStorage();
       return this.authorityVNext.query("getGameResultSnapshot", [gameSessionId]) as GameResultSnapshot;
+    }
+
+    const archivedSnapshot = await runWithGameDatabase(this.env, () => gameService.getArchivedGameResultSnapshot(gameSessionId));
+    if (archivedSnapshot) {
+      await this.cacheGameResultSnapshot(archivedSnapshot, cacheGeneration);
+      return archivedSnapshot;
     }
 
     await this.ensureAuthority(this.authorityTopic);

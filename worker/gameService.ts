@@ -19,6 +19,7 @@ import type {
   GameSession,
   GameMode,
   GameBootstrapSnapshot,
+  GameResultQuestionScore,
   GameResultSnapshot,
   LeaderboardEntry,
   Player,
@@ -55,6 +56,15 @@ type DbGameParticipant = {
   nickname: string;
   role: PlayerRole;
   joined_at: string;
+  created_at: string;
+};
+type DbGameResultArchive = {
+  game_session_id: string;
+  room_id: string;
+  question_set_id: string;
+  archive_version: number;
+  completed_at: string;
+  result_json: string;
   created_at: string;
 };
 
@@ -801,6 +811,86 @@ function isMissingEligibilityTableError(error: { message?: string } | null) {
 function isMissingGameParticipantsTableError(error: { message?: string } | null) {
   const message = error?.message ?? "";
   return /no such table/i.test(message) && /game_participants/i.test(message);
+}
+
+function isMissingGameResultArchivesTableError(error: { message?: string } | null) {
+  const message = error?.message ?? "";
+  return /no such table/i.test(message) && /game_result_archives/i.test(message);
+}
+
+function parseGameResultArchive(row: DbGameResultArchive) {
+  let value: unknown;
+  try {
+    value = JSON.parse(row.result_json) as unknown;
+  } catch {
+    throw new Error("结算归档损坏：JSON无法解析。");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("结算归档格式无效。");
+  const archive = value as Record<string, unknown>;
+  if (archive.version !== 1 || row.archive_version !== 1) throw new Error("结算归档版本不兼容。");
+  if (!Number.isInteger(archive.questionCount) || Number(archive.questionCount) < 0 || Number(archive.questionCount) > 30) {
+    throw new Error("结算归档题目数量无效。");
+  }
+  if (!Array.isArray(archive.leaderboard) || archive.leaderboard.length > 50 || !Array.isArray(archive.questionScores)) {
+    throw new Error("结算归档排行榜或逐题得分无效。");
+  }
+  const leaderboard: LeaderboardEntry[] = archive.leaderboard.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("结算归档排行榜条目无效。");
+    const item = entry as Record<string, unknown>;
+    if (
+      typeof item.playerId !== "string" ||
+      typeof item.nickname !== "string" ||
+      !Number.isInteger(item.rank) || Number(item.rank) < 1 ||
+      !Number.isInteger(item.score) || Number(item.score) < 0 ||
+      !Number.isInteger(item.correctCount) || Number(item.correctCount) < 0
+    ) throw new Error("结算归档排行榜条目无效。");
+    return { playerId: item.playerId, nickname: item.nickname, rank: Number(item.rank), score: Number(item.score), correctCount: Number(item.correctCount) };
+  });
+  const participantIds = new Set(leaderboard.map((entry) => entry.playerId));
+  if (participantIds.size !== leaderboard.length) throw new Error("结算归档排行榜包含重复玩家。");
+  const scoreKeys = new Set<string>();
+  const questionScores: GameResultQuestionScore[] = archive.questionScores.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("结算归档逐题得分条目无效。");
+    const item = entry as Record<string, unknown>;
+    if (
+      typeof item.playerId !== "string" || !participantIds.has(item.playerId) ||
+      !Number.isInteger(item.questionIndex) || Number(item.questionIndex) < 0 || Number(item.questionIndex) >= Number(archive.questionCount) ||
+      !Number.isInteger(item.scoreAwarded) || Number(item.scoreAwarded) <= 0
+    ) throw new Error("结算归档逐题得分条目无效。");
+    const key = `${item.questionIndex}:${item.playerId}`;
+    if (scoreKeys.has(key)) throw new Error("结算归档包含重复逐题得分。");
+    scoreKeys.add(key);
+    return { playerId: item.playerId, questionIndex: Number(item.questionIndex), scoreAwarded: Number(item.scoreAwarded) };
+  });
+  return { leaderboard, questionScores };
+}
+
+async function getGameResultArchive(gameSessionId: string) {
+  const { data, error } = await d1
+    .from("game_result_archives")
+    .select("*")
+    .eq("game_session_id", gameSessionId)
+    .maybeSingle<DbGameResultArchive>();
+  if (error) {
+    if (isMissingGameResultArchivesTableError(error)) return null;
+    throw new Error(error.message);
+  }
+  return data ? parseGameResultArchive(data) : null;
+}
+
+function toGameResultQuestionScores(results: QuestionResult[]): GameResultQuestionScore[] {
+  const scores = new Map<string, GameResultQuestionScore>();
+  for (const result of results) {
+    if (result.scoreAwarded <= 0) continue;
+    const key = `${result.questionIndex}:${result.playerId}`;
+    const current = scores.get(key);
+    scores.set(key, {
+      playerId: result.playerId,
+      questionIndex: result.questionIndex,
+      scoreAwarded: (current?.scoreAwarded ?? 0) + result.scoreAwarded,
+    });
+  }
+  return [...scores.values()].sort((left, right) => left.questionIndex - right.questionIndex || left.playerId.localeCompare(right.playerId));
 }
 
 async function getCurrentRoomGamePlayers(roomId: string) {
@@ -3377,9 +3467,22 @@ export async function getGameResultSnapshot(gameSessionId: string): Promise<Game
     });
   }
 
-  const [leaderboard, questionSet, questionResults] = await Promise.all([
-    getLeaderboardForGameSession(gameSession.id),
+  const [archive, questionSet] = await Promise.all([
+    getGameResultArchive(gameSession.id),
     getQuestionSetById(gameSession.questionSetId),
+  ]);
+
+  if (archive) {
+    return {
+      gameSession,
+      leaderboard: archive.leaderboard,
+      questionSet,
+      questionScores: archive.questionScores,
+    };
+  }
+
+  const [leaderboard, questionResults] = await Promise.all([
+    getLeaderboardForGameSession(gameSession.id),
     getQuestionResultsForGameSession(gameSession.id),
   ]);
 
@@ -3387,7 +3490,22 @@ export async function getGameResultSnapshot(gameSessionId: string): Promise<Game
     gameSession,
     leaderboard,
     questionSet,
-    questionResults,
+    questionScores: toGameResultQuestionScores(questionResults),
+  };
+}
+
+export async function getArchivedGameResultSnapshot(gameSessionId: string): Promise<GameResultSnapshot | null> {
+  assertD1Env();
+  const gameSession = await getGameSessionById(gameSessionId);
+  if (!gameSession) return null;
+  const archive = await getGameResultArchive(gameSession.id);
+  if (!archive) return null;
+  const questionSet = await getQuestionSetById(gameSession.questionSetId);
+  return {
+    gameSession,
+    leaderboard: archive.leaderboard,
+    questionSet,
+    questionScores: archive.questionScores,
   };
 }
 

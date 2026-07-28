@@ -1204,15 +1204,18 @@ test("leaderboard and final projection include participants but exclude presente
   assert.equal(resultDelta?.type, "game_result_snapshot");
   if (resultDelta?.type === "game_result_snapshot") {
     assert.deepEqual(resultDelta.snapshot.leaderboard.map((entry) => entry.playerId), ["p0"]);
-    assert.deepEqual(resultDelta.snapshot.questionResults, []);
+    assert.deepEqual(resultDelta.snapshot.questionScores, []);
   }
 
   await authority.forceCheckpoint("game-end", true);
   await authority.flushFinalProjection();
-  const participantInsert = projectionBatches.flat().find((statement) => /INSERT INTO game_participants/.test(statement.sql));
-  const scoreInsert = projectionBatches.flat().find((statement) => /INSERT INTO player_scores/.test(statement.sql));
-  assert.deepEqual(JSON.parse(String(participantInsert?.bindings[1])).map((player: Player) => player.id), ["p0"]);
-  assert.deepEqual(JSON.parse(String(scoreInsert?.bindings[0])).map((score: { playerId: string }) => score.playerId), ["p0"]);
+  const projected = projectionBatches.flat();
+  const archiveInsert = projected.find((statement) => /INSERT INTO game_result_archives/.test(statement.sql));
+  assert.ok(archiveInsert);
+  const archive = JSON.parse(String(archiveInsert.bindings[5])) as { leaderboard: Array<{ playerId: string }>; questionScores: unknown[] };
+  assert.deepEqual(archive.leaderboard.map((entry) => entry.playerId), ["p0"]);
+  assert.deepEqual(archive.questionScores, []);
+  assert.equal(projected.some((statement) => /INSERT INTO (game_participants|player_scores|question_results)/.test(statement.sql)), false);
 });
 
 test("TEAM_BATTLE skip advances both turn and reveal round", () => {
@@ -1357,6 +1360,47 @@ test("D1 projection failure retains the aggregate outbox until a later retry suc
   assert.equal(state.storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_projection_outbox").get().count, 0);
 });
 
+test("legacy projection outbox without a projection version still writes normalized result tables", async () => {
+  const statements: Array<{ sql: string; bindings: unknown[] }> = [];
+  const d1 = {
+    prepare(sql: string) { return { bind(...bindings: unknown[]) { const statement = { sql, bindings }; statements.push(statement); return statement; } }; },
+    async batch() { return []; },
+  } as unknown as D1Database;
+  const { state, authority } = createAuthority(1, d1);
+  const start = bootstrap(1);
+  const completedAt = new Date().toISOString();
+  const legacyPayload = {
+    games: [{
+      roomId: start.room.id,
+      dissolved: false,
+      room: { ...start.room, status: "GAME_RESULT" },
+      players: start.players,
+      questions: start.questions,
+      gameSession: { ...start.gameSession, status: "GAME_RESULT", endedAt: completedAt, completedNormallyAt: completedAt },
+      participants: [start.players[1]],
+      scores: [{ id: "g1:p0", gameSessionId: "g1", playerId: "p0", score: 5, correctCount: 1 }],
+      questionResults: [{
+        id: "g1:0:p0",
+        gameSessionId: "g1",
+        questionIndex: 0,
+        playerId: "p0",
+        scoredRound: 1,
+        scoreAwarded: 5,
+        judgedByPlayerId: "host",
+        judgedAt: completedAt,
+      }],
+    }],
+  };
+  state.storage.sql.db.prepare(`INSERT INTO authority_vnext_projection_outbox(id,payload_json,attempts,updated_at)
+    VALUES(1,?,0,?)`).run(JSON.stringify(legacyPayload), Date.now());
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.ok(statements.some((statement) => /INSERT INTO game_participants/.test(statement.sql)));
+  assert.ok(statements.some((statement) => /INSERT INTO player_scores/.test(statement.sql)));
+  assert.ok(statements.some((statement) => /INSERT INTO question_results/.test(statement.sql)));
+  assert.equal(statements.some((statement) => /INSERT INTO game_result_archives/.test(statement.sql)), false);
+});
+
 test("final participants retain scored players after leaving or becoming spectators", async () => {
   const statements: Array<{ sql: string; bindings: unknown[] }> = [];
   const d1 = {
@@ -1380,10 +1424,11 @@ test("final participants retain scored players after leaving or becoming spectat
   const ended = authority.handleMutation(host, envelope("host", 4, "returnRoomToLobby", { hostPlayerId: "host" }), now + 4003);
   await authority.forceCheckpoint(ended.forceCheckpoint ?? "projection");
   await authority.flushFinalProjection();
-  const participantInsert = statements.find((statement) => /INSERT INTO game_participants/.test(statement.sql));
-  assert.ok(participantInsert);
-  const participants = JSON.parse(String(participantInsert.bindings[1])) as Player[];
-  assert.deepEqual(participants.filter((player) => player.id === "p0" || player.id === "p1").map((player) => [player.id, player.role]).sort(), [["p0", "PLAYER"], ["p1", "PLAYER"]]);
+  const archiveInsert = statements.find((statement) => /INSERT INTO game_result_archives/.test(statement.sql));
+  assert.ok(archiveInsert);
+  const archive = JSON.parse(String(archiveInsert.bindings[5])) as { leaderboard: Array<{ playerId: string }>; questionScores: Array<{ playerId: string }> };
+  assert.deepEqual(archive.leaderboard.map((entry) => entry.playerId).sort(), ["p0", "p1"]);
+  assert.deepEqual([...new Set(archive.questionScores.map((score) => score.playerId))].sort(), ["p0", "p1"]);
 });
 
 test("vNext mutations never append legacy journal or normalized hot rows", async () => {
@@ -1501,7 +1546,7 @@ test("50 players complete 30 questions within the vNext write budget", async () 
     const advanced = authority.handleMutation(host, { ...envelope("host", hostSeq, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: questionIndex }), questionIndex }, base + 3400);
     actionCount += 1;
     const finalSnapshot = advanced.publicDeltas.find((delta) => delta.type === "game_result_snapshot");
-    if (finalSnapshot?.type === "game_result_snapshot") finalSnapshotResultCount = finalSnapshot.snapshot.questionResults.length;
+    if (finalSnapshot?.type === "game_result_snapshot") finalSnapshotResultCount = finalSnapshot.snapshot.questionScores.length;
     if (advanced.forceCheckpoint === "game-end") authority.prepareFinalResultsFromArchives();
     await authority.forceCheckpoint(advanced.forceCheckpoint ?? "phase-boundary", advanced.archiveQuestion === true);
     diagnostics = authority.getDiagnostics();
@@ -1545,9 +1590,17 @@ test("50 players complete 30 questions within the vNext write budget", async () 
   assert.equal(d1WritesDuringGame, 0);
   assert.equal(finalSnapshotResultCount, 1500);
   assert.ok(finalProjectionStatements.length <= 50, JSON.stringify(report));
-  assert.ok(finalProjectionStatements.some((statement) => /INSERT INTO game_participants/.test(statement.sql) && /json_each/.test(statement.sql)));
+  const archiveInsert = finalProjectionStatements.find((statement) => /INSERT INTO game_result_archives/.test(statement.sql));
+  assert.ok(archiveInsert);
+  const archiveJson = String(archiveInsert.bindings[5]);
+  const archive = JSON.parse(archiveJson) as { version: number; leaderboard: unknown[]; questionScores: unknown[] };
+  assert.equal(archive.version, 1);
+  assert.equal(archive.leaderboard.length, 50);
+  assert.equal(archive.questionScores.length, 1500);
+  assert.ok(Buffer.byteLength(archiveJson) < 512 * 1024);
+  assert.doesNotMatch(archiveJson, /answer-\d+/);
   assert.ok(finalProjectionStatements.some((statement) => /INSERT OR IGNORE INTO completed_question_set_plays/.test(statement.sql)));
-  assert.ok(finalProjectionStatements.some((statement) => /INSERT INTO question_results/.test(statement.sql) && /json_each/.test(statement.sql)));
+  assert.equal(finalProjectionStatements.some((statement) => /INSERT INTO (game_participants|player_scores|question_results)/.test(statement.sql)), false);
   assert.ok(
     authority
       .getSnapshot()

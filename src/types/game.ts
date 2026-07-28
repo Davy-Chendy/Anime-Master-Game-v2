@@ -234,6 +234,12 @@ export type LeaderboardEntry = {
   correctCount: number;
 };
 
+export type GameResultQuestionScore = {
+  playerId: string;
+  questionIndex: number;
+  scoreAwarded: number;
+};
+
 export type QuestionResult = {
   id: string;
   gameSessionId: string;
@@ -265,7 +271,7 @@ export type GameResultSnapshot = {
   gameSession: GameSession;
   leaderboard: LeaderboardEntry[];
   questionSet: QuestionSet | null;
-  questionResults: QuestionResult[];
+  questionScores: GameResultQuestionScore[];
 };
 
 export type PublicAnswerProgress = Omit<Answer, "answerText"> & {

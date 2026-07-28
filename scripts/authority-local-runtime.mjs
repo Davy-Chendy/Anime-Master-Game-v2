@@ -143,6 +143,8 @@ class RuntimeMetrics {
   judgementVisibleLatencies = [];
   expectedWsErrors = 0;
   hotD1RowsDuringGame = null;
+  finalD1Rows = null;
+  maxArchiveBytes = 0;
 }
 
 class RuntimeClient {
@@ -403,6 +405,7 @@ async function main() {
   let contexts = [];
   try {
     await runWrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", persistTo]);
+    await runWrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", persistTo]);
     await worker.start();
     contexts = await Promise.all(Array.from({ length: ROOM_COUNT }, (_, roomIndex) => setupRoom(worker, metrics, roomIndex)));
     await Promise.all(contexts.map((context) => connectRoom(worker, metrics, context)));
@@ -460,6 +463,31 @@ async function main() {
       assert.equal(result.leaderboard.some((entry) => entry.playerId === context.hostId || context.spectators.includes(entry.playerId)), false);
     }
 
+    for (const context of contexts) for (const client of context.clients.values()) client.close();
+    await worker.stop();
+    const [finalRows] = await queryLocalD1(persistTo, `SELECT
+      (SELECT COUNT(*) FROM game_result_archives) AS archive_rows,
+      (SELECT COUNT(*) FROM game_participants) AS participant_rows,
+      (SELECT COUNT(*) FROM player_scores) AS score_rows,
+      (SELECT COUNT(*) FROM question_results) AS result_rows`);
+    metrics.finalD1Rows = finalRows;
+    assert.deepEqual(finalRows, { archive_rows: ROOM_COUNT, participant_rows: 0, score_rows: 0, result_rows: 0 }, "vNext final projection wrote unexpected normalized result rows");
+    const archiveRows = await queryLocalD1(persistTo, "SELECT game_session_id,result_json FROM game_result_archives ORDER BY game_session_id");
+    assert.equal(archiveRows.length, ROOM_COUNT);
+    for (const row of archiveRows) {
+      const context = contexts.find((item) => item.gameId === row.game_session_id);
+      assert.ok(context, `unknown archive ${row.game_session_id}`);
+      const archive = JSON.parse(row.result_json);
+      assert.equal(archive.version, 1);
+      assert.equal(archive.questionCount, QUESTION_COUNT);
+      assert.equal(archive.leaderboard.length, context.players.length);
+      assert.equal(archive.questionScores.length, context.players.length, "skipped questions must not create zero-score rows");
+      assert.equal(archive.leaderboard.some((entry) => entry.playerId === context.hostId || context.spectators.includes(entry.playerId)), false);
+      assert.equal(archive.questionScores.some((entry) => entry.playerId === context.hostId || context.spectators.includes(entry.playerId)), false);
+      assert.equal(/runtime-answer-/.test(row.result_json), false, "archive leaked answer text");
+      metrics.maxArchiveBytes = Math.max(metrics.maxArchiveBytes, Buffer.byteLength(row.result_json));
+    }
+
     const totalPeople = contexts.reduce((sum, context) => sum + 1 + context.players.length + context.spectators.length, 0);
     const result = {
       event: "authority_local_runtime_result",
@@ -496,6 +524,8 @@ async function main() {
       },
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
       hotD1RowsDuringGame: metrics.hotD1RowsDuringGame,
+      finalD1Rows: metrics.finalD1Rows,
+      maxArchiveBytes: metrics.maxArchiveBytes,
       internalErrorLogMatches: (worker.logs.match(/服务发生内部错误|internal error/gi) ?? []).length,
     };
     assert.equal(result.httpErrors, 0);

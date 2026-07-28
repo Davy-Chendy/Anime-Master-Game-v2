@@ -16,7 +16,7 @@
 - Attachment：每连接身份和当前题未提交 mutation；上限 16,384 字节，预算 12,288 字节（75%）。
 - IndexedDB Outbox：mutation 发送前落盘，durable ACK 后按 actor/clientSeq 清除。
 - DO SQLite：`authority_vnext_active_game` 单行恢复聚合、每题一行 `authority_vnext_question_archive`、最多一行最终 `authority_vnext_projection_outbox`。
-- D1：题库/房间索引/结束后聚合结果；开局可一次性读取，进行中不得查询或写入。
+- D1：题库/房间索引/结束后聚合结果；开局可一次性读取，进行中不得查询或写入；vNext 历史结算使用单行 `game_result_archives`。
 - `active_game` 只保存恢复当前局所需的题目、当前题、累计分数、committed seq 和 deadline；正常唤醒不读 archive。
 
 ## authority vNext 数据与版本分流
@@ -88,12 +88,16 @@
 ## D1 最终投影
 
 - 游戏结束 checkpoint 同时 UPSERT 唯一最终 projection outbox row，然后立即 best-effort 批量投影。
+- 每个 outbox game entry 自带 `projectionVersion`：新 vNext 为 v2；无版本的已持久化旧 entry 继续走旧 normalized 投影，同一队列允许新旧格式并存。
 - 结算快照中的 `questionSet.questions` 必须来自 authority 聚合的最新 `questions`，确保本局填写的正确答案无需等待 D1 投影即可在题库浏览中显示。
 - 单行 outbox payload 是按 gameId 去重的有界聚合批次；新局结束只合并、不覆盖尚未成功的旧局结果。
 - payload 上限1MiB并为下一局最坏聚合预留400KiB；接近上限时先同步排空，仍失败才禁止下一局，绝不覆盖/丢弃旧结果。
 - D1 临时失败不回滚已结束游戏；小 outbox 不阻止下一局，后续真实事件继续重试且不设置投影 Alarm。
-- 每次真实事件最多投影一个 game；50×30 通过 JSON1 聚合写 players/participants/scores/results，单次约38 statements、目标≤50。
-- 投影一个 game 后从 outbox 移除该项，全部排空才删除 outbox；长期表含 completed play 及业务必需聚合。
+- 每次真实事件最多投影一个 game；新 vNext 只 UPSERT 一条结算归档，内容仅为最终排行榜与稀疏正分 `questionScores`，不得包含答案、判定详情或每动作历史。
+- 新 vNext 不写 `game_participants`、`player_scores`、`question_results`；旧数据无归档时仍从三张旧表读取，旧 outbox 仍可写旧格式。
+- 房间 roster 完整替换、题目标签、room/session/completed play 投影保持不变；本次不同时优化其约200–450行保守写入。
+- D1 migration `0012_game_result_archives.sql` 只追加且可重复执行；极端局最终 D1 计费写入目标≤500行，不能把约36条 SQL statements 当作 rows_written。
+- 投影一个 game 后从 outbox 移除该项，全部排空才删除 outbox；新旧历史结果读取协议统一返回最终排行榜和逐题得分。
 - 最终 waitUntil 是首轮收敛；若无后续事件仍失败，持久 outbox 保留到重连/下一局事件，不用 Alarm 违反休眠约束。
 
 ## 四模式转换与房间 mutation
@@ -131,11 +135,11 @@
 
 ## 当前阶段与风险
 
-- 当前阶段：四阶段实现、验证与独立审查全部完成。
+- 当前阶段：历史结算聚合归档实现、审查与回归验证。
 - 已完成：前三阶段及独立复核；阶段四50×30压力测试、Alarm/重放/断线/完整投影回归、四模式随机状态机，以及本地 workerd 10房间/230人/30题/进程重启压力测试。
 - 已确认问题：normalized SQL 热写、每动作 journal、全量 projection、D1/旧表恢复、Alarm 混用、客户端心跳、无 durable Outbox。
-- 剩余工作：仅生产真实网络与 Cloudflare 额度观测；本次不部署。
-- 主要风险：生产真实网络下恢复耗时与 D1 最终投影延迟；工程测量不代表 Cloudflare SLA。
+- 剩余工作：生产发布前应用 D1 0012 migration；生产真实网络与 Cloudflare 额度观测；本次不部署。
+- 主要风险：保留的 roster 完整同步仍是 D1 最终写入主体；生产投影延迟与工程测量不代表 Cloudflare SLA。
 
 ## 官方依据
 

@@ -2,6 +2,7 @@ import type {
   Answer,
   BuzzerAnswer,
   GameBootstrapSnapshot,
+  GameResultQuestionScore,
   GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
@@ -28,6 +29,7 @@ const RECENT_ACTION_LIMIT = 512;
 const COMMITTED_REJECTION_LIMIT = 128;
 const FINAL_PROJECTION_LIMIT_BYTES = 1024 * 1024;
 const FINAL_PROJECTION_RESERVE_BYTES = 400 * 1024;
+const GAME_RESULT_ARCHIVE_LIMIT_BYTES = 512 * 1024;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const ALL_REVEALED_BLOCKS = Array.from({ length: 45 }, (_, index) => index);
 const QUESTION_SCOPED_MUTATION_NAMES = new Set([
@@ -176,6 +178,41 @@ type ActiveRow = {
   state_version: number;
   state_json: string;
 };
+
+type GameResultArchive = {
+  version: 1;
+  gameMode: GameSession["gameMode"];
+  questionCount: number;
+  completedAt: string;
+  leaderboard: LeaderboardEntry[];
+  questionScores: GameResultQuestionScore[];
+};
+
+type LegacyProjectionGame = {
+  projectionVersion?: undefined;
+  roomId: string;
+  dissolved?: boolean;
+  room?: Room;
+  players: Player[];
+  participants?: Player[];
+  questions: Question[];
+  gameSession?: GameSession;
+  scores: PlayerScore[];
+  questionResults: QuestionResult[];
+};
+
+type ArchiveProjectionGame = {
+  projectionVersion: 2;
+  roomId: string;
+  dissolved?: boolean;
+  room?: Room;
+  players: Player[];
+  questions: Question[];
+  gameSession?: GameSession;
+  archive: GameResultArchive;
+};
+
+type ProjectionPayload = { games: Array<LegacyProjectionGame | ArchiveProjectionGame> };
 
 class TerminalMutationError extends Error {}
 
@@ -1369,7 +1406,7 @@ export class RoomAuthorityVNext {
   async flushFinalProjection() {
     const row = this.state.storage.sql.exec<{ payload_json: string; attempts: number }>("SELECT payload_json,attempts FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
     if (!row) return true;
-    const payload = JSON.parse(row.payload_json) as { games: Array<{ roomId: string; dissolved?: boolean; room: Room | undefined; players: Player[]; participants?: Player[]; questions: Question[]; gameSession: GameSession | undefined; scores: PlayerScore[]; questionResults: QuestionResult[] }> };
+    const payload = JSON.parse(row.payload_json) as ProjectionPayload;
     try {
       const statements: D1PreparedStatement[] = [];
       const game = payload.games[0];
@@ -1390,19 +1427,31 @@ export class RoomAuthorityVNext {
               ON CONFLICT(id) DO UPDATE SET room_id=excluded.room_id,nickname=excluded.nickname,is_host=excluded.is_host,last_seen_at=excluded.last_seen_at,role=excluded.role`).bind(JSON.stringify(players)));
           }
           if (game.gameSession) {
-            statements.push(this.d1.prepare("UPDATE game_sessions SET status=?,current_question_index=?,current_reveal_round=?,revealed_blocks=?,round_started_at=?,ended_at=?,completed_normally_at=? WHERE id=?").bind(game.gameSession.status, game.gameSession.currentQuestionIndex, game.gameSession.currentRevealRound, JSON.stringify(game.gameSession.revealedBlocks), game.gameSession.roundStartedAt ?? null, game.gameSession.endedAt ?? null, game.gameSession.completedNormallyAt ?? null, game.gameSession.id));
-            const participants = game.participants ?? game.players.filter((player) => player.role === "PLAYER");
+            statements.push(this.d1.prepare("UPDATE game_sessions SET status=?,current_question_index=?,current_reveal_round=?,revealed_blocks=?,team_battle_state=?,round_started_at=?,ended_at=?,completed_normally_at=? WHERE id=?").bind(game.gameSession.status, game.gameSession.currentQuestionIndex, game.gameSession.currentRevealRound, JSON.stringify(game.gameSession.revealedBlocks), game.gameSession.teamBattleState == null ? null : JSON.stringify(game.gameSession.teamBattleState), game.gameSession.roundStartedAt ?? null, game.gameSession.endedAt ?? null, game.gameSession.completedNormallyAt ?? null, game.gameSession.id));
+            const participants = game.projectionVersion === 2 ? [] : game.participants ?? game.players.filter((player) => player.role === "PLAYER");
             if (participants.length) statements.push(this.d1.prepare(`INSERT INTO game_participants(game_session_id,player_id,nickname,role,joined_at)
               SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.nickname'),json_extract(value,'$.role'),json_extract(value,'$.joinedAt') FROM json_each(?) WHERE true
               ON CONFLICT(game_session_id,player_id) DO UPDATE SET nickname=excluded.nickname,role=excluded.role`).bind(game.gameSession.id, JSON.stringify(participants.map((player) => ({ ...player, role: "PLAYER", joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt })))));
             if (game.gameSession.completedNormallyAt) statements.push(this.d1.prepare("INSERT OR IGNORE INTO completed_question_set_plays(game_session_id,question_set_id,completed_at) VALUES(?,?,?)").bind(game.gameSession.id, game.gameSession.questionSetId, game.gameSession.completedNormallyAt));
           }
-          if (game.scores.length) statements.push(this.d1.prepare(`INSERT INTO player_scores(id,game_session_id,player_id,score,correct_count)
+          if (game.projectionVersion !== 2 && game.scores.length) statements.push(this.d1.prepare(`INSERT INTO player_scores(id,game_session_id,player_id,score,correct_count)
             SELECT json_extract(value,'$.id'),json_extract(value,'$.gameSessionId'),json_extract(value,'$.playerId'),json_extract(value,'$.score'),json_extract(value,'$.correctCount') FROM json_each(?) WHERE true
             ON CONFLICT(game_session_id,player_id) DO UPDATE SET score=excluded.score,correct_count=excluded.correct_count`).bind(JSON.stringify(game.scores)));
-          if (game.questionResults.length) statements.push(this.d1.prepare(`INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at)
+          if (game.projectionVersion !== 2 && game.questionResults.length) statements.push(this.d1.prepare(`INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at)
             SELECT json_extract(value,'$.id'),json_extract(value,'$.gameSessionId'),json_extract(value,'$.questionIndex'),json_extract(value,'$.playerId'),json_extract(value,'$.scoredRound'),json_extract(value,'$.scoreAwarded'),json_extract(value,'$.judgedByPlayerId'),json_extract(value,'$.judgedAt') FROM json_each(?) WHERE true
             ON CONFLICT(game_session_id,question_index,player_id) DO UPDATE SET scored_round=excluded.scored_round,score_awarded=excluded.score_awarded,judged_by_player_id=excluded.judged_by_player_id,judged_at=excluded.judged_at`).bind(JSON.stringify(game.questionResults)));
+          if (game.projectionVersion === 2 && game.gameSession) {
+            statements.push(this.d1.prepare(`INSERT INTO game_result_archives(game_session_id,room_id,question_set_id,archive_version,completed_at,result_json)
+              VALUES(?,?,?,?,?,?) ON CONFLICT(game_session_id) DO UPDATE SET room_id=excluded.room_id,question_set_id=excluded.question_set_id,
+              archive_version=excluded.archive_version,completed_at=excluded.completed_at,result_json=excluded.result_json`).bind(
+              game.gameSession.id,
+              game.roomId,
+              game.gameSession.questionSetId,
+              game.archive.version,
+              game.archive.completedAt,
+              JSON.stringify(game.archive),
+            ));
+          }
         }
       if (statements.length) {
         await this.d1.batch(statements);
@@ -1431,12 +1480,18 @@ export class RoomAuthorityVNext {
 
   private mergeProjectionOutbox(aggregate: VNextAggregate) {
     const existing = this.state.storage.sql.exec<{ payload_json: string }>("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
-    const payload = existing ? JSON.parse(existing.payload_json) as { games: Array<Record<string, unknown>> } : { games: [] };
-    const participantIds = this.participantIds(aggregate);
-    const participants = (aggregate.gameParticipants ?? aggregate.players)
-      .filter((player) => participantIds.has(player.id));
-    const game = { roomId: aggregate.roomId, dissolved: aggregate.dissolved, room: aggregate.room, players: aggregate.players, participants, questions: aggregate.questions, gameSession: aggregate.gameSession, scores: aggregate.scores.filter((score) => participantIds.has(score.playerId)), questionResults: (aggregate.finalQuestionResults ?? aggregate.questionResults).filter((result) => participantIds.has(result.playerId)) };
-    payload.games = [...payload.games.filter((item) => (item.gameSession as { id?: string } | undefined)?.id !== aggregate.gameId), game];
+    const payload = existing ? JSON.parse(existing.payload_json) as ProjectionPayload : { games: [] };
+    const game: ArchiveProjectionGame = {
+      projectionVersion: 2,
+      roomId: aggregate.roomId,
+      dissolved: aggregate.dissolved,
+      room: aggregate.room,
+      players: aggregate.players,
+      questions: aggregate.questions,
+      gameSession: aggregate.gameSession,
+      archive: this.createGameResultArchive(aggregate),
+    };
+    payload.games = [...payload.games.filter((item) => item.gameSession?.id !== aggregate.gameId), game];
     const payloadJson = JSON.stringify(payload);
     if (new TextEncoder().encode(payloadJson).byteLength > FINAL_PROJECTION_LIMIT_BYTES) throw new Error("authority vNext 最终投影队列已满，请等待长期结果同步后再开始下一局。");
     this.state.storage.sql.exec(`INSERT INTO authority_vnext_projection_outbox(id,payload_json,attempts,updated_at) VALUES(1,?,0,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at`, payloadJson, Date.now());
@@ -1593,7 +1648,10 @@ export class RoomAuthorityVNext {
   }
 
   private leaderboard(): LeaderboardEntry[] {
-    const aggregate = this.requireActiveOrEnded();
+    return this.leaderboardFor(this.requireActiveOrEnded());
+  }
+
+  private leaderboardFor(aggregate: VNextAggregate): LeaderboardEntry[] {
     const names = new Map([
       ...(aggregate.gameParticipants ?? []).map((player) => [player.id, player.nickname] as const),
       ...aggregate.players.map((player) => [player.id, player.nickname] as const),
@@ -1615,11 +1673,60 @@ export class RoomAuthorityVNext {
 
   private gameResultSnapshot(): GameResultSnapshot {
     const aggregate = this.requireActiveOrEnded();
-    const participantIds = this.participantIds(aggregate);
     const questionSet = aggregate.questionSet
       ? { ...aggregate.questionSet, questions: clone(aggregate.questions) }
       : null;
-    return { gameSession: clone(aggregate.gameSession!), leaderboard: clone(this.leaderboard()), questionSet, questionResults: clone((aggregate.finalQuestionResults ?? aggregate.questionResults).filter((result) => participantIds.has(result.playerId))) };
+    const archive = this.createGameResultArchive(aggregate);
+    return { gameSession: clone(aggregate.gameSession!), leaderboard: clone(archive.leaderboard), questionSet, questionScores: clone(archive.questionScores) };
+  }
+
+  private createGameResultArchive(aggregate: VNextAggregate): GameResultArchive {
+    const session = aggregate.gameSession;
+    if (!session) throw new Error("authority vNext 结算归档缺少游戏状态。");
+    if (aggregate.questions.length > 30) throw new Error("authority vNext 结算归档题目数量超出上限。");
+    const leaderboard = this.leaderboardFor(aggregate);
+    if (leaderboard.length > 50) throw new Error("authority vNext 结算归档参赛者数量超出上限。");
+    const participantIds = new Set(leaderboard.map((entry) => entry.playerId));
+    const scoreByQuestionPlayer = new Map<string, GameResultQuestionScore>();
+    for (const result of aggregate.finalQuestionResults ?? aggregate.questionResults) {
+      if (!participantIds.has(result.playerId) || result.scoreAwarded <= 0) continue;
+      if (!Number.isInteger(result.questionIndex) || result.questionIndex < 0 || result.questionIndex >= aggregate.questions.length) {
+        throw new Error("authority vNext 结算归档包含无效题号。");
+      }
+      if (!Number.isInteger(result.scoreAwarded)) throw new Error("authority vNext 结算归档包含无效得分。");
+      const key = `${result.questionIndex}:${result.playerId}`;
+      const current = scoreByQuestionPlayer.get(key);
+      scoreByQuestionPlayer.set(key, {
+        playerId: result.playerId,
+        questionIndex: result.questionIndex,
+        scoreAwarded: (current?.scoreAwarded ?? 0) + result.scoreAwarded,
+      });
+    }
+    const questionScores = [...scoreByQuestionPlayer.values()]
+      .sort((left, right) => left.questionIndex - right.questionIndex || left.playerId.localeCompare(right.playerId));
+    const totals = new Map<string, { score: number; correctCount: number }>();
+    for (const score of questionScores) {
+      const total = totals.get(score.playerId) ?? { score: 0, correctCount: 0 };
+      total.score += score.scoreAwarded;
+      total.correctCount += 1;
+      totals.set(score.playerId, total);
+    }
+    for (const entry of leaderboard) {
+      const total = totals.get(entry.playerId) ?? { score: 0, correctCount: 0 };
+      if (entry.score !== total.score || entry.correctCount !== total.correctCount) {
+        throw new Error("authority vNext 结算归档排行榜与逐题得分不一致。");
+      }
+    }
+    const archive: GameResultArchive = {
+      version: 1,
+      gameMode: session.gameMode,
+      questionCount: aggregate.questions.length,
+      completedAt: session.completedNormallyAt ?? session.endedAt ?? nowIso(),
+      leaderboard: clone(leaderboard),
+      questionScores,
+    };
+    if (jsonBytes(archive) > GAME_RESULT_ARCHIVE_LIMIT_BYTES) throw new Error("authority vNext 结算归档超过512KiB上限。");
+    return archive;
   }
 
   private participantIds(aggregate: VNextAggregate) {
