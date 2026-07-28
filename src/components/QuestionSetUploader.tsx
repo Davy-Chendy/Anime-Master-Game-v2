@@ -144,9 +144,9 @@ function formatQuestionSetCreatedAt(questionSet: Pick<QuestionSet, "createdAt">)
   return `${year}/${month}/${day}`;
 }
 
-function getCreationMethodLabel(creationMethod: QuestionSetCreationMethod | null | undefined) {
-  if (creationMethod === "player_manual") return "玩家手动出题";
-  if (creationMethod === "creation_tool_assisted") return "出题工具辅助";
+function getCreationMethodShortLabel(creationMethod: QuestionSetCreationMethod | null | undefined) {
+  if (creationMethod === "player_manual") return "手动出题";
+  if (creationMethod === "creation_tool_assisted") return "出题工具";
   return null;
 }
 
@@ -969,14 +969,7 @@ export function QuestionSetUploader({
                 >
                   <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-3">
                     <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <p className="truncate font-semibold text-slate-950">{item.title}</p>
-                        {getCreationMethodLabel(item.creationMethod) ? (
-                          <span className="shrink-0 rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">
-                            {getCreationMethodLabel(item.creationMethod)}
-                          </span>
-                        ) : null}
-                      </div>
+                      <p className="truncate font-semibold text-slate-950">{item.title}</p>
                       {item.description?.trim() ? (
                         <p className="mt-1 truncate text-sm leading-5 text-[var(--muted)]" title={item.description}>
                           {item.description}
@@ -988,9 +981,16 @@ export function QuestionSetUploader({
                         </span>
                         <span
                           className="min-w-0 truncate text-slate-500"
-                          title={`${formatQuestionSetCreatedAt(item)} · 上传者 ${getQuestionSetUploaderName(item)}`}
+                          title={`${formatQuestionSetCreatedAt(item)} · 上传者 ${getQuestionSetUploaderName(item)}${
+                            communityCreationMethod === "all" && getCreationMethodShortLabel(item.creationMethod)
+                              ? ` · ${getCreationMethodShortLabel(item.creationMethod)}`
+                              : ""
+                          }`}
                         >
                           {formatQuestionSetCreatedAt(item)} · 上传者 {getQuestionSetUploaderName(item)}
+                          {communityCreationMethod === "all" && getCreationMethodShortLabel(item.creationMethod)
+                            ? ` · ${getCreationMethodShortLabel(item.creationMethod)}`
+                            : null}
                         </span>
                       </p>
                     </div>

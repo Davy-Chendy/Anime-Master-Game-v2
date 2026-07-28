@@ -1,0 +1,24 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "anime-master-question-set-creation-analysis",
+  "main": "../worker/questionSetCreationMethodAnalyzer.ts",
+  "compatibility_date": "2026-06-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "anime_master_game",
+      "database_id": "29c5a6af-b096-4be0-934d-67fbcc0a0520",
+      "remote": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGE_BUCKET",
+      "bucket_name": "anime-master-game-images",
+      "remote": true
+    }
+  ],
+  "vars": {
+    "R2_IMAGE_PREFIX": "question-images"
+  }
+}
