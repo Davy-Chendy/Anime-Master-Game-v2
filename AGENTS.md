@@ -15,7 +15,7 @@
 
 ### 请求和同步
 
-- Cloudflare WebSocket 消息不像普通 HTTP 请求那样计 request。房间/游戏同步应优先复用现有实时通道，避免为了同步状态新增 HTTP 轮询或全员补拉。
+- Cloudflare WebSocket 消息不按普通 Workers HTTP 请求计量，但进入 Durable Object 的消息仍按 DO 请求规则折算。房间/游戏同步应优先复用现有实时通道，避免新增 HTTP 轮询或全员补拉。
 - 避免惊群。不要让所有客户端在同一时刻请求同一份 snapshot、结算数据或阶段状态，除非该读请求已经做了缓存、inflight 合并或服务端广播兜底。
 - 客户端补拉只能作为 fallback，用于刷新、重连、错过广播后的恢复；不要把补拉设计成常规同步主路径。
 - 新增房间/游戏 RPC 前，先评估如果所有玩家同时触发或同时需要它，会产生多少 RPC、多少 D1 查询、多少广播 payload。
@@ -34,6 +34,13 @@
 - 修改 schema 时必须补充并运行升级测试，至少覆盖生产前一版本、重复初始化、迁移失败不推进版本，以及存在未完成 journal/Alarm 的恢复场景。
 - `no such table`、`no such column` 等永久性 schema 错误不得快速自动重试。Alarm 必须设置最小延迟、指数退避、最大重试次数或熔断，禁止把已过去的时间直接传给 `setAlarm()`。
 - 详细事故复盘、迁移范式和审查清单见 [`docs/durable-object-schema-migrations.md`](docs/durable-object-schema-migrations.md)。
+
+### 测试与额度
+
+- 完成修改后必须按 [`docs/testing.md`](docs/testing.md) 自行选择并运行相关测试，不等待用户提醒；涉及业务行为时不能只跑类型检查。
+- 修改游戏规则、实时协议、DO/D1、恢复、Alarm 或投影时，必须补充相应回归测试，并验证多人、重复、乱序和失败恢复路径。
+- 修改 Cloudflare 请求、存储、图片或定时任务链路前，必须阅读 [`docs/cloudflare-free-budget.md`](docs/cloudflare-free-budget.md)，按 50 人 × 30 题和每天 60 局估算额度影响。
+- 若改动改变计量模型或单局预算，必须同步更新额度文档和预算脚本；官方 Free 额度是硬上限，不是设计目标。
 
 改动尽量小。多人游戏相关改动至少验证：
 

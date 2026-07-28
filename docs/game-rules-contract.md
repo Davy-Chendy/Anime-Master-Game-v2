@@ -125,6 +125,8 @@
 
 ## 无浏览器整局验收
 
+所有测试的选测规则和职责边界统一见 [`testing.md`](testing.md)。本节只记录游戏规则相关的整局验收语义。
+
 `npm run test:authority-full-game` 使用独立多角色客户端、单调 clientSeq、公开/定向消息视图、checkpoint 和业务 deadline 完整模拟：
 
 - 标准模式：10 名初始玩家、2 名观众、3 道题、跨轮判定、中途加入及最终排行榜。

@@ -391,6 +391,8 @@ wss://game.example.com/api/realtime/room%3A.../ws
 
 Cloudflare 的 HTTP `Requests` 是这个项目需要重点控制的指标。游戏进行中不要把“刷新一下状态”当成免费操作；频繁的 `/api/rpc` 会很快累积请求数。
 
+各组件的 Free 额度、单局工程预算和修改审查清单统一见 [`cloudflare-free-budget.md`](cloudflare-free-budget.md)。
+
 开发新功能时遵循这些规则：
 
 - 游戏中已经知道 `roomId` 或 `gameSessionId` 的读写操作，优先复用 WebSocket action 通道。
