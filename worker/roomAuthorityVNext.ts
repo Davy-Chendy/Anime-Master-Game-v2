@@ -945,9 +945,11 @@ export class RoomAuthorityVNext {
     const state = session.teamBattleState;
     if (!state || state.phase !== "JUDGING" || !state.pendingGuess || typeof action.payload.isCorrect !== "boolean") throw new TerminalMutationError("当前没有待判定的队伍猜测。");
     const guessedBy = state.pendingGuess.team;
+    let scoredPlayerIds: string[] = [];
     if (action.payload.isCorrect) {
       const members = getTeamMembers(state, guessedBy);
       if (!members.length) throw new TerminalMutationError("猜测队伍已经没有成员。");
+      scoredPlayerIds = members;
       for (const playerId of members) {
         aggregate.questionResults = aggregate.questionResults.filter((result) => !(result.questionIndex === session.currentQuestionIndex && result.playerId === playerId));
         aggregate.questionResults.push({ id: `${session.id}:${session.currentQuestionIndex}:${playerId}`, gameSessionId: session.id, questionIndex: session.currentQuestionIndex, playerId, scoredRound: session.currentRevealRound, scoreAwarded: 1, judgedByPlayerId: action.actorId, judgedAt: nowIso(action.serverReceivedAtMs) });
@@ -972,7 +974,15 @@ export class RoomAuthorityVNext {
     state.revealVotes = {};
     state.guessVotes = {};
     aggregate.deadline = null;
-    return this.publicSessionOutcome(session, "phase-boundary", true);
+    const outcome = this.publicSessionOutcome(session, "phase-boundary", true);
+    if (scoredPlayerIds.length) {
+      const scored = new Set(scoredPlayerIds);
+      outcome.publicDeltas.push(this.publicAnswerProgress([], [], {
+        scores: aggregate.scores.filter((score) => scored.has(score.playerId)),
+        questionResults: aggregate.questionResults.filter((result) => result.questionIndex === session.currentQuestionIndex && scored.has(result.playerId)),
+      }));
+    }
+    return outcome;
   }
 
   private revealTeamAnswer(action: VNextPendingMutation): VNextMutationOutcome {
