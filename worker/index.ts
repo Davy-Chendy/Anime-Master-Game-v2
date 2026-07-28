@@ -2809,6 +2809,7 @@ export class RoomDurableObject {
   }
 
   private logGameRpcError(params: {
+    transport?: "websocket" | "http";
     name?: string;
     args?: unknown[];
     topic?: string | null;
@@ -2822,7 +2823,7 @@ export class RoomDurableObject {
       console.error(
         JSON.stringify({
           event: "game_rpc_error",
-          transport: "websocket",
+          transport: params.transport ?? "websocket",
           name: sanitizeLogString(params.name, RPC_LOG_NAME_MAX_LENGTH),
           topic: sanitizeLogString(params.topic, RPC_LOG_ID_MAX_LENGTH),
           doId: sanitizeLogString(this.state.id.toString(), RPC_LOG_ID_MAX_LENGTH),
@@ -3039,9 +3040,13 @@ export class RoomDurableObject {
 
   private async handleQueuedR2BoundRpc(request: Request, receivedAtMs = Date.now()) {
     let mutationTracker: GameDatabaseMutationTracker | null = null;
+    const localTopic = request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER);
+    let rpcName: string | undefined;
+    let rpcArgs: unknown[] = [];
     try {
-      const localTopic = request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER);
       const body = await readRpcBody(request);
+      rpcName = body.name;
+      rpcArgs = body.args ?? [];
       const mutationDeadlinePolicy = getMutationDeadlinePolicy(body.name ?? "");
       const localRoomId = getRoomIdFromTopic(localTopic);
       if (localTopic && localRoomId && body.name === "startGameWithQuestionSet" && isRecord(body.args?.[0])) {
@@ -3185,8 +3190,9 @@ export class RoomDurableObject {
       }
       return response;
     } catch (error) {
-      const failedRoomId = getRoomIdFromTopic(request.headers.get(LOCAL_ROOM_OBJECT_TOPIC_HEADER));
+      const failedRoomId = getRoomIdFromTopic(localTopic);
       if (failedRoomId && mutationTracker?.successfulWrites === 0) this.authority.abortMutation(failedRoomId);
+      this.logGameRpcError({ transport: "http", name: rpcName, args: rpcArgs, topic: localTopic, receivedAtMs, error });
       return errorResponse(error, request, this.env);
     }
   }
@@ -3195,9 +3201,9 @@ export class RoomDurableObject {
     const receivedAtMs = Math.max(Date.now(), this.lastActionReceivedAtMs + 1);
     this.lastActionReceivedAtMs = receivedAtMs;
     this.sendActionAccepted(socket, message);
-    if (this.tryHandleWebSocketRoundSnapshotRead(socket, message)) return;
-    if (this.tryHandleWebSocketBootstrapSnapshotRead(socket, message)) return;
-    if (this.tryHandleWebSocketGameResultSnapshotRead(socket, message)) return;
+    if (await this.tryHandleWebSocketRoundSnapshotRead(socket, message)) return;
+    if (await this.tryHandleWebSocketBootstrapSnapshotRead(socket, message)) return;
+    if (await this.tryHandleWebSocketGameResultSnapshotRead(socket, message)) return;
 
     const task = this.actionQueue.then(
       () => this.handleWebSocketAction(socket, message, receivedAtMs),
@@ -3290,7 +3296,7 @@ export class RoomDurableObject {
     return true;
   }
 
-  private tryHandleWebSocketRoundSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
+  private async tryHandleWebSocketRoundSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
     let payload: {
       type?: string;
       name?: string;
@@ -3312,7 +3318,7 @@ export class RoomDurableObject {
       return false;
     }
 
-    void this.handleRoundSnapshotRead(socket, gameSessionId, payload.clientActionId);
+    await this.handleRoundSnapshotRead(socket, gameSessionId, payload.clientActionId);
     return true;
   }
 
@@ -3384,7 +3390,7 @@ export class RoomDurableObject {
     return snapshot;
   }
 
-  private tryHandleWebSocketBootstrapSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
+  private async tryHandleWebSocketBootstrapSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
     let payload: {
       type?: string;
       name?: string;
@@ -3406,7 +3412,7 @@ export class RoomDurableObject {
       return false;
     }
 
-    void this.handleBootstrapSnapshotRead(socket, gameSessionId, payload.clientActionId);
+    await this.handleBootstrapSnapshotRead(socket, gameSessionId, payload.clientActionId);
     return true;
   }
 
@@ -3472,7 +3478,7 @@ export class RoomDurableObject {
     return snapshot;
   }
 
-  private tryHandleWebSocketGameResultSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
+  private async tryHandleWebSocketGameResultSnapshotRead(socket: WebSocket, message: string | ArrayBuffer) {
     let payload: {
       type?: string;
       name?: string;
@@ -3494,7 +3500,7 @@ export class RoomDurableObject {
       return false;
     }
 
-    void this.handleGameResultSnapshotRead(socket, gameSessionId, payload.clientActionId);
+    await this.handleGameResultSnapshotRead(socket, gameSessionId, payload.clientActionId);
     return true;
   }
 
@@ -3697,8 +3703,13 @@ export class RoomDurableObject {
 
   private sendVNextOutcome(name: string, outcome: VNextMutationOutcome) {
     if (outcome.publicDeltas.length) this.sendVNextDeltas(name, outcome.publicDeltas, undefined, true);
-    const presenterId = this.authorityVNext.getAggregate()?.gameSession?.presenterPlayerId;
+    const aggregate = this.authorityVNext.getAggregate();
+    const presenterId = aggregate?.gameSession?.presenterPlayerId;
     if (presenterId && outcome.presenterDeltas.length) this.sendVNextDeltas(name, outcome.presenterDeltas, new Set([presenterId]));
+    if (outcome.spectatorDeltas?.length) {
+      const spectatorIds = new Set(aggregate?.players.filter((player) => player.role === "SPECTATOR").map((player) => player.id) ?? []);
+      if (spectatorIds.size) this.sendVNextDeltas(name, outcome.spectatorDeltas, spectatorIds);
+    }
     for (const delivery of outcome.playerDeltas) this.sendVNextDelta(name, delivery.delta, new Set([delivery.playerId]));
   }
 

@@ -235,6 +235,8 @@ test("answer progress is public without exposing answer text", () => {
   assert.deepEqual(submittedProgress.buzzerAnswers.map((answer) => [answer.playerId, answer.status]), [["p0", "pending"]]);
   assert.equal(JSON.stringify(submittedProgress).includes("secret-answer"), false);
   assert.ok(JSON.stringify(submittedProgress).length < 1024);
+  assert.equal(submitted.spectatorDeltas?.length, 1);
+  assert.equal(JSON.stringify(submitted.spectatorDeltas).includes("secret-answer"), true);
 
   const judged = authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", {
     presenterPlayerId: "host",
@@ -1419,6 +1421,26 @@ test("WebSocket proxy preserves player identity for targeted vNext deltas", () =
   const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(worker, /url\.searchParams\.get\("playerId"\)/);
   assert.match(worker, /roomObjectUrl\.searchParams\.set\("playerId", playerId\)/);
+});
+
+test("WebSocket snapshot reads stay inside the message event lifetime", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  for (const readName of ["Round", "Bootstrap", "GameResult"]) {
+    assert.match(worker, new RegExp(`await this\\.tryHandleWebSocket${readName}SnapshotRead\\(socket, message\\)`));
+    assert.match(worker, new RegExp(`await this\\.handle${readName}SnapshotRead\\(socket, gameSessionId, payload\\.clientActionId\\)`));
+    assert.doesNotMatch(worker, new RegExp(`void this\\.handle${readName}SnapshotRead\\(`));
+  }
+});
+
+test("answer text is targeted to current spectators without entering the public stream", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /player\.role === "SPECTATOR"/);
+  assert.match(worker, /outcome\.spectatorDeltas/);
+});
+
+test("HTTP room RPC failures emit structured diagnostics", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /logGameRpcError\(\{ transport: "http", name: rpcName, args: rpcArgs, topic: localTopic/);
 });
 
 test("50 players complete 30 questions within the vNext write budget", async () => {

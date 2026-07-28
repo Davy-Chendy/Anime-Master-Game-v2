@@ -152,6 +152,7 @@ export type VNextMutationOutcome = {
   orderToken?: string;
   publicDeltas: RealtimeDelta[];
   presenterDeltas: RealtimeDelta[];
+  spectatorDeltas?: RealtimeDelta[];
   playerDeltas: Array<{ playerId: string; delta: RealtimeDelta }>;
   forceCheckpoint?: CheckpointTrigger;
   archiveQuestion?: boolean;
@@ -613,7 +614,7 @@ export class RoomAuthorityVNext {
       aggregate.buzzerAnswers.push(buzzer);
     }
     const delta: RealtimeDelta = { scope: "game", type: "answer_submitted", answer: clone(answer), buzzerAnswer: clone(buzzer) };
-    return { data: { ...clone(answer), buzzerAnswer: clone(buzzer) }, provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [buzzer])], presenterDeltas: [delta], playerDeltas: [] };
+    return { data: { ...clone(answer), buzzerAnswer: clone(buzzer) }, provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [buzzer])], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [] };
   }
 
   private submitForfeit(action: VNextPendingMutation): VNextMutationOutcome {
@@ -632,7 +633,7 @@ export class RoomAuthorityVNext {
     }
     aggregate.buzzerAnswers = aggregate.buzzerAnswers.filter((item) => questionRoundKey(item.questionIndex, item.revealRound, item.playerId) !== key || item.status !== "pending");
     const delta: RealtimeDelta = { scope: "game", type: "answer_submitted", answer: clone(answer) };
-    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [])], presenterDeltas: [delta], playerDeltas: [] };
+    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [])], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [] };
   }
 
   private cancelForfeit(action: VNextPendingMutation): VNextMutationOutcome {
@@ -644,7 +645,7 @@ export class RoomAuthorityVNext {
     const [removed] = aggregate.answers.splice(index, 1);
     const data = { gameSession: clone(session), canceledAnswerId: removed.id };
     const delta: RealtimeDelta = { scope: "game", type: "answer_canceled", gameSession: clone(session), canceledAnswerId: removed.id, canceledPlayerId: action.actorId };
-    return { data, provisional: true, publicDeltas: [this.publicAnswerProgress([], [], { canceledPlayerIds: [action.actorId] })], presenterDeltas: [delta], playerDeltas: [{ playerId: action.actorId, delta }] };
+    return { data, provisional: true, publicDeltas: [this.publicAnswerProgress([], [], { canceledPlayerIds: [action.actorId] })], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [{ playerId: action.actorId, delta }] };
   }
 
   private submitBuzzer(action: VNextPendingMutation): VNextMutationOutcome {
@@ -660,7 +661,7 @@ export class RoomAuthorityVNext {
     const answer: BuzzerAnswer = { id: action.actionId, gameSessionId: session.id, questionIndex: session.currentQuestionIndex, revealRound: session.currentRevealRound, playerId: action.actorId, answerText, status: "pending", scoreAwarded: 0, submittedAt, serverReceivedAt: submittedAt };
     aggregate.buzzerAnswers.push(answer);
     const delta: RealtimeDelta = { scope: "game", type: "buzzer_answer_submitted", buzzerAnswer: clone(answer) };
-    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([], [answer])], presenterDeltas: [delta], playerDeltas: [] };
+    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([], [answer])], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [] };
   }
 
   private judgeBuzzer(action: VNextPendingMutation): VNextMutationOutcome {
