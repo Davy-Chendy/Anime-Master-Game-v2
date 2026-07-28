@@ -14,6 +14,7 @@ const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const SHOW_MAINTENANCE_ANNOUNCEMENT = false;
 
 function MaintenanceAnnouncement() {
   const [isOpen, setIsOpen] = useState(true);
@@ -295,7 +296,7 @@ export default function HomePage() {
 
   return (
     <AppShell>
-      <MaintenanceAnnouncement />
+      {SHOW_MAINTENANCE_ANNOUNCEMENT ? <MaintenanceAnnouncement /> : null}
       <div className="grid min-h-[calc(100vh-64px)] content-center gap-6">
         <div className="grid items-center gap-8 lg:grid-cols-[1.1fr_0.9fr]">
           <section>
