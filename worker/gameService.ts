@@ -28,6 +28,7 @@ import type {
   Question,
   QuestionResult,
   QuestionSet,
+  QuestionSetCreationMethod,
   RoundSnapshot,
   Room,
   TeamBattleGuessVote,
@@ -216,6 +217,7 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
     createdByPlayerId: questionSet.created_by_player_id,
     createdByNickname: questionSet.created_by_nickname ?? null,
     source: questionSet.source,
+    creationMethod: questionSet.creation_method ?? null,
     isPublic: questionSet.is_public,
     imageUrlsText: questionSet.image_urls_text ?? questionUrlsText,
     imageCount: questionSet.image_count,
@@ -2185,6 +2187,7 @@ export async function createUploadedQuestionSet(params: {
   description?: string;
   imageUrls?: string[];
   questions?: QuestionImportItem[];
+  creationMethod?: QuestionSetCreationMethod;
 }) {
   assertD1Env();
 
@@ -2231,6 +2234,7 @@ export async function createUploadedQuestionSet(params: {
       created_by_player_id: params.presenterPlayerId,
       created_by_nickname: createdByNickname,
       source: "uploaded",
+      creation_method: params.creationMethod ?? "player_manual",
       is_public: false,
       image_count: imageUrls.length,
       image_urls_text: imageUrlsToText(imageUrls),
@@ -2309,6 +2313,7 @@ export async function createQuestionSetFromUrlText(params: {
     title: params.title,
     description: params.description,
     questions,
+    creationMethod: "creation_tool_assisted",
   });
 }
 
@@ -2343,6 +2348,7 @@ const COMMUNITY_QUESTION_SET_SUMMARY_COLUMNS = [
   "created_by_player_id",
   "created_by_nickname",
   "source",
+  "creation_method",
   "is_public",
   "image_count",
   "rating_avg",
@@ -2356,6 +2362,10 @@ function normalizeCommunityQuestionSetSort(value: unknown): CommunityQuestionSet
   return value === "rating" || value === "plays" ? value : "latest";
 }
 
+function normalizeQuestionSetCreationMethod(value: unknown): QuestionSetCreationMethod | null {
+  return value === "player_manual" || value === "creation_tool_assisted" ? value : null;
+}
+
 function normalizeCommunityQuestionSetSearch(value: unknown) {
   return typeof value === "string" ? value.trim().slice(0, 100) : "";
 }
@@ -2364,8 +2374,11 @@ function getCommunityQuestionSetSearchTerms(search: string) {
   return search.split(/\s+/).filter(Boolean).slice(0, 5);
 }
 
-function buildCommunityQuestionSetQuery(searchTerms: string[]) {
+function buildCommunityQuestionSetQuery(searchTerms: string[], creationMethod?: QuestionSetCreationMethod) {
   let query = d1.from("question_sets").eq("is_public", true);
+  if (creationMethod) {
+    query = query.eq("creation_method", creationMethod);
+  }
   for (const term of searchTerms) {
     query = query.containsAny(COMMUNITY_QUESTION_SET_SEARCH_COLUMNS, term);
   }
@@ -2378,17 +2391,19 @@ export async function getCommunityQuestionSets(params: {
   offset?: number;
   limit?: number;
   includeTotal?: boolean;
+  creationMethod?: QuestionSetCreationMethod;
 } = {}): Promise<CommunityQuestionSetPage> {
   assertD1Env();
 
   const sort = normalizeCommunityQuestionSetSort(params.sort);
   const searchTerms = getCommunityQuestionSetSearchTerms(normalizeCommunityQuestionSetSearch(params.search));
+  const creationMethod = normalizeQuestionSetCreationMethod(params.creationMethod);
   const offset = Math.max(0, Math.floor(Number(params.offset) || 0));
   const limit = Math.max(
     1,
     Math.min(COMMUNITY_QUESTION_SET_MAX_PAGE_SIZE, Math.floor(Number(params.limit) || COMMUNITY_QUESTION_SET_PAGE_SIZE)),
   );
-  let query = buildCommunityQuestionSetQuery(searchTerms).select(COMMUNITY_QUESTION_SET_SUMMARY_COLUMNS);
+  let query = buildCommunityQuestionSetQuery(searchTerms, creationMethod ?? undefined).select(COMMUNITY_QUESTION_SET_SUMMARY_COLUMNS);
 
   if (sort === "rating") {
     query = query
@@ -2405,7 +2420,7 @@ export async function getCommunityQuestionSets(params: {
   const pagePromise = query.limit(limit + 1).offset(offset).returns<DbQuestionSet[]>();
   const countPromise = params.includeTotal === false
     ? Promise.resolve({ data: null, error: null })
-    : buildCommunityQuestionSetQuery(searchTerms).count().single<{ count: number }>();
+    : buildCommunityQuestionSetQuery(searchTerms, creationMethod ?? undefined).count().single<{ count: number }>();
   const [{ data, error }, { data: countRow, error: countError }] = await Promise.all([pagePromise, countPromise]);
 
   if (error) {
@@ -2435,6 +2450,7 @@ function toCommunityQuestionSetSummary(questionSet: DbQuestionSet): CommunityQue
     createdByPlayerId: questionSet.created_by_player_id,
     createdByNickname: questionSet.created_by_nickname ?? null,
     source: questionSet.source,
+    creationMethod: questionSet.creation_method ?? null,
     isPublic: questionSet.is_public,
     imageCount: questionSet.image_count,
     ratingAvg: questionSet.rating_avg,
@@ -3514,6 +3530,7 @@ export async function publishQuestionSetToCommunity(params: {
   playerId: string;
   title: string;
   description?: string;
+  creationMethod: QuestionSetCreationMethod;
 }) {
   assertD1Env();
 
@@ -3521,6 +3538,11 @@ export async function publishQuestionSetToCommunity(params: {
 
   if (!title) {
     throw new Error("发布社区题库前，请先输入题库标题。");
+  }
+
+  const creationMethod = normalizeQuestionSetCreationMethod(params.creationMethod);
+  if (!creationMethod) {
+    throw new Error("发布社区题库前，请选择出题方式。");
   }
 
   const createdByNickname = await getPlayerNickname(params.playerId);
@@ -3531,6 +3553,7 @@ export async function publishQuestionSetToCommunity(params: {
       title,
       description: params.description?.trim() || null,
       created_by_nickname: createdByNickname ?? undefined,
+      creation_method: creationMethod,
       is_public: true,
     })
     .eq("id", params.questionSetId)

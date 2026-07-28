@@ -97,6 +97,8 @@ export type DbPlayer = {
 
 export type QuestionSetSource = "uploaded" | "community";
 
+export type QuestionSetCreationMethod = "player_manual" | "creation_tool_assisted";
+
 export type CommunityQuestionSetSort = "latest" | "rating" | "plays";
 
 export type CommunityQuestionSetSummary = {
@@ -106,6 +108,7 @@ export type CommunityQuestionSetSummary = {
   createdByPlayerId: string;
   createdByNickname?: string | null;
   source: QuestionSetSource;
+  creationMethod?: QuestionSetCreationMethod | null;
   isPublic: boolean;
   imageCount: number;
   ratingAvg: number;
@@ -129,6 +132,7 @@ export type QuestionSet = {
   createdByPlayerId: string;
   createdByNickname?: string | null;
   source: QuestionSetSource;
+  creationMethod?: QuestionSetCreationMethod | null;
   isPublic: boolean;
   imageUrlsText?: string | null;
   imageCount: number;
@@ -374,6 +378,7 @@ export type DbQuestionSet = {
   created_by_player_id: string;
   created_by_nickname?: string | null;
   source: QuestionSetSource;
+  creation_method?: QuestionSetCreationMethod | null;
   is_public: boolean;
   image_urls_text?: string | null;
   image_count: number;

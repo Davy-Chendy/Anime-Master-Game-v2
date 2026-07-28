@@ -199,14 +199,19 @@ function enterReview(authority: RoomAuthorityVNext) {
   session.roundStartedAt = null;
 }
 
-test("v6 upgrades atomically to v7 and repeated initialization is idempotent", () => {
+test("v6 upgrades atomically through v8 and repeated initialization is idempotent", () => {
   const storage = new StorageAdapter();
-  storage.sql.db.exec("CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL); INSERT INTO authority_schema VALUES(1,6)");
+  storage.sql.db.exec(`
+    CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
+    INSERT INTO authority_schema VALUES(1,6);
+    CREATE TABLE question_sets(id TEXT PRIMARY KEY, title TEXT NOT NULL);
+  `);
   const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
   authority.initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 7);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
   authority.initializeSchema();
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game").get().count, 0);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='creation_method'").get().count, 1);
 });
 
 test("migration failure does not advance production v6", () => {
@@ -218,11 +223,32 @@ test("migration failure does not advance production v6", () => {
   assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 6);
 });
 
-test("fresh schema reaches v7", () => {
+test("fresh schema reaches v8", () => {
   const storage = new StorageAdapter();
   new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1).initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 7);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('authority_vnext_projection_outbox') WHERE name='payload_json'").get().count, 1);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='creation_method'").get().count, 1);
+});
+
+test("v7 question-set migration preserves rows and failure does not advance the schema version", () => {
+  const storage = new StorageAdapter();
+  storage.sql.db.exec(`
+    CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
+    INSERT INTO authority_schema VALUES(1,7);
+    CREATE TABLE question_sets(id TEXT PRIMARY KEY, title TEXT NOT NULL);
+    INSERT INTO question_sets VALUES('set-1','Legacy');
+  `);
+  storage.sql.failOn = "ALTER TABLE question_sets";
+  const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
+  assert.throws(() => authority.initializeSchema(), /injected migration failure/);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 7);
+
+  storage.sql.failOn = "";
+  authority.initializeSchema();
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
+  assert.equal(storage.sql.db.prepare("SELECT title FROM question_sets WHERE id='set-1'").get().title, "Legacy");
+  assert.equal(storage.sql.db.prepare("SELECT creation_method FROM question_sets WHERE id='set-1'").get().creation_method, null);
 });
 
 test("v6 journal and existing business Alarm survive the additive upgrade", async () => {
@@ -232,6 +258,7 @@ test("v6 journal and existing business Alarm survive the additive upgrade", asyn
     INSERT INTO authority_schema VALUES(1,6);
     CREATE TABLE mutation_journal(id INTEGER PRIMARY KEY CHECK(id=1),room_id TEXT NOT NULL,name TEXT NOT NULL,action_key TEXT,started_at INTEGER NOT NULL);
     INSERT INTO mutation_journal VALUES(1,'r1','submitAnswer','a1',123);
+    CREATE TABLE question_sets(id TEXT PRIMARY KEY, title TEXT NOT NULL);
   `);
   await storage.setAlarm(456_789);
   new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1).initializeSchema();

@@ -25,6 +25,7 @@ import type {
   FailedQuestionUrlImport,
   PreparedQuestionUrlImport,
   QuestionSet,
+  QuestionSetCreationMethod,
   QuestionUrlImportInput,
   Room,
 } from "@/types/game";
@@ -40,6 +41,7 @@ type QuestionSetUploaderProps = {
 };
 
 type SetupMode = "upload" | "urlText" | "community";
+type CommunityCreationMethodFilter = "all" | QuestionSetCreationMethod;
 const maxUploadImageCount = 30;
 const maxUploadImageBytes = 20 * 1024 * 1024;
 const communityPageSize = 24;
@@ -142,6 +144,12 @@ function formatQuestionSetCreatedAt(questionSet: Pick<QuestionSet, "createdAt">)
   return `${year}/${month}/${day}`;
 }
 
+function getCreationMethodLabel(creationMethod: QuestionSetCreationMethod | null | undefined) {
+  if (creationMethod === "player_manual") return "玩家手动出题";
+  if (creationMethod === "creation_tool_assisted") return "出题工具辅助";
+  return null;
+}
+
 function isQuestionSetDetail(
   questionSet: QuestionSet | CommunityQuestionSetSummary | null,
 ): questionSet is QuestionSet {
@@ -216,6 +224,7 @@ export function QuestionSetUploader({
   const [isCreatingFromText, setIsCreatingFromText] = useState(false);
   const [isLoadingCommunity, setIsLoadingCommunity] = useState(false);
   const [communitySort, setCommunitySort] = useState<CommunityQuestionSetSort>("latest");
+  const [communityCreationMethod, setCommunityCreationMethod] = useState<CommunityCreationMethodFilter>("all");
   const [communitySets, setCommunitySets] = useState<CommunityQuestionSetSummary[]>([]);
   const [communitySearch, setCommunitySearch] = useState("");
   const [communityTotal, setCommunityTotal] = useState<number | null>(null);
@@ -257,11 +266,16 @@ export function QuestionSetUploader({
     }
 
     const timer = window.setTimeout(() => {
-      void handleLoadCommunitySets({ sort: communitySort, search: communitySearch, append: false });
+      void handleLoadCommunitySets({
+        sort: communitySort,
+        search: communitySearch,
+        creationMethod: communityCreationMethod,
+        append: false,
+      });
     }, communitySearch.trim() ? 300 : 0);
 
     return () => window.clearTimeout(timer);
-  }, [communitySearch, communitySort, mode]);
+  }, [communityCreationMethod, communitySearch, communitySort, mode]);
 
   function clearError() {
     onClearError?.();
@@ -594,10 +608,12 @@ export function QuestionSetUploader({
   async function handleLoadCommunitySets(params: {
     sort?: CommunityQuestionSetSort;
     search?: string;
+    creationMethod?: CommunityCreationMethodFilter;
     append?: boolean;
   } = {}) {
     const sort = params.sort ?? communitySort;
     const search = params.search ?? communitySearch;
+    const creationMethod = params.creationMethod ?? communityCreationMethod;
     const append = params.append ?? false;
     const requestId = communityRequestIdRef.current + 1;
     communityRequestIdRef.current = requestId;
@@ -611,6 +627,7 @@ export function QuestionSetUploader({
       const page = await getCommunityQuestionSets({
         sort,
         search,
+        creationMethod: creationMethod === "all" ? undefined : creationMethod,
         offset: append ? communityNextOffset : 0,
         limit: communityPageSize,
         includeTotal: !append,
@@ -909,7 +926,17 @@ export function QuestionSetUploader({
                   onChange={(event) => setCommunitySearch(event.target.value)}
                 />
               </label>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap justify-end gap-2">
+                <select
+                  aria-label="社区题库出题方式筛选"
+                  className="h-11 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
+                  value={communityCreationMethod}
+                  onChange={(event) => setCommunityCreationMethod(event.target.value as CommunityCreationMethodFilter)}
+                >
+                  <option value="all">全部来源</option>
+                  <option value="player_manual">玩家手动出题</option>
+                  <option value="creation_tool_assisted">出题工具辅助</option>
+                </select>
                 <select
                   aria-label="社区题库排序"
                   className="h-11 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
@@ -942,7 +969,14 @@ export function QuestionSetUploader({
                 >
                   <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-3">
                     <div className="min-w-0 flex-1">
-                      <p className="truncate font-semibold text-slate-950">{item.title}</p>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <p className="truncate font-semibold text-slate-950">{item.title}</p>
+                        {getCreationMethodLabel(item.creationMethod) ? (
+                          <span className="shrink-0 rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">
+                            {getCreationMethodLabel(item.creationMethod)}
+                          </span>
+                        ) : null}
+                      </div>
                       {item.description?.trim() ? (
                         <p className="mt-1 truncate text-sm leading-5 text-[var(--muted)]" title={item.description}>
                           {item.description}

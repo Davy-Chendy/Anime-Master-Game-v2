@@ -17,6 +17,7 @@ import type {
   PlayerScore,
   Question,
   QuestionSetUrlImportResult,
+  QuestionSetCreationMethod,
   QuestionUrlImportInput,
   QuestionResult,
   QuestionSet,
@@ -186,6 +187,7 @@ export const getQuestionSetById = (questionSetId: string) =>
 export const getCommunityQuestionSets = (params: {
   sort?: CommunityQuestionSetSort;
   search?: string;
+  creationMethod?: QuestionSetCreationMethod;
   offset?: number;
   limit?: number;
   includeTotal?: boolean;
@@ -284,6 +286,7 @@ export const publishQuestionSetToCommunity = (params: {
   playerId: string;
   title: string;
   description?: string;
+  creationMethod: QuestionSetCreationMethod;
   roomId?: string;
 }) => rpc<QuestionSet>("publishQuestionSetToCommunity", params);
 

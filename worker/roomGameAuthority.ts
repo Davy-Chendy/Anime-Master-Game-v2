@@ -2,7 +2,7 @@ import { DurableSqlDatabase } from "./durableSqlDatabase";
 
 type Row = Record<string, unknown>;
 
-const AUTHORITY_SCHEMA_VERSION = 7;
+const AUTHORITY_SCHEMA_VERSION = 8;
 const AUTHORITY_VNEXT_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS authority_vnext_active_game (
     id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, game_id TEXT NOT NULL,
@@ -35,7 +35,7 @@ const SCHEMA = [
   MUTATION_JOURNAL_VALIDATION_SCHEMA,
   `CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, room_code TEXT NOT NULL UNIQUE, host_player_id TEXT NOT NULL, game_status TEXT NOT NULL, current_presenter_player_id TEXT, current_game_id TEXT, prepared_question_set_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL', lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3, lobby_round_seconds INTEGER NOT NULL DEFAULT 45, lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]')`,
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, nickname TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), role TEXT NOT NULL DEFAULT 'PLAYER')`,
-  `CREATE TABLE IF NOT EXISTS question_sets (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by_player_id TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'uploaded', is_public INTEGER NOT NULL DEFAULT 0, image_urls_text TEXT, image_count INTEGER NOT NULL DEFAULT 0, rating_avg REAL NOT NULL DEFAULT 0, rating_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by_nickname TEXT, play_count INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS question_sets (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by_player_id TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'uploaded', creation_method TEXT CHECK (creation_method IS NULL OR creation_method IN ('player_manual','creation_tool_assisted')), is_public INTEGER NOT NULL DEFAULT 0, image_urls_text TEXT, image_count INTEGER NOT NULL DEFAULT 0, rating_avg REAL NOT NULL DEFAULT 0, rating_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by_nickname TEXT, play_count INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, question_set_id TEXT NOT NULL, image_url TEXT NOT NULL, order_index INTEGER NOT NULL, label_text TEXT, label_source TEXT, label_source_answer_id TEXT, label_updated_by_player_id TEXT, label_updated_at TEXT, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS game_sessions (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, question_set_id TEXT NOT NULL, presenter_player_id TEXT NOT NULL, status TEXT NOT NULL, game_mode TEXT NOT NULL, current_question_index INTEGER NOT NULL DEFAULT 0, current_reveal_round INTEGER NOT NULL DEFAULT 1, revealed_blocks TEXT NOT NULL DEFAULT '[]', max_reveal_rounds INTEGER NOT NULL DEFAULT 3, round_seconds INTEGER NOT NULL DEFAULT 45, round_scores TEXT NOT NULL DEFAULT '[5,3,1]', team_battle_state TEXT, round_started_at TEXT, created_at TEXT NOT NULL, ended_at TEXT, completed_normally_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, game_session_id TEXT NOT NULL, question_index INTEGER NOT NULL, reveal_round INTEGER NOT NULL, player_id TEXT NOT NULL, answer_text TEXT NOT NULL, submitted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(game_session_id, question_index, reveal_round, player_id))`,
@@ -138,6 +138,26 @@ export class RoomGameAuthority {
         this.storage.sql.exec("UPDATE authority_schema SET version=7 WHERE id=1 AND version=6");
         const advanced = this.storage.sql.exec<{ version: number }>("SELECT version FROM authority_schema WHERE id=1").one();
         if (advanced.version !== 7) throw new Error("authority vNext schema version did not advance");
+      });
+      currentVersion = 7;
+    }
+    if (currentVersion < 8) {
+      this.storage.transactionSync(() => {
+        const existing = new Set(
+          this.storage.sql.exec<{ name: string }>("PRAGMA table_info(question_sets)").toArray().map((row) => row.name),
+        );
+        if (!existing.has("creation_method")) {
+          this.storage.sql.exec(
+            "ALTER TABLE question_sets ADD COLUMN creation_method TEXT CHECK (creation_method IS NULL OR creation_method IN ('player_manual','creation_tool_assisted'))",
+          );
+        }
+        const migratedColumns = new Set(
+          this.storage.sql.exec<{ name: string }>("PRAGMA table_info(question_sets)").toArray().map((row) => row.name),
+        );
+        if (!migratedColumns.has("creation_method")) throw new Error("authority schema v8 validation failed: question_sets.creation_method");
+        this.storage.sql.exec("UPDATE authority_schema SET version=8 WHERE id=1 AND version=7");
+        const advanced = this.storage.sql.exec<{ version: number }>("SELECT version FROM authority_schema WHERE id=1").one();
+        if (advanced.version !== 8) throw new Error("authority schema v8 version did not advance");
       });
     }
   }

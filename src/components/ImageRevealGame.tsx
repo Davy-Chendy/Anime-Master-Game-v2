@@ -39,6 +39,7 @@ import type {
   PlayerScore,
   Question,
   QuestionSet,
+  QuestionSetCreationMethod,
   QuestionResult,
   RealtimeDelta,
   RoundSnapshot,
@@ -1256,6 +1257,7 @@ export function ImageRevealGame({
   const [selectedLabelAnswerId, setSelectedLabelAnswerId] = useState<string | null>(null);
   const [resultPublishTitle, setResultPublishTitle] = useState("");
   const [resultPublishDescription, setResultPublishDescription] = useState("");
+  const [resultPublishCreationMethod, setResultPublishCreationMethod] = useState<QuestionSetCreationMethod>("player_manual");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
@@ -3720,6 +3722,7 @@ export function ImageRevealGame({
     setResultPublishNextAction(nextAction);
     setResultPublishTitle("");
     setResultPublishDescription("");
+    setResultPublishCreationMethod(questionSet.creationMethod ?? "player_manual");
     return true;
   }
 
@@ -3854,6 +3857,7 @@ export function ImageRevealGame({
         playerId,
         title: resultPublishTitle.trim(),
         description: resultPublishDescription.trim(),
+        creationMethod: resultPublishCreationMethod,
         roomId: room.id,
       });
       closeResultPublishPrompt();
@@ -5156,6 +5160,37 @@ export function ImageRevealGame({
                   onChange={(event) => setResultPublishDescription(event.target.value)}
                 />
               </label>
+              <fieldset>
+                <legend className="mb-2 text-sm font-semibold text-slate-950">出题方式</legend>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    ["player_manual", "玩家手动出题"],
+                    ["creation_tool_assisted", "出题工具辅助"],
+                  ] as const).map(([value, label]) => {
+                    const isSelected = resultPublishCreationMethod === value;
+                    return (
+                      <label
+                        className={`flex min-h-11 cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-center text-sm font-medium transition focus-within:ring-2 focus-within:ring-rose-200 ${
+                          isSelected
+                            ? "border-[var(--primary)] bg-rose-50 text-rose-800 ring-2 ring-rose-100"
+                            : "border-[var(--line)] bg-white text-slate-700 hover:border-rose-300"
+                        }`}
+                        key={value}
+                      >
+                        <input
+                          className="sr-only"
+                          type="radio"
+                          name="result-publish-creation-method"
+                          value={value}
+                          checked={isSelected}
+                          onChange={() => setResultPublishCreationMethod(value)}
+                        />
+                        {label}
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
             </div>
 
             <div className="flex flex-col justify-end gap-2 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row">

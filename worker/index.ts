@@ -2072,6 +2072,7 @@ async function createQuestionSetFromPreparedUrlImport(
     presenterPlayerId: params.presenterPlayerId ?? "",
     title: params.title ?? "",
     description: params.description,
+    creationMethod: "creation_tool_assisted",
     questions: sortPreparedQuestions(preparedQuestions).map((item) => ({
       imageUrl: item.imageUrl,
       labelText: item.labelText ?? null,
