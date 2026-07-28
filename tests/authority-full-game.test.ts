@@ -177,8 +177,11 @@ function makeBootstrap(options: Required<Pick<SimulatorOptions, "mode" | "player
 
 class FullGameSimulator {
   readonly state = new FakeState();
-  readonly authority: RoomAuthorityVNext;
+  authority: RoomAuthorityVNext;
   readonly clients = new Map<string, SimulatedClient>();
+  readonly trace: string[] = [];
+  private readonly random: () => number;
+  private readonly lastEnvelopeByActor = new Map<string, VNextMutationEnvelope>();
   private nowMs = 1_000_000;
 
   constructor(options: SimulatorOptions) {
@@ -193,7 +196,8 @@ class FullGameSimulator {
       CREATE TABLE authority_vnext_question_archive (game_id TEXT NOT NULL,question_index INTEGER NOT NULL,checkpoint_version INTEGER NOT NULL,state_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(game_id,question_index));
       CREATE TABLE authority_vnext_projection_outbox (id INTEGER PRIMARY KEY CHECK(id=1),payload_json TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
     `);
-    this.authority = new RoomAuthorityVNext(this.state as unknown as DurableObjectState, fakeD1, options.random ?? (() => 0));
+    this.random = options.random ?? (() => 0);
+    this.authority = new RoomAuthorityVNext(this.state as unknown as DurableObjectState, fakeD1, this.random);
     this.authority.beginStart("r1", "g1", { startRequestId: "g1" });
     this.authority.activateStart(makeBootstrap(normalized));
     for (const player of this.aggregate.players) this.connect(player.id);
@@ -254,6 +258,10 @@ class FullGameSimulator {
     const presenterId = this.session.presenterPlayerId;
     const presenter = this.clients.get(presenterId);
     if (presenter) presenter.privateEvents.push(...structuredClone(outcome.presenterDeltas));
+    for (const spectator of this.aggregate.players.filter((player) => player.role === "SPECTATOR")) {
+      const client = this.clients.get(spectator.id);
+      if (client && outcome.spectatorDeltas) client.privateEvents.push(...structuredClone(outcome.spectatorDeltas));
+    }
     for (const delivery of outcome.playerDeltas) this.clients.get(delivery.playerId)?.privateEvents.push(structuredClone(delivery.delta));
   }
 
@@ -269,11 +277,58 @@ class FullGameSimulator {
       name,
       payload,
     };
-    const outcome = this.authority.handleMutation(client.socket, envelope, this.nowMs);
+    this.lastEnvelopeByActor.set(actorId, structuredClone(envelope));
+    const receivedAtMs = this.nowMs++;
+    const outcome = this.authority.handleMutation(client.socket, envelope, receivedAtMs);
+    this.trace.push(`${receivedAtMs}:${actorId}:${clientSeq}:${name}:${outcome.error ?? "ok"}`);
     this.deliver(outcome);
     if (outcome.forceCheckpoint) await this.authority.forceCheckpoint(outcome.forceCheckpoint, Boolean(outcome.archiveQuestion));
     this.assertPublicPositionConverged();
+    this.assertInvariants();
     return outcome;
+  }
+
+  replayLast(actorId: string) {
+    const client = this.clients.get(actorId);
+    const envelope = this.lastEnvelopeByActor.get(actorId);
+    assert.ok(client && envelope, `no replayable action for ${actorId}`);
+    const before = structuredClone(this.aggregate);
+    const outcome = this.authority.handleMutation(client.socket, structuredClone(envelope), this.nowMs + 1);
+    this.trace.push(`${this.nowMs + 1}:${actorId}:${envelope.clientSeq}:${envelope.name}:duplicate`);
+    assert.equal(outcome.duplicate, true);
+    assert.deepEqual(this.aggregate, before, "duplicate mutation changed aggregate state");
+    this.assertInvariants();
+  }
+
+  injectOutOfOrder(actorId: string) {
+    const client = this.clients.get(actorId) ?? this.connect(actorId);
+    const before = structuredClone(this.aggregate);
+    const envelope: VNextMutationEnvelope = {
+      actionId: `${actorId}:gap:${client.nextSeq + 1}`,
+      actorId,
+      clientSeq: client.nextSeq + 1,
+      gameId: "g1",
+      questionIndex: this.session.currentQuestionIndex,
+      name: "submitAnswer",
+      payload: { playerId: actorId, answerText: "must-not-apply" },
+    };
+    const outcome = this.authority.handleMutation(client.socket, envelope, this.nowMs + 1);
+    this.trace.push(`${this.nowMs + 1}:${actorId}:${envelope.clientSeq}:out-of-order:${outcome.error ?? "unexpected-ok"}`);
+    assert.equal(outcome.provisional, false);
+    assert.match(outcome.error ?? "", /顺序|乱序/);
+    assert.deepEqual(this.aggregate, before, "out-of-order mutation changed aggregate state");
+    this.assertInvariants();
+  }
+
+  async hibernateAndRestore(checkpoint: boolean) {
+    if (checkpoint) await this.authority.forceCheckpoint("phase-boundary");
+    const before = JSON.parse(JSON.stringify(this.aggregate)) as unknown;
+    this.authority = new RoomAuthorityVNext(this.state as unknown as DurableObjectState, fakeD1, this.random);
+    await this.authority.restoreFromStorage();
+    this.trace.push(`${this.nowMs}:system:restore:${checkpoint ? "checkpointed" : "attachments"}`);
+    assert.deepEqual(JSON.parse(JSON.stringify(this.aggregate)), before, "hibernation restore changed authoritative state");
+    this.assertInvariants();
+    this.assertPublicPositionConverged();
   }
 
   async runDeadline() {
@@ -283,6 +338,11 @@ class FullGameSimulator {
     const result = await this.authority.executeDueDeadline(this.nowMs);
     assert.ok(result, "deadline should execute");
     this.deliver(result.outcome);
+    const afterFirstExecution = JSON.parse(JSON.stringify(this.aggregate));
+    const duplicate = await this.authority.executeDueDeadline(this.nowMs);
+    assert.equal(duplicate, null, "duplicate deadline execution was not ignored");
+    assert.deepEqual(JSON.parse(JSON.stringify(this.aggregate)), afterFirstExecution, "duplicate deadline changed aggregate state");
+    this.trace.push(`${this.nowMs}:system:deadline:executed-and-retried`);
     this.assertPublicPositionConverged();
     return result.outcome;
   }
@@ -297,6 +357,44 @@ class FullGameSimulator {
     }
   }
 
+  assertInvariants() {
+    const aggregate = this.aggregate;
+    const participantIds = new Set((aggregate.gameParticipants ?? []).map((player) => player.id));
+    const playerIds = aggregate.players.map((player) => player.id);
+    assert.equal(new Set(playerIds).size, playerIds.length, "duplicate room player id");
+    assert.equal(participantIds.has(this.session.presenterPlayerId), false, "presenter became a participant");
+    for (const player of aggregate.gameParticipants ?? []) assert.equal(player.role, "PLAYER", "participant snapshot contains non-player role");
+
+    const scoreIds = aggregate.scores.map((score) => score.playerId);
+    assert.equal(new Set(scoreIds).size, scoreIds.length, "duplicate score row");
+    for (const score of aggregate.scores) {
+      assert.ok(participantIds.has(score.playerId), `score belongs to non-participant ${score.playerId}`);
+      assert.ok(Number.isInteger(score.score) && score.score >= 0, `invalid score for ${score.playerId}`);
+      assert.ok(Number.isInteger(score.correctCount) && score.correctCount >= 0, `invalid correct count for ${score.playerId}`);
+    }
+
+    const currentPlayers = new Map(aggregate.players.map((player) => [player.id, player]));
+    for (const eligibleId of this.session.eligiblePlayerIds ?? []) {
+      assert.notEqual(eligibleId, this.session.presenterPlayerId, "presenter is eligible to answer");
+      const currentPlayer = currentPlayers.get(eligibleId);
+      if (currentPlayer) assert.equal(currentPlayer.role, "PLAYER", `ineligible role in eligible list: ${eligibleId}`);
+    }
+
+    for (const collection of [aggregate.answers, aggregate.buzzerAnswers, aggregate.questionResults]) {
+      const ids = collection.map((item) => item.id);
+      assert.equal(new Set(ids).size, ids.length, "duplicate current-question entity id");
+    }
+    for (const [actorId, committed] of Object.entries(aggregate.committedSeqByActor)) {
+      assert.ok((aggregate.seenSeqByActor[actorId] ?? 0) >= committed, `committed seq exceeds seen seq for ${actorId}`);
+    }
+
+    const leaderboardIds = this.leaderboard().map((entry) => entry.playerId);
+    assert.equal(leaderboardIds.includes(this.session.presenterPlayerId), false, "presenter leaked into leaderboard");
+    for (const player of aggregate.players.filter((item) => item.role === "SPECTATOR" && !participantIds.has(item.id))) {
+      assert.equal(leaderboardIds.includes(player.id), false, `never-participating spectator ${player.id} leaked into leaderboard`);
+    }
+  }
+
   assertPublicPayloadDoesNotContain(...secrets: string[]) {
     for (const client of this.clients.values()) {
       const payload = JSON.stringify(client.publicEvents);
@@ -306,6 +404,14 @@ class FullGameSimulator {
 
   leaderboard() {
     return this.authority.query("getLeaderboardForGameSession", []) as Array<{ playerId: string; score: number; correctCount: number }>;
+  }
+
+  dispose() {
+    this.state.storage.sql.db.close();
+  }
+
+  failure(error: unknown) {
+    return new Error(`${String(error)}\nRecent deterministic trace:\n${this.trace.slice(-60).join("\n")}`);
   }
 }
 
@@ -505,4 +611,259 @@ test("TEAM_BATTLE completes alternating-team votes, wrong guess, bonus reveal, a
   const positive = new Map(sim.leaderboard().filter((entry) => entry.score > 0).map((entry) => [entry.playerId, entry.score]));
   assert.deepEqual([...positive.entries()].sort(), [["p0", 1], ["p1", 1], ["p2", 1], ["p3", 1], ["p4", 1], ["p5", 1]]);
   assert.equal(sim.leaderboard().some((entry) => entry.playerId === "host" || entry.playerId === "s0"), false);
+});
+
+function seededRandom(seed: number) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 0x1_0000_0000;
+  };
+}
+
+function shuffled<T>(values: readonly T[], random: () => number) {
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const other = Math.floor(random() * (index + 1));
+    [result[index], result[other]] = [result[other], result[index]];
+  }
+  return result;
+}
+
+function randomAvailableBlocks(sim: FullGameSimulator, count: number, random: () => number) {
+  const revealed = new Set(sim.session.revealedBlocks);
+  return shuffled(ALL_BLOCKS.filter((block) => !revealed.has(block)), random).slice(0, count);
+}
+
+async function runRoundRevealRandomScenario(seed: number) {
+  const random = seededRandom(seed);
+  const sim = new FullGameSimulator({ mode: "ROUND_REVEAL", playerCount: 8, spectatorCount: 2, questionCount: 2, random });
+  const secrets: string[] = [];
+  try {
+    for (let question = 0; question < 2; question += 1) {
+      let remaining = [...(sim.session.eligiblePlayerIds ?? [])];
+      for (let round = 1; round <= 3 && remaining.length; round += 1) {
+        await openRound(sim, randomAvailableBlocks(sim, 1, random)[0]);
+        if (question === 0 && round === 1) {
+          const lateId = `late-${seed}`;
+          assert.equal((await sim.act(lateId, "joinRoom", { nickname: lateId, role: "SPECTATOR" })).error, undefined);
+          assert.equal((await sim.act("host", "updatePlayerRole", { targetPlayerId: lateId, role: "PLAYER" })).error, undefined);
+          const rejected = await sim.act(lateId, "submitAnswer", { playerId: lateId, answerText: "not-yet-eligible" });
+          assert.equal(rejected.terminal, true);
+        }
+
+        const order = shuffled(remaining, random);
+        const finalRound = round === 3;
+        const correctCount = finalRound ? order.length : Math.max(1, Math.floor(random() * Math.max(1, order.length)));
+        const correct = new Set(order.slice(0, correctCount));
+        const answerers = finalRound ? order : order.filter((playerId) => correct.has(playerId) || random() >= 0.3);
+        const answerIds = new Map<string, string>();
+        for (const playerId of answerers) {
+          const answerText = `round-${seed}-${question}-${round}-${playerId}`;
+          secrets.push(answerText);
+          const outcome = await sim.act(playerId, "submitAnswer", { playerId, answerText });
+          assert.equal(outcome.error, undefined);
+          answerIds.set(playerId, (outcome.data as { buzzerAnswer: { id: string } }).buzzerAnswer.id);
+          sim.advanceTime(1);
+        }
+        for (const playerId of order.filter((id) => !answerIds.has(id))) {
+          assert.equal((await sim.act(playerId, "submitForfeitAnswer", { playerId })).error, undefined);
+        }
+
+        if (question === 0 && round === 1 && answerers.length) await sim.hibernateAndRestore(false);
+        sim.advanceTime(3_001);
+        if (answerIds.size) await judgeAnswers(sim, answerIds, [...correct].filter((id) => answerIds.has(id)));
+        const positionBeforeSettle = [sim.session.currentQuestionIndex, sim.session.currentRevealRound];
+        await settlePersonalRound(sim);
+        assert.deepEqual(positionBeforeSettle[0], sim.session.currentQuestionIndex, "settlement skipped the question");
+        remaining = remaining.filter((playerId) => !correct.has(playerId));
+        if (sim.session.revealedBlocks.length === 45) break;
+      }
+      assert.equal(remaining.length, 0, `ROUND_REVEAL left unresolved players for seed ${seed}`);
+      await sim.hibernateAndRestore(true);
+      if (question === 0) {
+        const leaver = shuffled(sim.session.eligiblePlayerIds ?? [], random)[0];
+        assert.ok(leaver);
+        assert.equal((await sim.act(leaver, "leaveRoom", { roomId: "r1", playerId: leaver })).error, undefined);
+      }
+      await labelAndAdvance(sim, `round-random-${seed}-${question}`);
+    }
+    assert.equal(sim.session.status, "GAME_RESULT");
+    sim.assertPublicPayloadDoesNotContain(...secrets);
+    return sim.trace.length;
+  } catch (error) {
+    throw sim.failure(error);
+  } finally {
+    sim.dispose();
+  }
+}
+
+async function runFirstCorrectRandomScenario(seed: number) {
+  const random = seededRandom(seed ^ 0x1f123bb5);
+  const sim = new FullGameSimulator({ mode: "BUZZER_FIRST_CORRECT", playerCount: 8, spectatorCount: 2, questionCount: 2, random });
+  const secrets: string[] = [];
+  try {
+    for (let question = 0; question < 2; question += 1) {
+      await openRound(sim, randomAvailableBlocks(sim, 1, random)[0]);
+      const order = shuffled(sim.session.eligiblePlayerIds ?? [], random);
+      const answerIds = new Map<string, string>();
+      for (const playerId of order) {
+        const answerText = `first-${seed}-${question}-${playerId}`;
+        secrets.push(answerText);
+        const outcome = await sim.act(playerId, "submitBuzzerAnswer", { playerId, answerText });
+        assert.equal(outcome.error, undefined);
+        answerIds.set(playerId, (outcome.data as { id: string }).id);
+        sim.advanceTime(1);
+      }
+      if (question === 0) {
+        sim.replayLast(order[0]);
+        sim.injectOutOfOrder(order[1]);
+        await sim.hibernateAndRestore(false);
+      }
+      sim.advanceTime(3_001);
+      const stableOrder = [...sim.aggregate.buzzerAnswers].sort((left, right) =>
+        new Date(left.serverReceivedAt).getTime() - new Date(right.serverReceivedAt).getTime()
+          || left.playerId.localeCompare(right.playerId)
+          || left.id.localeCompare(right.id),
+      );
+      const winningIndex = Math.floor(random() * stableOrder.length);
+      for (let index = 0; index <= winningIndex; index += 1) {
+        const answer = stableOrder[index];
+        const outcome = await judgeAnswers(sim, new Map([[answer.playerId, answer.id]]), index === winningIndex ? [answer.playerId] : []);
+        assert.equal(outcome.error, undefined);
+      }
+      assert.deepEqual(sim.session.revealedBlocks, ALL_BLOCKS);
+      await labelAndAdvance(sim, `first-random-${seed}-${question}`);
+    }
+    assert.equal(sim.session.status, "GAME_RESULT");
+    sim.assertPublicPayloadDoesNotContain(...secrets);
+    return sim.trace.length;
+  } catch (error) {
+    throw sim.failure(error);
+  } finally {
+    sim.dispose();
+  }
+}
+
+async function runRankedRandomScenario(seed: number) {
+  const random = seededRandom(seed ^ 0x62a9d9ed);
+  const sim = new FullGameSimulator({ mode: "BUZZER_RANKED", playerCount: 8, spectatorCount: 2, questionCount: 2, random });
+  const secrets: string[] = [];
+  try {
+    for (let question = 0; question < 2; question += 1) {
+      let remaining = [...(sim.session.eligiblePlayerIds ?? [])];
+      for (let round = 1; round <= 3 && remaining.length; round += 1) {
+        await openRound(sim, randomAvailableBlocks(sim, 1, random)[0]);
+        const order = shuffled(remaining, random);
+        const correctCount = round === 3 ? order.length : Math.max(1, Math.floor(random() * Math.max(1, order.length)));
+        const correct = new Set(order.slice(0, correctCount));
+        const answerIds = new Map<string, string>();
+        for (const playerId of order) {
+          const answerText = `ranked-${seed}-${question}-${round}-${playerId}`;
+          secrets.push(answerText);
+          const outcome = await sim.act(playerId, "submitBuzzerAnswer", { playerId, answerText });
+          assert.equal(outcome.error, undefined);
+          answerIds.set(playerId, (outcome.data as { id: string }).id);
+          sim.advanceTime(1);
+        }
+        if (question === 0 && round === 1) await sim.hibernateAndRestore(false);
+        sim.advanceTime(3_001);
+        await judgeAnswers(sim, answerIds, [...correct]);
+        assert.ok(sim.session.roundStartedAt, "ranked judgement advanced without presenter settlement");
+        await settlePersonalRound(sim);
+        remaining = remaining.filter((playerId) => !correct.has(playerId));
+        if (sim.session.revealedBlocks.length === 45) break;
+      }
+      assert.equal(remaining.length, 0, `BUZZER_RANKED left unresolved players for seed ${seed}`);
+      await labelAndAdvance(sim, `ranked-random-${seed}-${question}`);
+    }
+    assert.equal(sim.session.status, "GAME_RESULT");
+    sim.assertPublicPayloadDoesNotContain(...secrets);
+    return sim.trace.length;
+  } catch (error) {
+    throw sim.failure(error);
+  } finally {
+    sim.dispose();
+  }
+}
+
+async function randomTeamVote(sim: FullGameSimulator, random: () => number, vote: "reveal" | "skip" | "guess", answerText = "") {
+  const teamState = sim.session.teamBattleState!;
+  const members = shuffled(teamState.teams[teamState.activeTeam], random);
+  for (const playerId of members) {
+    const outcome = vote === "reveal"
+      ? await sim.act(playerId, "submitTeamBattleRevealVote", {
+          playerId,
+          selectedBlocks: randomAvailableBlocks(sim, teamState.revealLimit, random),
+          revealBlockCount: 45,
+        })
+      : await sim.act(playerId, "submitTeamBattleGuessVote", {
+          playerId,
+          vote: vote === "skip" ? { type: "skip" } : { type: "guess", answerText },
+        });
+    assert.equal(outcome.error, undefined);
+  }
+  await sim.runDeadline();
+}
+
+async function runTeamRandomScenario(seed: number) {
+  const random = seededRandom(seed ^ 0xa511e9b3);
+  const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 8, spectatorCount: 2, questionCount: 2, random });
+  try {
+    for (let question = 0; question < 2; question += 1) {
+      const nonWinningTurns = 1 + Math.floor(random() * 3);
+      for (let turn = 0; turn < nonWinningTurns; turn += 1) {
+        await randomTeamVote(sim, random, "reveal");
+        if (turn === 0 && question === 0) await sim.hibernateAndRestore(true);
+        if (random() < 0.5) {
+          await randomTeamVote(sim, random, "skip");
+        } else {
+          await randomTeamVote(sim, random, "guess", `wrong-${seed}-${question}-${turn}`);
+          assert.equal((await sim.act("host", "judgeTeamBattleGuess", { presenterPlayerId: "host", isCorrect: false })).error, undefined);
+        }
+      }
+      await randomTeamVote(sim, random, "reveal");
+      await randomTeamVote(sim, random, "guess", `correct-${seed}-${question}`);
+      assert.equal((await sim.act("host", "judgeTeamBattleGuess", { presenterPlayerId: "host", isCorrect: true })).error, undefined);
+      assert.equal(sim.session.teamBattleState?.phase, "REVIEW");
+      await labelAndAdvance(sim, `team-random-${seed}-${question}`);
+    }
+    assert.equal(sim.session.status, "GAME_RESULT");
+    return sim.trace.length;
+  } catch (error) {
+    throw sim.failure(error);
+  } finally {
+    sim.dispose();
+  }
+}
+
+test("seeded state-machine interleavings preserve authority invariants in all four modes", async (context) => {
+  const scenarios: Array<[GameMode, (seed: number) => Promise<number>]> = [
+    ["ROUND_REVEAL", runRoundRevealRandomScenario],
+    ["BUZZER_FIRST_CORRECT", runFirstCorrectRandomScenario],
+    ["BUZZER_RANKED", runRankedRandomScenario],
+    ["TEAM_BATTLE", runTeamRandomScenario],
+  ];
+  const originalInfo = console.info;
+  let totalTraceEvents = 0;
+  console.info = () => undefined;
+  try {
+    for (const [mode, scenario] of scenarios) {
+      await context.test(`${mode}: 50 deterministic seeds`, async () => {
+        for (let seed = 1; seed <= 50; seed += 1) {
+          try {
+            totalTraceEvents += await scenario(seed);
+          } catch (error) {
+            throw new Error(`${mode} state-machine failure at seed ${seed}: ${String(error)}`);
+          }
+        }
+      });
+    }
+    originalInfo(JSON.stringify({ event: "authority_state_machine_result", modes: scenarios.length, seedsPerMode: 50, totalSeeds: scenarios.length * 50, totalTraceEvents }));
+  } finally {
+    console.info = originalInfo;
+  }
 });
