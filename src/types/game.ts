@@ -14,7 +14,7 @@ export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED"
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
 export type TeamBattlePhase = "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "REVIEW";
-export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 15;
+export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 25;
 export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
 export const TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS = 5;
 

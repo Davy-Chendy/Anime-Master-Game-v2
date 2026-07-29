@@ -135,9 +135,9 @@ function initialTeamState(players: Player[], questionIndex = 0): TeamBattleState
     revealBlockCount: 45,
     revealLimit: 1,
     turnNumber: 1,
-    revealVoteSeconds: 15,
+    revealVoteSeconds: 25,
     guessVoteSeconds: 50,
-    voteDeadlineAt: new Date(1_015_000).toISOString(),
+    voteDeadlineAt: new Date(1_025_000).toISOString(),
     revealVotes: {},
     guessVotes: {},
     previousTurnAction: null,
@@ -590,7 +590,7 @@ async function teamVote(sim: FullGameSimulator, phase: "REVEAL_VOTE" | "GUESS_VO
 test("TEAM_BATTLE fixed timers settle zero and partial submissions without early completion", async () => {
   const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 6, spectatorCount: 1, questionCount: 1 });
   const initialDeadline = sim.session.teamBattleState?.voteDeadlineAt;
-  assert.equal(initialDeadline, new Date(1_015_000).toISOString());
+  assert.equal(initialDeadline, new Date(1_025_000).toISOString());
 
   await sim.runDeadline();
   assert.equal(sim.session.revealedBlocks.length, 1, "zero reveal votes must randomly open one cell");

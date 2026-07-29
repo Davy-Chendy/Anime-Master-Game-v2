@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { GameDatabase, GamePreparedStatement } from "../worker/d1QueryCompat";
 import {
+  createRoom,
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
   getCommunityQuestionSets,
@@ -112,6 +113,22 @@ test("D1 0012 upgrades to nullable creation methods without rewriting historical
     db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND name LIKE 'question_sets_public_creation_%'").get().count,
     3,
   );
+});
+
+test("new rooms explicitly use the current TEAM_BATTLE vote duration defaults", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+
+  await runWithGameDatabase(db, async () => {
+    const room = await createRoom("host-defaults", "Host");
+    assert.equal(room.teamRevealVoteSeconds, 25);
+    assert.equal(room.teamGuessVoteSeconds, 50);
+
+    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds FROM rooms WHERE id=?")
+      .get(room.id);
+    assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
+    assert.equal(stored.lobby_team_guess_vote_seconds, 50);
+  });
 });
 
 test("new question sets default by creation path, publishing can confirm the method, and community filtering stays consistent", async () => {

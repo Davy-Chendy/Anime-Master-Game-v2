@@ -109,7 +109,7 @@
 - `setAnswerJudgements/markPendingWrong/judgeBuzzerAnswer` 可在答案继续到达时执行；按 actionId 去重并从结果重算累计分数。
 - `BUZZER_FIRST_CORRECT` 按 orderToken 判定；更早 pending 未判不得接受后项正确；首个正确强制 checkpoint 后进 REVIEW。
 - `BUZZER_RANKED` 按整道题跨轮的稳定接收顺序计分，本题初始 N 名有效玩家依次获 N..1；每次改判重建本题全部正确 result、buzzer 分值和累计分数；后续轮只统计仍在房的 PLAYER 且本题尚未答对者。
-- `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭方块，数量为 min(revealLimit,remaining)；阶段开始时立即产生 deadline（默认15秒）。activeTeam 全员首次提交完成且剩余超过5秒时，只允许把 deadline 单调缩短为5秒确认期；缩短后的 aggregate 必须先强制 checkpoint，再重排一次 Alarm，之后修改不得再次重排或延长。
+- `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭方块，数量为 min(revealLimit,remaining)；阶段开始时立即产生 deadline（默认25秒）。activeTeam 全员首次提交完成且剩余超过5秒时，只允许把 deadline 单调缩短为5秒确认期；缩短后的 aggregate 必须先强制 checkpoint，再重排一次 Alarm，之后修改不得再次重排或延长。
 - `TEAM_BATTLE GUESS_VOTE` 在阶段开始时立即产生 deadline（默认50秒），使用同一全员提交确认期规则；两种时长由房间设置限制在1～600秒，旧状态缺字段时使用默认值。
 - `finalizeTeamBattleVote` 在 deadline 后原子结算截止前已提交的票；部分提交只统计提交者，选格零票时所有未揭格为0票平票并随机开格，猜测零票时视为skip；其他最高票同票仍在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip 换队并推进回合。
 - TEAM_BATTLE 猜错换到有成员的对队、revealLimit=2、记录 previousTurnAction、turnNumber+1；全揭时直接 GUESS_VOTE。

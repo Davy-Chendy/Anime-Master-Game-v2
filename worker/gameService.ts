@@ -1672,6 +1672,8 @@ export async function createRoom(playerId: string, nickname: string) {
         host_player_id: playerId,
         lobby_round_seconds: DEFAULT_ROUND_SECONDS,
         lobby_round_scores: DEFAULT_ROUND_SCORES,
+        lobby_team_reveal_vote_seconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+        lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
       })
       .select()
       .single<DbRoom>();

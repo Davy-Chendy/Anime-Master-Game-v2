@@ -1625,10 +1625,10 @@ test("legacy active TEAM_BATTLE state without a deadline receives defaults once 
   await restored.restoreFromStorage();
   const restoredState = restored.getAggregate()!.gameSession!.teamBattleState!;
   const runAtMs = restored.getDeadline()!.runAtMs;
-  assert.equal(restoredState.revealVoteSeconds, 15);
+  assert.equal(restoredState.revealVoteSeconds, 25);
   assert.equal(restoredState.guessVoteSeconds, 50);
   assert.deepEqual(restoredState.revealVotes.p0, [4]);
-  assert.ok(runAtMs >= beforeRestore + 15_000 && runAtMs <= Date.now() + 15_000);
+  assert.ok(runAtMs >= beforeRestore + 25_000 && runAtMs <= Date.now() + 25_000);
   assert.equal(new Date(restoredState.voteDeadlineAt!).getTime(), runAtMs);
   assert.equal(restored.hasPendingDeadlineRepair(), true, "Room DO must reconcile the repaired deadline to one Alarm");
   assert.equal(restored.hasPendingDeadlineRepair(), true, "a failed Alarm reconcile must leave the repair pending");
