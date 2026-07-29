@@ -87,7 +87,7 @@
 
 ## D1 最终投影
 
-- 游戏结束 checkpoint 同时 UPSERT 唯一最终 projection outbox row，然后立即 best-effort 批量投影。
+- 游戏正常结束或提前结算的 checkpoint 同时 UPSERT 唯一最终 projection outbox row，然后立即 best-effort 批量投影；取消本局只投影房间/成员 handoff，不生成游戏结果归档。
 - 每个 outbox game entry 自带 `projectionVersion`：聚合归档为 v2，差量 roster 为 v3；无版本旧 entry 继续旧 normalized 投影，同一队列允许各版本并存。
 - 结算快照中的 `questionSet.questions` 必须来自 authority 聚合的最新 `questions`，确保本局填写的正确答案无需等待 D1 投影即可在题库浏览中显示。
 - 单行 outbox payload 是按 gameId 去重的有界聚合批次；新局结束只合并、不覆盖尚未成功的旧局结果。
@@ -109,11 +109,12 @@
 - `setAnswerJudgements/markPendingWrong/judgeBuzzerAnswer` 可在答案继续到达时执行；按 actionId 去重并从结果重算累计分数。
 - `BUZZER_FIRST_CORRECT` 按 orderToken 判定；更早 pending 未判不得接受后项正确；首个正确强制 checkpoint 后进 REVIEW。
 - `BUZZER_RANKED` 按整道题跨轮的稳定接收顺序计分，本题初始 N 名有效玩家依次获 N..1；每次改判重建本题全部正确 result、buzzer 分值和累计分数；后续轮只统计仍在房的 PLAYER 且本题尚未答对者。
-- `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭方块，数量为 min(revealLimit,remaining)；全员投票才产生 vote deadline。
-- `finalizeTeamBattleVote` 在 deadline 后原子结算；选格或猜测最高票同票时在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip 换队并推进回合。
+- `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭方块，数量为 min(revealLimit,remaining)；阶段开始时立即产生 deadline（默认15秒）。activeTeam 全员首次提交完成且剩余超过5秒时，只允许把 deadline 单调缩短为5秒确认期；缩短后的 aggregate 必须先强制 checkpoint，再重排一次 Alarm，之后修改不得再次重排或延长。
+- `TEAM_BATTLE GUESS_VOTE` 在阶段开始时立即产生 deadline（默认50秒），使用同一全员提交确认期规则；两种时长由房间设置限制在1～600秒，旧状态缺字段时使用默认值。
+- `finalizeTeamBattleVote` 在 deadline 后原子结算截止前已提交的票；部分提交只统计提交者，选格零票时所有未揭格为0票平票并随机开格，猜测零票时视为skip；其他最高票同票仍在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip 换队并推进回合。
 - TEAM_BATTLE 猜错换到有成员的对队、revealLimit=2、记录 previousTurnAction、turnNumber+1；全揭时直接 GUESS_VOTE。
 - TEAM_BATTLE 猜对给胜队现有成员各1分并进 REVIEW；`revealTeamBattleAnswer` 无分进 REVIEW；两者均全揭并停 deadline。
-- TEAM_BATTLE 成员离开时移除 teams/votes/memberNames；activeTeam 空则切换可行动队并清 votes/pending/deadline。
+- TEAM_BATTLE 成员离开时移除 teams/votes/memberNames；activeTeam 空则切换可行动队、清 votes/pending，并为当前投票阶段重新开始完整 deadline；当前队仍有人且其余成员已全部提交时可按同一规则缩短为5秒，但不得延长。只有一队有成员时 skip 留在该队，双方都空时清除 deadline/Alarm，禁止形成无人自动循环。
 - `advanceReviewedQuestion` 仅允许完整图片且 `roundStartedAt=null` 的复盘阶段；`skipCurrentQuestion` 保持显式跳题语义；二者均归档并强制 checkpoint。
 - `updateQuestionLabel` 仅允许当前题复盘时首次填写；引用来源必须是本局当前题的普通或 buzzer answer，成功后广播公开 label delta。
 - 四模式均测试前置条件、aggregate 字段、delta、deadline、计分、放弃/批判/切题，以及 legacy/vNext 等价结果。
@@ -122,10 +123,10 @@
 - 本局首次成为非出题人的 PLAYER 时进入只增不减的参赛者快照；出题人和从未参赛的观战者不得进入积分、逐题结果、排行榜或参赛者投影，离房或参赛后转观众不删除历史参赛身份。
 - 游戏中不投影 D1 roster；结束/回大厅时差量对账。房间码发现可读 D1 索引；handoff 成功前实时 roster 必须从 DO 恢复。
 
-## v7 迁移验收
+## v7～v9 迁移验收
 
-- 只追加 `MIGRATIONS[7]`，在 transactionSync 内建三张 vNext 表、校验关键表列，再写 authority_schema=7。
-- 测试空库、生产 v6 fixture、重复初始化、中途失败不推进版本、未完成 legacy journal、已有业务 Alarm 恢复。
+- 迁移只追加；v9 为 `rooms` 增加团队选格/猜测倒计时列，逐列检查后再推进 schema version。
+- 测试空库、生产 v6/v8 fixture、重复初始化、中途失败不推进版本、未完成 legacy journal、已有业务 Alarm 恢复。
 
 ## 写入量和观测目标
 

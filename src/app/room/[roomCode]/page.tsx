@@ -41,6 +41,10 @@ import type {
   RoomStatus,
   TeamBattleTeam,
 } from "@/types/game";
+import {
+  DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+} from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -59,6 +63,8 @@ type GameSettings = {
   maxRevealRounds: number;
   roundSeconds: number;
   roundScores: number[];
+  teamRevealVoteSeconds: number;
+  teamGuessVoteSeconds: number;
 };
 
 const defaultGameSettings: GameSettings = {
@@ -66,6 +72,8 @@ const defaultGameSettings: GameSettings = {
   maxRevealRounds: 3,
   roundSeconds: 45,
   roundScores: [5, 3, 1],
+  teamRevealVoteSeconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  teamGuessVoteSeconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
 };
 
 function createStartRequestId() {
@@ -132,6 +140,8 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
       : defaultGameSettings.roundSeconds;
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(rawMaxRevealRounds)));
   const sourceScores = Array.isArray(settings.roundScores) ? settings.roundScores : defaultGameSettings.roundScores;
+  const normalizeTeamSeconds = (value: unknown, fallback: number) =>
+    Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : fallback)));
 
   return {
     gameMode: settings.gameMode ?? defaultGameSettings.gameMode,
@@ -141,6 +151,14 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
       const score = sourceScores[index] ?? Math.max(1, maxRevealRounds - index);
       return Math.max(0, Math.floor(typeof score === "number" && Number.isFinite(score) ? score : 0));
     }),
+    teamRevealVoteSeconds: normalizeTeamSeconds(
+      settings.teamRevealVoteSeconds,
+      DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+    ),
+    teamGuessVoteSeconds: normalizeTeamSeconds(
+      settings.teamGuessVoteSeconds,
+      DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+    ),
   };
 }
 
@@ -150,6 +168,8 @@ function getRoomGameSettings(room: Room | null | undefined): GameSettings {
     maxRevealRounds: room?.maxRevealRounds,
     roundSeconds: room?.roundSeconds,
     roundScores: room?.roundScores,
+    teamRevealVoteSeconds: room?.teamRevealVoteSeconds,
+    teamGuessVoteSeconds: room?.teamGuessVoteSeconds,
   });
 }
 
@@ -159,7 +179,9 @@ function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
     left.maxRevealRounds === right.maxRevealRounds &&
     left.roundSeconds === right.roundSeconds &&
     left.roundScores.length === right.roundScores.length &&
-    left.roundScores.every((score, index) => score === right.roundScores[index])
+    left.roundScores.every((score, index) => score === right.roundScores[index]) &&
+    left.teamRevealVoteSeconds === right.teamRevealVoteSeconds &&
+    left.teamGuessVoteSeconds === right.teamGuessVoteSeconds
   );
 }
 
@@ -976,8 +998,52 @@ function GameSettingsPanel({
             ))}
           </div>
         ) : isTeamBattleMode ? (
-          <div className="mt-3 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-            固定规则：自动分队，猜对队伍得 1 分
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-900">选格投票秒数</span>
+                <input
+                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  disabled={!canEdit}
+                  min={1}
+                  max={600}
+                  type="number"
+                  value={settings.teamRevealVoteSeconds}
+                  onChange={(event) =>
+                    onChange({
+                      ...settings,
+                      teamRevealVoteSeconds: Math.max(
+                        1,
+                        Math.min(600, Number(event.target.value) || DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS),
+                      ),
+                    })
+                  }
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-900">猜测投票秒数</span>
+                <input
+                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  disabled={!canEdit}
+                  min={1}
+                  max={600}
+                  type="number"
+                  value={settings.teamGuessVoteSeconds}
+                  onChange={(event) =>
+                    onChange({
+                      ...settings,
+                      teamGuessVoteSeconds: Math.max(
+                        1,
+                        Math.min(600, Number(event.target.value) || DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS),
+                      ),
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
+              自动分队，猜对队伍得 1 分；投票截止前可反复修改。
+            </div>
           </div>
         ) : (
           <div className="mt-3 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
@@ -2306,6 +2372,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         maxRevealRounds: normalizedSettings.maxRevealRounds,
         roundSeconds: normalizedSettings.roundSeconds,
         roundScores: normalizedSettings.roundScores,
+        teamRevealVoteSeconds: normalizedSettings.teamRevealVoteSeconds,
+        teamGuessVoteSeconds: normalizedSettings.teamGuessVoteSeconds,
       });
 
       if (settingsUpdateSeqRef.current === updateSeq) {
@@ -2368,6 +2436,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           maxRevealRounds: gameSettings.maxRevealRounds,
           roundSeconds: gameSettings.roundSeconds,
           roundScores: gameSettings.roundScores,
+          teamRevealVoteSeconds: gameSettings.teamRevealVoteSeconds,
+          teamGuessVoteSeconds: gameSettings.teamGuessVoteSeconds,
         });
 
       let started: Awaited<ReturnType<typeof requestStart>>;

@@ -14,6 +14,9 @@ export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED"
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
 export type TeamBattlePhase = "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "REVIEW";
+export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 15;
+export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
+export const TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS = 5;
 
 export type TeamBattleGuessVote = {
   type: "skip" | "guess";
@@ -40,6 +43,8 @@ export type TeamBattleState = {
   revealBlockCount?: number;
   revealLimit: number;
   turnNumber: number;
+  revealVoteSeconds?: number;
+  guessVoteSeconds?: number;
   voteDeadlineAt?: string | null;
   revealVotes: Record<string, number[]>;
   guessVotes: Record<string, TeamBattleGuessVote>;
@@ -65,6 +70,8 @@ export type Room = {
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
+  teamRevealVoteSeconds?: number;
+  teamGuessVoteSeconds?: number;
   createdAt: number | string;
   updatedAt?: string;
 };
@@ -81,6 +88,8 @@ export type DbRoom = {
   lobby_max_reveal_rounds?: number | null;
   lobby_round_seconds?: number | null;
   lobby_round_scores?: unknown;
+  lobby_team_reveal_vote_seconds?: number | null;
+  lobby_team_guess_vote_seconds?: number | null;
   created_at: string;
   updated_at: string;
 };

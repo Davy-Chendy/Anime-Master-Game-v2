@@ -18,6 +18,11 @@ import type {
   TeamBattleState,
   TeamBattleTeam,
 } from "../src/types/game";
+import {
+  DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
+} from "../src/types/game";
 
 const VNEXT_AUTHORITY_VERSION = 2 as const;
 const VNEXT_STATE_SCHEMA_VERSION = 1 as const;
@@ -127,6 +132,7 @@ export type VNextAggregate = {
   scoreBaseline: Record<string, { score: number; correctCount: number }>;
   finalQuestionResults?: QuestionResult[];
   finalLeaderboard?: LeaderboardEntry[];
+  resultArchiveSuppressed?: boolean;
   dissolved?: boolean;
   pendingQuestionArchive?: { gameId: string; questionIndex: number; state: unknown };
   committedSeqByActor: Record<string, number>;
@@ -212,9 +218,10 @@ type ArchiveProjectionGameV2 = {
   archive: GameResultArchive;
 };
 
-type ArchiveProjectionGameV3 = Omit<ArchiveProjectionGameV2, "projectionVersion"> & {
+type ArchiveProjectionGameV3 = Omit<ArchiveProjectionGameV2, "projectionVersion" | "archive"> & {
   projectionVersion: 3;
   rosterStrategy: "reconcile";
+  archive?: GameResultArchive;
 };
 
 type ProjectionGame = LegacyProjectionGame | ArchiveProjectionGameV2 | ArchiveProjectionGameV3;
@@ -272,6 +279,70 @@ function visibleRevealCount(blocks: number[], blockCount: number) {
   return new Set(blocks.filter((block) => block >= 0 && block < blockCount)).size;
 }
 
+function normalizeTeamVoteSeconds(value: unknown, fallback: number) {
+  return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : fallback)));
+}
+
+function teamVoteSeconds(state: TeamBattleState, phase: "REVEAL_VOTE" | "GUESS_VOTE") {
+  return phase === "REVEAL_VOTE"
+    ? normalizeTeamVoteSeconds(state.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS)
+    : normalizeTeamVoteSeconds(state.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS);
+}
+
+function teamDeadlineFromSession(session: GameSession): VNextDeadline {
+  const state = session.teamBattleState;
+  if (!state || (state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") || !state.voteDeadlineAt) return null;
+  const runAtMs = new Date(state.voteDeadlineAt).getTime();
+  if (!Number.isFinite(runAtMs)) return null;
+  return {
+    kind: "team-vote",
+    gameId: session.id,
+    questionIndex: session.currentQuestionIndex,
+    phaseKey: `${state.phase}:${state.turnNumber}`,
+    runAtMs,
+  };
+}
+
+function normalizeTeamSessionDeadline(session: GameSession, nowMs: number) {
+  const state = session.teamBattleState;
+  if (!state) return { changed: false, deadline: null as VNextDeadline };
+  let changed = false;
+  const revealVoteSeconds = normalizeTeamVoteSeconds(state.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS);
+  const guessVoteSeconds = normalizeTeamVoteSeconds(state.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS);
+  if (state.revealVoteSeconds !== revealVoteSeconds) {
+    state.revealVoteSeconds = revealVoteSeconds;
+    changed = true;
+  }
+  if (state.guessVoteSeconds !== guessVoteSeconds) {
+    state.guessVoteSeconds = guessVoteSeconds;
+    changed = true;
+  }
+  if (state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") return { changed, deadline: null as VNextDeadline };
+  if (!getTeamMembers(state, "red").length && !getTeamMembers(state, "blue").length) {
+    if (state.voteDeadlineAt != null) {
+      state.voteDeadlineAt = null;
+      changed = true;
+    }
+    return { changed, deadline: null as VNextDeadline };
+  }
+  let runAtMs = state.voteDeadlineAt ? new Date(state.voteDeadlineAt).getTime() : Number.NaN;
+  if (!Number.isFinite(runAtMs)) {
+    runAtMs = nowMs + teamVoteSeconds(state, state.phase) * 1000;
+    state.voteDeadlineAt = nowIso(runAtMs);
+    changed = true;
+  }
+  return {
+    changed,
+    deadline: {
+      kind: "team-vote" as const,
+      gameId: session.id,
+      questionIndex: session.currentQuestionIndex,
+      phaseKey: `${state.phase}:${state.turnNumber}`,
+      runAtMs,
+    },
+  };
+}
+
 function getActionActor(params: Record<string, unknown>) {
   return getString(params.playerId) ?? getString(params.presenterPlayerId) ?? getString(params.hostPlayerId);
 }
@@ -307,6 +378,7 @@ export class RoomAuthorityVNext {
     checkpointTriggers: {} as Record<string, number>,
   };
   private projectionFlushInFlight: Promise<boolean> | null = null;
+  private deadlineRepairPending = false;
 
   constructor(
     private readonly state: DurableObjectState,
@@ -375,6 +447,11 @@ export class RoomAuthorityVNext {
     );
     const scores = participatingPlayers
       .map((player) => ({ id: `${bootstrap.gameSession.id}:${player.id}`, gameSessionId: bootstrap.gameSession.id, playerId: player.id, score: 0, correctCount: 0 }));
+    const gameSession = {
+      ...bootstrap.gameSession,
+      eligiblePlayerIds: bootstrap.gameSession.eligiblePlayerIds ?? this.eligiblePlayers(players, bootstrap.gameSession.presenterPlayerId),
+    };
+    const normalizedTeam = normalizeTeamSessionDeadline(gameSession, Date.now());
     const aggregate: VNextAggregate = {
       ...current,
       cutoverState: "active",
@@ -383,7 +460,8 @@ export class RoomAuthorityVNext {
       gameParticipants: participatingPlayers.map((player) => ({ ...player, role: "PLAYER" })),
       questionSet: bootstrap.questionSet,
       questions: bootstrap.questions.slice().sort((a, b) => a.orderIndex - b.orderIndex),
-      gameSession: { ...bootstrap.gameSession, eligiblePlayerIds: bootstrap.gameSession.eligiblePlayerIds ?? this.eligiblePlayers(players, bootstrap.gameSession.presenterPlayerId) },
+      gameSession,
+      deadline: normalizedTeam.deadline ?? teamDeadlineFromSession(gameSession) ?? current.deadline,
       scores,
       scoreBaseline: {},
       startParams: undefined,
@@ -405,6 +483,33 @@ export class RoomAuthorityVNext {
     if (!aggregate) {
       this.restored = true;
       return null;
+    }
+    const normalizedTeam = aggregate.gameSession
+      ? normalizeTeamSessionDeadline(aggregate.gameSession, Date.now())
+      : { changed: false, deadline: null as VNextDeadline };
+    const repairedDeadline = normalizedTeam.deadline && (
+      !aggregate.deadline ||
+      aggregate.deadline.kind !== normalizedTeam.deadline.kind ||
+      aggregate.deadline.gameId !== normalizedTeam.deadline.gameId ||
+      aggregate.deadline.questionIndex !== normalizedTeam.deadline.questionIndex ||
+      aggregate.deadline.phaseKey !== normalizedTeam.deadline.phaseKey ||
+      aggregate.deadline.runAtMs !== normalizedTeam.deadline.runAtMs
+    );
+    if (normalizedTeam.deadline && repairedDeadline) aggregate.deadline = normalizedTeam.deadline;
+    const clearedStaleTeamDeadline = !normalizedTeam.deadline && aggregate.gameSession?.gameMode === "TEAM_BATTLE" && aggregate.deadline?.kind === "team-vote";
+    if (clearedStaleTeamDeadline) {
+      aggregate.deadline = null;
+    }
+    if (normalizedTeam.changed || repairedDeadline || clearedStaleTeamDeadline) {
+      this.writeActive(aggregate);
+      this.deadlineRepairPending ||= Boolean(repairedDeadline || clearedStaleTeamDeadline);
+      console.info(JSON.stringify({
+        event: "authority_vnext_team_deadline_repaired",
+        authorityVersion: 2,
+        gameId: aggregate.gameId,
+        phase: aggregate.gameSession?.teamBattleState?.phase ?? null,
+        runAtMs: normalizedTeam.deadline?.runAtMs ?? null,
+      }));
     }
     this.aggregate = aggregate;
     this.dirtyGeneration = aggregate.checkpointGeneration;
@@ -439,6 +544,7 @@ export class RoomAuthorityVNext {
         this.rememberAction(action.actionId, this.terminalError(error.message));
       }
     }
+    this.deadlineRepairPending ||= aggregate.deadline !== null;
     console.info(JSON.stringify({
       event: "authority_vnext_restored",
       authorityVersion: 2,
@@ -452,6 +558,18 @@ export class RoomAuthorityVNext {
     }));
     this.restored = true;
     return aggregate;
+  }
+
+  hasPendingDeadlineRepair() {
+    return this.deadlineRepairPending;
+  }
+
+  acknowledgeDeadlineRepair() {
+    this.deadlineRepairPending = false;
+  }
+
+  markDeadlineRepairPending() {
+    this.deadlineRepairPending = true;
   }
 
   getAggregate() {
@@ -895,7 +1013,7 @@ export class RoomAuthorityVNext {
   private teamRevealVote(action: VNextPendingMutation): VNextMutationOutcome {
     const aggregate = this.requireActive();
     const session = aggregate.gameSession!;
-    const team = this.assertTeamVoter(action.actorId, "REVEAL_VOTE", action.serverReceivedAtMs);
+    this.assertTeamVoter(action.actorId, "REVEAL_VOTE", action.serverReceivedAtMs);
     const state = session.teamBattleState!;
     const blockCount = getInteger(action.payload.revealBlockCount) ?? state.revealBlockCount ?? 45;
     const remaining = Array.from({ length: blockCount }, (_, index) => index).filter((block) => !session.revealedBlocks.includes(block));
@@ -904,20 +1022,20 @@ export class RoomAuthorityVNext {
     if (selected.length !== required) throw new TerminalMutationError("本轮选择的方块数量不正确。");
     state.revealVotes[action.actorId] = selected;
     state.revealBlockCount = blockCount;
-    this.maybeStartVoteDeadline(state, team, action.serverReceivedAtMs);
-    return this.directSessionOutcome(session, undefined, Boolean(state.voteDeadlineAt));
+    const deadlineChanged = this.shortenTeamVoteDeadlineIfComplete(state, action.serverReceivedAtMs);
+    return this.directSessionOutcome(session, deadlineChanged ? "phase-boundary" : undefined, deadlineChanged);
   }
 
   private teamGuessVote(action: VNextPendingMutation): VNextMutationOutcome {
     const session = this.requireActive().gameSession!;
-    const team = this.assertTeamVoter(action.actorId, "GUESS_VOTE", action.serverReceivedAtMs);
+    this.assertTeamVoter(action.actorId, "GUESS_VOTE", action.serverReceivedAtMs);
     const state = session.teamBattleState!;
     const rawVote = isRecord(action.payload.vote) ? action.payload.vote : {};
     const vote: TeamBattleGuessVote = rawVote.type === "skip" ? { type: "skip" } : { type: "guess", answerText: getString(rawVote.answerText) ?? "" };
     if (vote.type === "guess" && !vote.answerText) throw new TerminalMutationError("请输入要猜的答案。");
     state.guessVotes[action.actorId] = vote;
-    this.maybeStartVoteDeadline(state, team, action.serverReceivedAtMs);
-    return this.directSessionOutcome(session, undefined, Boolean(state.voteDeadlineAt));
+    const deadlineChanged = this.shortenTeamVoteDeadlineIfComplete(state, action.serverReceivedAtMs);
+    return this.directSessionOutcome(session, deadlineChanged ? "phase-boundary" : undefined, deadlineChanged);
   }
 
   private finalizeTeamVote(action: VNextPendingMutation): VNextMutationOutcome {
@@ -925,10 +1043,33 @@ export class RoomAuthorityVNext {
     const session = aggregate.gameSession!;
     const state = session.teamBattleState;
     if (!state || !state.voteDeadlineAt || action.serverReceivedAtMs < new Date(state.voteDeadlineAt).getTime()) return this.publicSessionOutcome(session);
+    if (!getTeamMembers(state, state.activeTeam).length) {
+      const availableTeam = oppositeTeam(state.activeTeam);
+      state.revealVotes = {};
+      state.guessVotes = {};
+      state.pendingGuess = null;
+      if (getTeamMembers(state, availableTeam).length) {
+        state.activeTeam = availableTeam;
+        this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
+        state.message = `${teamName(oppositeTeam(availableTeam))}没有在线队员，轮到${teamName(availableTeam)}。`;
+      } else {
+        state.voteDeadlineAt = null;
+        aggregate.deadline = null;
+        state.message = "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。";
+      }
+      return this.publicSessionOutcome(session, "phase-boundary", true);
+    }
     if (state.phase === "REVEAL_VOTE") {
-      const counts = new Map<number, number>();
-      for (const blocks of Object.values(state.revealVotes)) for (const block of blocks) counts.set(block, (counts.get(block) ?? 0) + 1);
-      const count = Math.min(state.revealLimit, (state.revealBlockCount ?? 45) - visibleRevealCount(session.revealedBlocks, state.revealBlockCount ?? 45));
+      const blockCount = state.revealBlockCount ?? 45;
+      const counts = new Map(
+        Array.from({ length: blockCount }, (_, block) => block)
+          .filter((block) => !session.revealedBlocks.includes(block))
+          .map((block) => [block, 0]),
+      );
+      for (const blocks of Object.values(state.revealVotes)) {
+        for (const block of blocks) if (counts.has(block)) counts.set(block, (counts.get(block) ?? 0) + 1);
+      }
+      const count = Math.min(state.revealLimit, blockCount - visibleRevealCount(session.revealedBlocks, blockCount));
       const remaining = [...counts.keys()];
       const selected: number[] = [];
       let tieMessage = "";
@@ -949,13 +1090,12 @@ export class RoomAuthorityVNext {
       session.revealedBlocks = Array.from(new Set([...session.revealedBlocks, ...selected])).sort((a, b) => a - b);
       Object.assign(state, {
         phase: "GUESS_VOTE",
-        voteDeadlineAt: null,
         revealVotes: {},
         guessVotes: {},
         pendingGuess: null,
         message: `${teamName(state.activeTeam)}打开了 ${selected.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
       });
-      aggregate.deadline = null;
+      this.startTeamVoteDeadline(state, "GUESS_VOTE", action.serverReceivedAtMs);
       return this.publicSessionOutcome(session, "phase-boundary", true);
     }
     if (state.phase !== "GUESS_VOTE") return this.publicSessionOutcome(session);
@@ -965,36 +1105,50 @@ export class RoomAuthorityVNext {
       const current = options.get(key);
       options.set(key, { vote, count: (current?.count ?? 0) + 1 });
     }
-    const highest = Math.max(...[...options.values()].map((option) => option.count));
-    const tiedOptions = [...options.values()].filter((option) => option.count === highest);
+    const noVotes = options.size === 0;
+    const highest = noVotes ? 0 : Math.max(...[...options.values()].map((option) => option.count));
+    const tiedOptions = noVotes
+      ? [{ vote: { type: "skip" as const }, count: 0 }]
+      : [...options.values()].filter((option) => option.count === highest);
     const winner = tiedOptions.length > 1
       ? tiedOptions[Math.min(tiedOptions.length - 1, Math.floor(this.random() * tiedOptions.length))]?.vote
       : tiedOptions[0]?.vote;
     if (!winner) throw new TerminalMutationError("当前没有可结算的投票。");
-    const tieMessage = tiedOptions.length > 1
-      ? `由于最高票选项票数相同，随机选择了${winner.type === "skip" ? "不猜" : `猜「${winner.answerText}」`}。`
-      : "";
+    const tieMessage = noVotes
+      ? "由于无人提交，视为不猜。"
+      : tiedOptions.length > 1
+        ? `由于最高票选项票数相同，随机选择了${winner.type === "skip" ? "不猜" : `猜「${winner.answerText}」`}。`
+        : "";
     if (winner.type === "skip") {
       const previous = state.activeTeam;
-      state.activeTeam = oppositeTeam(previous);
+      const opposing = oppositeTeam(previous);
+      const nextTeam = getTeamMembers(state, opposing).length ? opposing : getTeamMembers(state, previous).length ? previous : null;
+      if (nextTeam) state.activeTeam = nextTeam;
       state.phase = visibleRevealCount(session.revealedBlocks, state.revealBlockCount ?? 45) >= (state.revealBlockCount ?? 45) ? "GUESS_VOTE" : "REVEAL_VOTE";
       state.revealLimit = 1;
       state.turnNumber += 1;
       session.currentRevealRound += 1;
       state.previousTurnAction = { team: previous, type: "skip" };
       state.pendingGuess = null;
-      state.message = state.phase === "REVEAL_VOTE"
-        ? `${teamName(previous)}选择不猜，轮到${teamName(state.activeTeam)}打开 1 个方块。${tieMessage}`
-        : `${teamName(previous)}选择不猜，图片已全部打开，轮到${teamName(state.activeTeam)}决定是否猜测。${tieMessage}`;
+      state.message = nextTeam
+        ? state.phase === "REVEAL_VOTE"
+          ? `${teamName(previous)}选择不猜，轮到${teamName(nextTeam)}打开 1 个方块。${tieMessage}`
+          : `${teamName(previous)}选择不猜，图片已全部打开，轮到${teamName(nextTeam)}决定是否猜测。${tieMessage}`
+        : "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。";
+      if (nextTeam) this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
+      else {
+        state.voteDeadlineAt = null;
+        aggregate.deadline = null;
+      }
     } else {
       state.phase = "JUDGING";
       state.pendingGuess = { team: state.activeTeam, answerText: winner.answerText?.trim() ?? "" };
       state.message = `${teamName(state.activeTeam)}决定猜「${state.pendingGuess.answerText}」。${tieMessage}`;
+      state.voteDeadlineAt = null;
+      aggregate.deadline = null;
     }
-    state.voteDeadlineAt = null;
     state.revealVotes = {};
     state.guessVotes = {};
-    aggregate.deadline = null;
     return this.publicSessionOutcome(session, "phase-boundary", true);
   }
 
@@ -1028,12 +1182,13 @@ export class RoomAuthorityVNext {
       state.turnNumber += 1;
       state.previousTurnAction = { team: guessedBy, type: "guess", answerText: state.pendingGuess.answerText };
       session.currentRevealRound += 1;
+      this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
     }
     state.pendingGuess = null;
-    state.voteDeadlineAt = null;
+    if (state.phase === "REVIEW") state.voteDeadlineAt = null;
     state.revealVotes = {};
     state.guessVotes = {};
-    aggregate.deadline = null;
+    if (state.phase === "REVIEW") aggregate.deadline = null;
     const outcome = this.publicSessionOutcome(session, "phase-boundary", true);
     if (scoredPlayerIds.length) {
       const scored = new Set(scoredPlayerIds);
@@ -1075,11 +1230,15 @@ export class RoomAuthorityVNext {
     session.revealedBlocks = [];
     session.roundStartedAt = null;
     session.eligiblePlayerIds = this.eligiblePlayers(aggregate.players, session.presenterPlayerId);
-    if (session.gameMode === "TEAM_BATTLE") session.teamBattleState = this.resetTeamState(session.teamBattleState, aggregate.players, session.presenterPlayerId, session.currentQuestionIndex);
+    if (session.gameMode === "TEAM_BATTLE") {
+      session.teamBattleState = this.resetTeamState(session.teamBattleState, aggregate.players, session.presenterPlayerId, session.currentQuestionIndex);
+      this.startTeamVoteDeadline(session.teamBattleState, "REVEAL_VOTE", action.serverReceivedAtMs);
+    } else {
+      aggregate.deadline = null;
+    }
     aggregate.answers = [];
     aggregate.buzzerAnswers = [];
     aggregate.questionResults = [];
-    aggregate.deadline = null;
     const data = { gameSession: clone(session), room: clone(aggregate.room ?? null), skipped };
     return { data, provisional: true, publicDeltas: [{ scope: "game", type: "round_snapshot", snapshot: this.getSnapshot() }], presenterDeltas: [], playerDeltas: [], forceCheckpoint: "phase-boundary", archiveQuestion: true, deadlineChanged: true };
   }
@@ -1161,6 +1320,7 @@ export class RoomAuthorityVNext {
 
   private leaveRoom(action: VNextPendingMutation, targetPlayerId: string): VNextMutationOutcome {
     const aggregate = this.requireActiveOrEnded();
+    let teamDeadlineChanged = false;
     if (!targetPlayerId) throw new TerminalMutationError("目标玩家无效。");
     if (action.name === "kickPlayerFromRoom" && aggregate.room?.hostPlayerId !== action.actorId) throw new TerminalMutationError("只有房主可以移出玩家。");
     aggregate.players = aggregate.players.filter((player) => player.id !== targetPlayerId);
@@ -1185,11 +1345,34 @@ export class RoomAuthorityVNext {
       if (state.teamMemberNames) delete state.teamMemberNames[targetPlayerId];
       if (!getTeamMembers(state, state.activeTeam).length && getTeamMembers(state, oppositeTeam(state.activeTeam)).length) {
         state.activeTeam = oppositeTeam(state.activeTeam);
+        state.revealVotes = {};
+        state.guessVotes = {};
+        state.pendingGuess = null;
+        if (state.phase === "REVEAL_VOTE" || state.phase === "GUESS_VOTE") {
+          this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
+          teamDeadlineChanged = true;
+        } else if (state.phase === "JUDGING" && aggregate.gameSession) {
+          const blockCount = state.revealBlockCount ?? 45;
+          const nextPhase = visibleRevealCount(aggregate.gameSession.revealedBlocks, blockCount) >= blockCount
+            ? "GUESS_VOTE"
+            : "REVEAL_VOTE";
+          this.startTeamVoteDeadline(state, nextPhase, action.serverReceivedAtMs);
+          teamDeadlineChanged = true;
+        } else {
+          state.voteDeadlineAt = null;
+          aggregate.deadline = null;
+        }
+      } else if (!getTeamMembers(state, "red").length && !getTeamMembers(state, "blue").length) {
         state.voteDeadlineAt = null;
         state.revealVotes = {};
         state.guessVotes = {};
         state.pendingGuess = null;
+        state.message = "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。";
         aggregate.deadline = null;
+        teamDeadlineChanged = true;
+      }
+      if (!teamDeadlineChanged && (state.phase === "REVEAL_VOTE" || state.phase === "GUESS_VOTE")) {
+        teamDeadlineChanged = this.shortenTeamVoteDeadlineIfComplete(state, action.serverReceivedAtMs);
       }
     }
     const delta: RealtimeDelta = aggregate.room ? { scope: "room", type: "room_updated", room: clone(aggregate.room) } : { scope: "room", type: "room_dissolved", roomId: aggregate.roomId };
@@ -1199,8 +1382,14 @@ export class RoomAuthorityVNext {
       publicDeltas: [delta],
       presenterDeltas: [],
       playerDeltas: [],
-      ...(aggregate.dissolved ? { forceCheckpoint: "game-end" as const } : aggregate.cutoverState === "ended" ? { forceCheckpoint: "projection" as const } : {}),
-      ...(aggregate.deadline === null ? { deadlineChanged: true } : {}),
+      ...(aggregate.dissolved
+        ? { forceCheckpoint: "game-end" as const }
+        : aggregate.cutoverState === "ended"
+          ? { forceCheckpoint: "projection" as const }
+          : teamDeadlineChanged
+            ? { forceCheckpoint: "phase-boundary" as const }
+            : {}),
+      ...(teamDeadlineChanged || aggregate.deadline === null ? { deadlineChanged: true } : {}),
     };
   }
 
@@ -1274,6 +1463,7 @@ export class RoomAuthorityVNext {
     aggregate.room.currentGameId = null;
     aggregate.room.currentPresenterPlayerId = null;
     aggregate.room.preparedQuestionSetId = null;
+    aggregate.resultArchiveSuppressed = true;
     aggregate.cutoverState = "ended";
     aggregate.deadline = null;
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room) };
@@ -1507,7 +1697,7 @@ export class RoomAuthorityVNext {
           if (game.projectionVersion == null && game.questionResults.length) statements.push(this.d1.prepare(`INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at)
             SELECT json_extract(value,'$.id'),json_extract(value,'$.gameSessionId'),json_extract(value,'$.questionIndex'),json_extract(value,'$.playerId'),json_extract(value,'$.scoredRound'),json_extract(value,'$.scoreAwarded'),json_extract(value,'$.judgedByPlayerId'),json_extract(value,'$.judgedAt') FROM json_each(?) WHERE true
             ON CONFLICT(game_session_id,question_index,player_id) DO UPDATE SET scored_round=excluded.scored_round,score_awarded=excluded.score_awarded,judged_by_player_id=excluded.judged_by_player_id,judged_at=excluded.judged_at`).bind(JSON.stringify(game.questionResults)));
-          if (game.projectionVersion != null && game.gameSession) {
+          if (game.projectionVersion != null && game.gameSession && game.archive) {
             statements.push(this.d1.prepare(`INSERT INTO game_result_archives(game_session_id,room_id,question_set_id,archive_version,completed_at,result_json)
               VALUES(?,?,?,?,?,?) ON CONFLICT(game_session_id) DO UPDATE SET room_id=excluded.room_id,question_set_id=excluded.question_set_id,
               archive_version=excluded.archive_version,completed_at=excluded.completed_at,result_json=excluded.result_json`).bind(
@@ -1590,7 +1780,9 @@ export class RoomAuthorityVNext {
       players: aggregate.players,
       questions: aggregate.questions,
       gameSession: aggregate.gameSession,
-      archive: this.createGameResultArchive(aggregate),
+      ...(!aggregate.resultArchiveSuppressed
+        ? { archive: this.createGameResultArchive(aggregate) }
+        : {}),
     };
     payload.games = [...payload.games.filter((item) => item.gameSession?.id !== aggregate.gameId), game];
     const payloadJson = JSON.stringify(payload);
@@ -1705,13 +1897,44 @@ export class RoomAuthorityVNext {
     return questionGuesserIds.filter((playerId) => !correctPlayerIds.has(playerId));
   }
 
-  private maybeStartVoteDeadline(state: TeamBattleState, team: TeamBattleTeam, receivedAtMs: number) {
-    const members = getTeamMembers(state, team);
-    const votes = state.phase === "REVEAL_VOTE" ? state.revealVotes : state.guessVotes;
-    if (members.length > 0 && members.every((id) => Object.prototype.hasOwnProperty.call(votes, id)) && !state.voteDeadlineAt) {
-      state.voteDeadlineAt = nowIso(receivedAtMs + 5000);
-      this.requireActive().deadline = { kind: "team-vote", gameId: this.requireActive().gameId, questionIndex: this.requireActive().gameSession!.currentQuestionIndex, phaseKey: `${state.phase}:${state.turnNumber}`, runAtMs: receivedAtMs + 5000 };
+  private startTeamVoteDeadline(state: TeamBattleState, phase: "REVEAL_VOTE" | "GUESS_VOTE", receivedAtMs: number) {
+    const aggregate = this.requireActive();
+    if (!getTeamMembers(state, "red").length && !getTeamMembers(state, "blue").length) {
+      state.phase = phase;
+      state.voteDeadlineAt = null;
+      aggregate.deadline = null;
+      return;
     }
+    const runAtMs = receivedAtMs + teamVoteSeconds(state, phase) * 1000;
+    state.phase = phase;
+    state.voteDeadlineAt = nowIso(runAtMs);
+    aggregate.deadline = {
+      kind: "team-vote",
+      gameId: aggregate.gameId,
+      questionIndex: aggregate.gameSession!.currentQuestionIndex,
+      phaseKey: `${phase}:${state.turnNumber}`,
+      runAtMs,
+    };
+  }
+
+  private shortenTeamVoteDeadlineIfComplete(state: TeamBattleState, receivedAtMs: number) {
+    if ((state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") || !state.voteDeadlineAt) return false;
+    const members = getTeamMembers(state, state.activeTeam);
+    const votes = state.phase === "REVEAL_VOTE" ? state.revealVotes : state.guessVotes;
+    if (!members.length || !members.every((playerId) => Object.prototype.hasOwnProperty.call(votes, playerId))) return false;
+    const currentRunAtMs = new Date(state.voteDeadlineAt).getTime();
+    const shortenedRunAtMs = receivedAtMs + TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS * 1000;
+    if (!Number.isFinite(currentRunAtMs) || currentRunAtMs <= shortenedRunAtMs) return false;
+    const aggregate = this.requireActive();
+    state.voteDeadlineAt = nowIso(shortenedRunAtMs);
+    aggregate.deadline = {
+      kind: "team-vote",
+      gameId: aggregate.gameId,
+      questionIndex: aggregate.gameSession!.currentQuestionIndex,
+      phaseKey: `${state.phase}:${state.turnNumber}`,
+      runAtMs: shortenedRunAtMs,
+    };
+    return true;
   }
 
   private resetTeamState(previous: TeamBattleState | null | undefined, players: Player[], presenterId: string, questionIndex: number): TeamBattleState {
@@ -1720,7 +1943,7 @@ export class RoomAuthorityVNext {
     const valid = new Set(ids);
     const teams = { red: initial.red.filter((id) => valid.has(id)), blue: initial.blue.filter((id) => valid.has(id)) };
     const activeTeam: TeamBattleTeam = questionIndex % 2 === 0 ? "red" : "blue";
-    return { teams, initialTeams: initial, teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])), activeTeam: teams[activeTeam].length ? activeTeam : oppositeTeam(activeTeam), phase: "REVEAL_VOTE", revealBlockCount: previous?.revealBlockCount ?? 45, revealLimit: 1, turnNumber: 1, voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: previous?.teamScores ?? { red: 0, blue: 0 } };
+    return { teams, initialTeams: initial, teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])), activeTeam: teams[activeTeam].length ? activeTeam : oppositeTeam(activeTeam), phase: "REVEAL_VOTE", revealBlockCount: previous?.revealBlockCount ?? 45, revealLimit: 1, turnNumber: 1, revealVoteSeconds: normalizeTeamVoteSeconds(previous?.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS), guessVoteSeconds: normalizeTeamVoteSeconds(previous?.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS), voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: previous?.teamScores ?? { red: 0, blue: 0 } };
   }
 
   private eligiblePlayers(players: Player[], presenterId: string) {

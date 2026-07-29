@@ -2683,7 +2683,7 @@ export class RoomDurableObject {
     if (!roomId) throw new Error("实时房间标识无效。");
     this.authorityTopic = `room:${roomId}`;
     if (this.authorityVNext.hasStoredState()) {
-      await this.authorityVNext.restoreFromStorage();
+      await this.restoreVNextAuthority();
       return roomId;
     }
     if (!force && this.authorityHydrationPromise) {
@@ -2706,6 +2706,13 @@ export class RoomDurableObject {
       this.state.waitUntil(flush);
     }
     return roomId;
+  }
+
+  private async restoreVNextAuthority(options: { reconcileAlarm?: boolean } = {}) {
+    await this.authorityVNext.restoreFromStorage();
+    if (options.reconcileAlarm !== false && this.authorityVNext.hasPendingDeadlineRepair()) {
+      await this.reconcileVNextAlarm();
+    }
   }
 
   private async runWithAuthority<T>(topic: string | null | undefined, callback: () => Promise<T>) {
@@ -3080,7 +3087,7 @@ export class RoomDurableObject {
         return Response.json({ data: publicResult });
       }
       if (localTopic && body.name && ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name) && this.authorityVNext.hasStoredState()) {
-        await this.authorityVNext.restoreFromStorage();
+        await this.restoreVNextAuthority();
         const aggregate = this.authorityVNext.getAggregate();
         if (aggregate?.cutoverState !== "initializing" && (aggregate?.room?.status !== "LOBBY" || this.authorityVNext.hasPendingRoomHandoff())) {
           return Response.json({ data: this.authorityVNext.query(body.name, body.args ?? []) });
@@ -3106,7 +3113,13 @@ export class RoomDurableObject {
           this.invalidateVNextSnapshotCaches(outcome);
           if (outcome.provisional) {
             if (outcome.forceCheckpoint === "game-end") this.authorityVNext.prepareFinalResultsFromArchives();
-            const receipt = await this.authorityVNext.forceCheckpoint(outcome.forceCheckpoint ?? "phase-boundary", outcome.archiveQuestion === true);
+            let receipt;
+            try {
+              receipt = await this.authorityVNext.forceCheckpoint(outcome.forceCheckpoint ?? "phase-boundary", outcome.archiveQuestion === true);
+            } catch (error) {
+              this.authorityVNext.resetAfterFailedTransition();
+              throw error;
+            }
             if (receipt) this.broadcastVNextDurableAck(receipt);
             await this.reconcileVNextAlarm();
             this.sendVNextOutcome(body.name, outcome);
@@ -3385,7 +3398,7 @@ export class RoomDurableObject {
     }
 
     if (this.authorityVNext.isActiveGame(gameSessionId)) {
-      await this.authorityVNext.restoreFromStorage();
+      await this.restoreVNextAuthority();
       return this.authorityVNext.query("getRoundSnapshot", [gameSessionId]) as RoundSnapshot;
     }
 
@@ -3473,7 +3486,7 @@ export class RoomDurableObject {
     }
 
     if (this.authorityVNext.isActiveGame(gameSessionId)) {
-      await this.authorityVNext.restoreFromStorage();
+      await this.restoreVNextAuthority();
       return this.authorityVNext.query("getGameBootstrapSnapshot", [gameSessionId]) as GameBootstrapSnapshot;
     }
 
@@ -3561,7 +3574,7 @@ export class RoomDurableObject {
     }
 
     if (this.authorityVNext.isActiveGame(gameSessionId)) {
-      await this.authorityVNext.restoreFromStorage();
+      await this.restoreVNextAuthority();
       return this.authorityVNext.query("getGameResultSnapshot", [gameSessionId]) as GameResultSnapshot;
     }
 
@@ -3622,12 +3635,12 @@ export class RoomDurableObject {
     const gameId = payload.mutation?.gameId ?? queryGameId ?? (typeof argRecord?.gameSessionId === "string" ? argRecord.gameSessionId : null)
       ?? (VNEXT_POSITIONAL_ROOM_MUTATIONS.has(payload.name) || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(payload.name) ? activeAggregate?.gameId ?? null : null);
     if (payload.mutation && this.authorityVNext.isActiveGame() && !this.authorityVNext.isActiveGame(payload.mutation.gameId)) {
-      await this.authorityVNext.restoreFromStorage();
+      await this.restoreVNextAuthority();
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, error: "该操作属于已结束的游戏，请刷新后重试。" }));
       return true;
     }
     if (!gameId || !this.authorityVNext.isActiveGame(gameId)) return false;
-    await this.authorityVNext.restoreFromStorage();
+    await this.restoreVNextAuthority();
     const mutationDeadlinePolicy = getMutationDeadlinePolicy(payload.name);
     if (mutationDeadlinePolicy == null) {
       const data = this.authorityVNext.query(payload.name, payload.args ?? []);
@@ -3687,7 +3700,13 @@ export class RoomDurableObject {
 
     if (outcome.forceCheckpoint) {
       if (outcome.forceCheckpoint === "game-end") this.authorityVNext.prepareFinalResultsFromArchives();
-      const receipt = await this.authorityVNext.forceCheckpoint(outcome.forceCheckpoint, outcome.archiveQuestion === true);
+      let receipt;
+      try {
+        receipt = await this.authorityVNext.forceCheckpoint(outcome.forceCheckpoint, outcome.archiveQuestion === true);
+      } catch (error) {
+        this.authorityVNext.resetAfterFailedTransition();
+        throw error;
+      }
       if (receipt) this.broadcastVNextDurableAck(receipt);
       await this.reconcileVNextAlarm();
       this.sendVNextOutcome(payload.name, outcome);
@@ -3786,20 +3805,24 @@ export class RoomDurableObject {
   }
 
   private async reconcileVNextAlarm() {
+    this.authorityVNext.markDeadlineRepairPending();
     const deadline = this.authorityVNext.getDeadline();
     const current = await this.state.storage.getAlarm();
     if (!deadline) {
       if (current != null) await this.state.storage.deleteAlarm();
       this.authorityVNext.recordAlarmScheduled(current != null);
+      this.authorityVNext.acknowledgeDeadlineRepair();
       return;
     }
     const scheduledAt = Math.max(deadline.runAtMs, Date.now() + BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS);
     if (current === scheduledAt) {
       this.authorityVNext.recordAlarmScheduled(false);
+      this.authorityVNext.acknowledgeDeadlineRepair();
       return;
     }
     await this.state.storage.setAlarm(scheduledAt);
     this.authorityVNext.recordAlarmScheduled(true);
+    this.authorityVNext.acknowledgeDeadlineRepair();
   }
 
   private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer, receivedAtMs = Date.now()): Promise<void> {
@@ -4091,7 +4114,7 @@ export class RoomDurableObject {
   private async handleAlarm(alarmInfo?: { retryCount: number; isRetry: boolean }) {
     if (this.authorityVNext.hasStoredState() && this.authorityVNext.getCutoverState() === "active") {
       try {
-        await this.authorityVNext.restoreFromStorage();
+        await this.restoreVNextAuthority({ reconcileAlarm: false });
         this.authorityVNext.markAlarmMetric(alarmInfo ?? {});
         const executed = await this.authorityVNext.executeDueDeadline(Date.now());
         if (executed?.outcome) this.invalidateVNextSnapshotCaches(executed.outcome);

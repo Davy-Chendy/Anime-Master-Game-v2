@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { RoomGameAuthority } from "../worker/roomGameAuthority";
 import { ATTACHMENT_BUDGET_BYTES, RoomAuthorityVNext, type VNextMutationEnvelope, type VNextSocketAttachment } from "../worker/roomAuthorityVNext";
+import { removePlayerFromTeamBattleState } from "../worker/gameService";
 import { getBuzzerAnswerStabilityDelayMs, getRemainingSeconds, isBuzzerAnswerReadyForJudging, isGameSessionPositionStale, shouldAcceptServerClock } from "../src/components/ImageRevealGame";
 import type { GameSession, Player, Question, QuestionSet, Room } from "../src/types/game";
 
@@ -131,9 +132,9 @@ class SqliteProjectionD1 {
   }
 }
 
-function createSqliteProjectionAuthority(playerCount: number) {
+function createSqliteProjectionAuthority(playerCount: number, questionCount = 1) {
   const d1 = new SqliteProjectionD1();
-  const created = createAuthority(playerCount, d1 as unknown as D1Database);
+  const created = createAuthority(playerCount, d1 as unknown as D1Database, questionCount);
   const aggregate = created.authority.getAggregate()!;
   const fixedLastSeenAt = "2026-07-28T00:00:00.000Z";
   for (const player of aggregate.players) player.lastSeenAt = fixedLastSeenAt;
@@ -150,7 +151,7 @@ function createSqliteProjectionAuthority(playerCount: number) {
       player.role,
     );
   }
-  d1.db.prepare("INSERT INTO questions(id) VALUES(?)").run("q1");
+  for (const question of aggregate.questions) d1.db.prepare("INSERT INTO questions(id) VALUES(?)").run(question.id);
   d1.db.prepare("INSERT INTO game_sessions VALUES(?,?,?,?,?,?,?,?,?)").run("g1", "PLAYING", 0, 1, "[]", null, null, null, null);
   d1.db.exec("DELETE FROM player_write_audit");
   return { ...created, d1 };
@@ -199,19 +200,22 @@ function enterReview(authority: RoomAuthorityVNext) {
   session.roundStartedAt = null;
 }
 
-test("v6 upgrades atomically through v8 and repeated initialization is idempotent", () => {
+test("v6 upgrades atomically through v9 and repeated initialization is idempotent", () => {
   const storage = new StorageAdapter();
   storage.sql.db.exec(`
     CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
     INSERT INTO authority_schema VALUES(1,6);
     CREATE TABLE question_sets(id TEXT PRIMARY KEY, title TEXT NOT NULL);
+    CREATE TABLE rooms(id TEXT PRIMARY KEY);
   `);
   const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
   authority.initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 9);
   authority.initializeSchema();
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game").get().count, 0);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='creation_method'").get().count, 1);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_team_reveal_vote_seconds'").get().count, 1);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_team_guess_vote_seconds'").get().count, 1);
 });
 
 test("migration failure does not advance production v6", () => {
@@ -223,10 +227,10 @@ test("migration failure does not advance production v6", () => {
   assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 6);
 });
 
-test("fresh schema reaches v8", () => {
+test("fresh schema reaches v9", () => {
   const storage = new StorageAdapter();
   new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1).initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 9);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('authority_vnext_projection_outbox') WHERE name='payload_json'").get().count, 1);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='creation_method'").get().count, 1);
 });
@@ -237,6 +241,7 @@ test("v7 question-set migration preserves rows and failure does not advance the 
     CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
     INSERT INTO authority_schema VALUES(1,7);
     CREATE TABLE question_sets(id TEXT PRIMARY KEY, title TEXT NOT NULL);
+    CREATE TABLE rooms(id TEXT PRIMARY KEY);
     INSERT INTO question_sets VALUES('set-1','Legacy');
   `);
   storage.sql.failOn = "ALTER TABLE question_sets";
@@ -246,9 +251,33 @@ test("v7 question-set migration preserves rows and failure does not advance the 
 
   storage.sql.failOn = "";
   authority.initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 9);
   assert.equal(storage.sql.db.prepare("SELECT title FROM question_sets WHERE id='set-1'").get().title, "Legacy");
   assert.equal(storage.sql.db.prepare("SELECT creation_method FROM question_sets WHERE id='set-1'").get().creation_method, null);
+});
+
+test("v8 team vote duration migration preserves rooms, Alarm, and failure does not advance the schema version", async () => {
+  const storage = new StorageAdapter();
+  storage.sql.db.exec(`
+    CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
+    INSERT INTO authority_schema VALUES(1,8);
+    CREATE TABLE rooms(id TEXT PRIMARY KEY, room_code TEXT NOT NULL);
+    INSERT INTO rooms VALUES('r1','ROOM01');
+  `);
+  await storage.setAlarm(456_789);
+  storage.sql.failOn = "lobby_team_guess_vote_seconds";
+  const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
+  assert.throws(() => authority.initializeSchema(), /injected migration failure/);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 8);
+
+  storage.sql.failOn = "";
+  authority.initializeSchema();
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 9);
+  const room = storage.sql.db.prepare("SELECT * FROM rooms WHERE id='r1'").get();
+  assert.equal(room.room_code, "ROOM01");
+  assert.equal(room.lobby_team_reveal_vote_seconds, 15);
+  assert.equal(room.lobby_team_guess_vote_seconds, 50);
+  assert.equal(await storage.getAlarm(), 456_789);
 });
 
 test("v6 journal and existing business Alarm survive the additive upgrade", async () => {
@@ -259,6 +288,7 @@ test("v6 journal and existing business Alarm survive the additive upgrade", asyn
     CREATE TABLE mutation_journal(id INTEGER PRIMARY KEY CHECK(id=1),room_id TEXT NOT NULL,name TEXT NOT NULL,action_key TEXT,started_at INTEGER NOT NULL);
     INSERT INTO mutation_journal VALUES(1,'r1','submitAnswer','a1',123);
     CREATE TABLE question_sets(id TEXT PRIMARY KEY, title TEXT NOT NULL);
+    CREATE TABLE rooms(id TEXT PRIMARY KEY);
   `);
   await storage.setAlarm(456_789);
   new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1).initializeSchema();
@@ -1363,6 +1393,335 @@ test("TEAM_BATTLE guess vote randomly selects within a highest-vote tie", () => 
   authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 1000);
   assert.equal(aggregate.gameSession!.teamBattleState!.previousTurnAction?.type, "skip");
   assert.match(aggregate.gameSession!.teamBattleState!.message ?? "", /最高票选项票数相同，随机选择了不猜/);
+});
+
+test("cancel after a scored question projects only the lobby handoff", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(2, 2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0"], blue: ["p1"] }, initialTeams: { red: ["p0"], blue: ["p1"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 15, guessVoteSeconds: 50, voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 1, blue: 0 },
+  };
+  aggregate.scores.find((score) => score.playerId === "p0")!.score = 5;
+  aggregate.scores.find((score) => score.playerId === "p0")!.correctCount = 1;
+  aggregate.questionResults = [{ id: "g1:0:p0", gameSessionId: "g1", questionIndex: 0, playerId: "p0", scoredRound: 1, scoreAwarded: 5, judgedByPlayerId: "host", judgedAt: new Date().toISOString() }];
+
+  const reviewed = authority.handleMutation(null, envelope("host", 1, "revealTeamBattleAnswer", { presenterPlayerId: "host" }), Date.now());
+  await authority.forceCheckpoint(reviewed.forceCheckpoint!);
+  const advanced = authority.handleMutation(null, envelope("host", 2, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }), Date.now() + 1);
+  await authority.forceCheckpoint(advanced.forceCheckpoint!, advanced.archiveQuestion);
+  assert.equal(state.storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_question_archive WHERE game_id='g1'").get().count, 1);
+  assert.equal(authority.getAggregate()?.gameSession?.currentQuestionIndex, 1);
+  const alarmAt = authority.getDeadline()!.runAtMs;
+  await state.storage.setAlarm(alarmAt);
+
+  const cancelAction = { ...envelope("host", 3, "cancelCurrentRound", { roomId: "r1", hostPlayerId: "host" }), questionIndex: 1 };
+  const canceled = authority.handleMutation(
+    null,
+    cancelAction,
+    Date.now() + 2,
+  );
+  state.storage.sql.failOn = "authority_vnext_active_game";
+  await assert.rejects(authority.forceCheckpoint(canceled.forceCheckpoint!), /injected migration failure/);
+  assert.equal(state.storage.sql.db.prepare("SELECT cutover_state FROM authority_vnext_active_game WHERE id=1").get().cutover_state, "active");
+  assert.equal(await state.storage.getAlarm(), alarmAt);
+
+  authority.resetAfterFailedTransition();
+  state.storage.sql.failOn = "";
+  await authority.restoreFromStorage();
+  assert.equal(authority.getAggregate()?.cutoverState, "active");
+  const retried = authority.handleMutation(null, cancelAction, Date.now() + 3);
+  await authority.forceCheckpoint(retried.forceCheckpoint!);
+
+  const outbox = state.storage.sql.db.prepare("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").get() as { payload_json: string };
+  const payload = JSON.parse(outbox.payload_json) as { games: Array<{ archive?: unknown; room?: Room }> };
+  assert.equal(payload.games[0]?.archive, undefined);
+  assert.equal(payload.games[0]?.room?.status, "LOBBY");
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM game_result_archives").get().count, 0);
+  assert.equal(d1.db.prepare("SELECT game_status FROM rooms WHERE id='r1'").get().game_status, "LOBBY");
+});
+
+test("HTTP and WebSocket force checkpoints both discard failed provisional state", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  const guardedCheckpointPattern = /try\s*{\s*receipt = await this\.authorityVNext\.forceCheckpoint\([^;]+;\s*}\s*catch \(error\) {\s*this\.authorityVNext\.resetAfterFailedTransition\(\);/g;
+  assert.equal([...worker.matchAll(guardedCheckpointPattern)].length, 2);
+});
+
+test("Alarm wake restores vNext without rescheduling the Alarm that is already executing", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /handleAlarm[\s\S]{0,700}restoreVNextAuthority\(\{ reconcileAlarm: false }\)/);
+});
+
+test("TEAM_BATTLE shortens to five seconds after all submit without extending on edits", () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: [] }, initialTeams: { red: ["p0", "p1"], blue: [] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 15, guessVoteSeconds: 50, voteDeadlineAt: new Date(16_000).toISOString(), revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 16_000 };
+  const p0 = socketFor(state, "p0");
+  const p1 = socketFor(state, "p1");
+
+  const partial = authority.handleMutation(p0, envelope("p0", 1, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [0], revealBlockCount: 45 }), 1_000);
+  assert.equal(partial.deadlineChanged, false);
+  assert.equal(authority.getDeadline()?.runAtMs, 16_000);
+  const completed = authority.handleMutation(p1, envelope("p1", 1, "submitTeamBattleRevealVote", { playerId: "p1", selectedBlocks: [1], revealBlockCount: 45 }), 2_000);
+  assert.equal(completed.deadlineChanged, true);
+  assert.equal(completed.forceCheckpoint, "phase-boundary");
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, new Date(7_000).toISOString());
+  assert.equal(authority.getDeadline()?.runAtMs, 7_000);
+
+  const edited = authority.handleMutation(p0, envelope("p0", 2, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [2], revealBlockCount: 45 }), 6_999);
+  assert.equal(edited.error, undefined);
+  assert.equal(edited.deadlineChanged, false);
+  assert.equal(edited.forceCheckpoint, undefined);
+  assert.equal(authority.getDeadline()?.runAtMs, 7_000);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.revealVotes.p0, [2]);
+  const late = authority.handleMutation(p0, envelope("p0", 3, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [3], revealBlockCount: 45 }), 7_000);
+  assert.equal(late.terminal, true);
+  assert.match(late.error ?? "", /时间已结束/);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.revealVotes.p0, [2]);
+});
+
+test("TEAM_BATTLE all-submitted grace never extends a guess deadline with five seconds or less remaining", () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: [] }, initialTeams: { red: ["p0", "p1"], blue: [] }, activeTeam: "red", phase: "GUESS_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 15, guessVoteSeconds: 50, voteDeadlineAt: new Date(6_000).toISOString(), revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "GUESS_VOTE:1", runAtMs: 6_000 };
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "submitTeamBattleGuessVote", { playerId: "p0", vote: { type: "skip" } }), 1_000);
+  const completed = authority.handleMutation(socketFor(state, "p1"), envelope("p1", 1, "submitTeamBattleGuessVote", { playerId: "p1", vote: { type: "guess", answerText: "答案" } }), 2_000);
+  assert.equal(completed.deadlineChanged, false);
+  assert.equal(completed.forceCheckpoint, undefined);
+  assert.equal(authority.getDeadline()?.runAtMs, 6_000);
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, new Date(6_000).toISOString());
+});
+
+test("TEAM_BATTLE 50-player submission burst requests exactly one deadline reschedule", () => {
+  const { state, authority } = createAuthority(50);
+  const aggregate = authority.getAggregate()!;
+  const members = Array.from({ length: 50 }, (_, index) => `p${index}`);
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: members, blue: [] }, initialTeams: { red: members, blue: [] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 60, guessVoteSeconds: 60, voteDeadlineAt: new Date(60_000).toISOString(), revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 60_000 };
+
+  const initialOutcomes = members.map((playerId, index) => authority.handleMutation(
+    socketFor(state, playerId),
+    envelope(playerId, 1, "submitTeamBattleRevealVote", { playerId, selectedBlocks: [0], revealBlockCount: 45 }),
+    1_000 + index,
+  ));
+  assert.equal(initialOutcomes.filter((outcome) => outcome.deadlineChanged).length, 1);
+  assert.equal(initialOutcomes.filter((outcome) => outcome.forceCheckpoint === "phase-boundary").length, 1);
+  assert.equal(authority.getDeadline()?.runAtMs, 6_049);
+
+  const editChanges = members.map((playerId, index) => authority.handleMutation(
+    state.sockets[index] as unknown as WebSocket,
+    envelope(playerId, 2, "submitTeamBattleRevealVote", { playerId, selectedBlocks: [1], revealBlockCount: 45 }),
+    2_000 + index,
+  ).deadlineChanged);
+  assert.equal(editChanges.filter(Boolean).length, 0);
+  assert.equal(authority.getDeadline()?.runAtMs, 6_049);
+});
+
+test("TEAM_BATTLE partial reveal votes count only submissions and start the configured guess deadline", () => {
+  const { state, authority } = createAuthority(3, fakeD1, 1, () => 0);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] }, initialTeams: { red: ["p0", "p1"], blue: ["p2"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 3, guessVoteSeconds: 7, voteDeadlineAt: new Date(1_000).toISOString(), revealVotes: { p0: [5] }, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 1_000 };
+
+  authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 1_000);
+  assert.deepEqual(aggregate.gameSession!.revealedBlocks, [5]);
+  assert.equal(aggregate.gameSession!.teamBattleState.phase, "GUESS_VOTE");
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, new Date(8_000).toISOString());
+  assert.equal(authority.getDeadline()?.runAtMs, 8_000);
+});
+
+test("TEAM_BATTLE zero votes randomize reveal and treat guess as skip with fresh fixed deadlines", () => {
+  const { state, authority } = createAuthority(2, fakeD1, 1, () => 0);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0"], blue: ["p1"] }, initialTeams: { red: ["p0"], blue: ["p1"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 3, guessVoteSeconds: 7, voteDeadlineAt: new Date(1_000).toISOString(), revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 1_000 };
+  const host = socketFor(state, "host");
+
+  authority.handleMutation(host, envelope("host", 1, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 1_000);
+  assert.equal(aggregate.gameSession!.revealedBlocks.length, 1);
+  assert.match(aggregate.gameSession!.teamBattleState.message ?? "", /多个方块同票，随机选择/);
+  assert.equal(authority.getDeadline()?.runAtMs, 8_000);
+
+  authority.handleMutation(host, envelope("host", 2, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 8_000);
+  const teamState = aggregate.gameSession!.teamBattleState;
+  assert.equal(teamState.phase, "REVEAL_VOTE");
+  assert.equal(teamState.activeTeam, "blue");
+  assert.equal(teamState.previousTurnAction?.type, "skip");
+  assert.match(teamState.message ?? "", /无人提交，视为不猜/);
+  assert.equal(teamState.voteDeadlineAt, new Date(11_000).toISOString());
+  assert.equal(authority.getDeadline()?.runAtMs, 11_000);
+});
+
+test("TEAM_BATTLE shortened deadline survives checkpoint and hibernation restore", async () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0"], blue: ["p1"] }, initialTeams: { red: ["p0"], blue: ["p1"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 15, guessVoteSeconds: 50, voteDeadlineAt: new Date(16_000).toISOString(), revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 16_000 };
+  const submitted = authority.handleMutation(
+    socketFor(state, "p0"),
+    envelope("p0", 1, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [0], revealBlockCount: 45 }),
+    1_000,
+  );
+  assert.equal(submitted.error, undefined);
+  await authority.forceCheckpoint("phase-boundary");
+  await state.storage.setAlarm(16_000);
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.equal(restored.getDeadline()?.runAtMs, 6_000);
+  assert.equal(restored.getAggregate()?.gameSession?.teamBattleState?.voteDeadlineAt, new Date(6_000).toISOString());
+  assert.equal(restored.hasPendingDeadlineRepair(), true, "a restored deadline must verify and repair the physical Alarm once");
+  assert.equal(await state.storage.getAlarm(), 16_000, "authority restore must not mutate the Alarm outside the Room DO wrapper");
+});
+
+test("legacy active TEAM_BATTLE state without a deadline receives defaults once on restore", async () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0"], blue: ["p1"] }, initialTeams: { red: ["p0"], blue: ["p1"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = null;
+  const submitted = authority.handleMutation(
+    socketFor(state, "p0"),
+    envelope("p0", 1, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [4], revealBlockCount: 45 }),
+    1_000,
+  );
+  assert.equal(submitted.error, undefined);
+  await authority.forceCheckpoint("phase-boundary");
+
+  const beforeRestore = Date.now();
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  const restoredState = restored.getAggregate()!.gameSession!.teamBattleState!;
+  const runAtMs = restored.getDeadline()!.runAtMs;
+  assert.equal(restoredState.revealVoteSeconds, 15);
+  assert.equal(restoredState.guessVoteSeconds, 50);
+  assert.deepEqual(restoredState.revealVotes.p0, [4]);
+  assert.ok(runAtMs >= beforeRestore + 15_000 && runAtMs <= Date.now() + 15_000);
+  assert.equal(new Date(restoredState.voteDeadlineAt!).getTime(), runAtMs);
+  assert.equal(restored.hasPendingDeadlineRepair(), true, "Room DO must reconcile the repaired deadline to one Alarm");
+  assert.equal(restored.hasPendingDeadlineRepair(), true, "a failed Alarm reconcile must leave the repair pending");
+  restored.acknowledgeDeadlineRepair();
+  assert.equal(restored.hasPendingDeadlineRepair(), false, "only a successful Alarm reconcile may acknowledge the repair");
+});
+
+test("TEAM_BATTLE member leave shortens a now-complete vote or resets when the active team becomes empty", async () => {
+  const { state, authority } = createAuthority(3);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] }, initialTeams: { red: ["p0", "p1"], blue: ["p2"] }, activeTeam: "red", phase: "REVEAL_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 3, guessVoteSeconds: 7, voteDeadlineAt: new Date(20_000).toISOString(), revealVotes: { p0: [0], p1: [1] }, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 20_000 };
+
+  const p1Left = authority.handleMutation(socketFor(state, "p1"), envelope("p1", 1, "leaveRoom", { playerId: "p1" }), 5_000);
+  assert.equal(p1Left.error, undefined);
+  assert.equal(p1Left.forceCheckpoint, "phase-boundary");
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, new Date(10_000).toISOString());
+  assert.equal(authority.getDeadline()?.runAtMs, 10_000);
+  assert.equal(aggregate.gameSession!.teamBattleState.revealVotes.p1, undefined);
+
+  const p0Left = authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "leaveRoom", { playerId: "p0" }), 6_000);
+  assert.equal(p0Left.error, undefined);
+  assert.equal(aggregate.gameSession!.teamBattleState.activeTeam, "blue");
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, new Date(9_000).toISOString());
+  assert.equal(authority.getDeadline()?.runAtMs, 9_000);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.revealVotes, {});
+
+  const p2Left = authority.handleMutation(socketFor(state, "p2"), envelope("p2", 1, "leaveRoom", { playerId: "p2" }), 7_000);
+  assert.equal(p2Left.error, undefined);
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, null);
+  assert.equal(authority.getDeadline(), null);
+  assert.match(aggregate.gameSession!.teamBattleState.message ?? "", /双方都没有在线队员/);
+  await authority.forceCheckpoint("phase-boundary");
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.equal(restored.getDeadline(), null, "empty teams must remain paused after hibernation");
+  assert.equal(restored.getAggregate()?.gameSession?.teamBattleState?.voteDeadlineAt, null);
+  assert.equal(restored.hasPendingDeadlineRepair(), false, "empty teams must not schedule a repaired Alarm");
+});
+
+test("legacy TEAM_BATTLE member leave uses the same all-submitted grace", () => {
+  const state = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] }, initialTeams: { red: ["p0", "p1"], blue: ["p2"] }, activeTeam: "red" as const, phase: "REVEAL_VOTE" as const, revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 15, guessVoteSeconds: 50, voteDeadlineAt: new Date(20_000).toISOString(), revealVotes: { p0: [0] }, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  const next = removePlayerFromTeamBattleState(state, "p1", 5_000);
+  assert.deepEqual(next.teams.red, ["p0"]);
+  assert.equal(next.voteDeadlineAt, new Date(10_000).toISOString());
+});
+
+test("TEAM_BATTLE skip keeps the only non-empty team and does not create an empty-team Alarm loop", () => {
+  const { state, authority } = createAuthority(1);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0"], blue: [] }, initialTeams: { red: ["p0"], blue: [] }, activeTeam: "red", phase: "GUESS_VOTE", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 3, guessVoteSeconds: 7, voteDeadlineAt: new Date(1_000).toISOString(), revealVotes: {}, guessVotes: { p0: { type: "skip" } }, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "GUESS_VOTE:1", runAtMs: 1_000 };
+
+  authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "finalizeTeamBattleVote", { presenterPlayerId: "host" }), 1_000);
+  assert.equal(aggregate.gameSession!.teamBattleState.activeTeam, "red");
+  assert.equal(aggregate.gameSession!.teamBattleState.phase, "REVEAL_VOTE");
+  assert.equal(authority.getDeadline()?.runAtMs, 4_000);
+});
+
+test("TEAM_BATTLE remains paused when an empty roster advances from REVIEW", () => {
+  const { state, authority } = createAuthority(2, fakeD1, 2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.players = aggregate.players.filter((player) => player.id === "host");
+  aggregate.room!.players = aggregate.players;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.revealedBlocks = Array.from({ length: 45 }, (_, index) => index);
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: [], blue: [] }, initialTeams: { red: ["p0"], blue: ["p1"] }, activeTeam: "red", phase: "REVIEW", revealBlockCount: 45, revealLimit: 1, turnNumber: 1,
+    revealVoteSeconds: 3, guessVoteSeconds: 7, voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = null;
+
+  const advanced = authority.handleMutation(
+    socketFor(state, "host"),
+    envelope("host", 1, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }),
+    10_000,
+  );
+  assert.equal(advanced.error, undefined);
+  assert.equal(aggregate.gameSession!.currentQuestionIndex, 1);
+  assert.equal(aggregate.gameSession!.teamBattleState.phase, "REVEAL_VOTE");
+  assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, null);
+  assert.equal(authority.getDeadline(), null);
 });
 
 test("initializing cutover survives restart with its idempotency parameters", async () => {

@@ -79,6 +79,21 @@ WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接
 
 若无法给出可验证的估算，不应把该实现放入实时热路径。
 
+## 团队投票频繁提交的后续优化记录
+
+团队模式按“一阶段一个服务端 deadline”实现；全员提前提交且剩余超过5秒时，允许把该 deadline 单调缩短一次并重设 Alarm。普通选格点击保留为客户端草稿，只有显式提交才发送 mutation；实时游戏阶段继续保持 D1 零写入。
+
+以下优化暂不作为首版固定倒计时的前置条件，仅在真实单局指标显示投票 mutation、rolling checkpoint 或广播明显偏高时实施：
+
+- 猜测投票改为先在客户端选择、再显式确认，避免点击已有答案或“不猜”时立即发送 mutation。
+- 对连续修改做短时防抖或 last-write-wins 合并，并在截止前显式提交时立即发送最终值。
+- 客户端忽略与上次已提交内容完全相同的重复提交；服务端把相同投票识别为 no-op，不增加 dirty action。
+- 除全员首次提交完成触发的单次5秒确认期外，投票修改不得调用 `setAlarm()`，避免频繁修改造成 Alarm 反复重排和额外存储写入。
+
+团队倒计时上线后应按单局记录并复核：投票 mutation 数、DO 请求折算、Alarm 设置/执行/重试次数、checkpoint 次数及 changed rows、最大 active game/Attachment 体积、广播次数/字节和最终 D1 写入。若一局开销明显高于预算基线，再决定是否启用上述提交合并，或增加最大团队回合数等游戏规则限制。
+
+当前计量模型为：每个投票阶段设置并执行一个 Alarm；若全员提前提交且剩余超过5秒，该阶段先增加一次1行 active-game checkpoint，再最多额外 `setAlarm()` 一次，后续修改不再重排。deadline 阶段边界仍强制 checkpoint，游戏中 D1 写入保持0。若一道题发生 R 次选格和 G 次猜测，则 Alarm 执行与 deadline checkpoint 均约为 `R + G` 次；全员均提前完成时，Alarm 设置和阶段 checkpoint 均最多为 `2 × (R + G)` 次。例如10次选格+10次猜测约20次 Alarm 执行、最多40次 Alarm 设置和40次1行 checkpoint。玩家投票 mutation 仍可能达到“提交人数×修改次数”；每个阶段内每累计20个 dirty action 会多一次1行 rolling checkpoint，已被提前完成 checkpoint 持久化的 action 不会再次累计到 deadline。以每阶段6人各提交一次为例，不会额外触发 rolling checkpoint；频繁修改才会增加。这正是上述后续优化的观测重点。
+
 ## 对应测试
 
 - `npm run test:authority-budget`：快速检查 50×30 的 DO/D1 写入预算。

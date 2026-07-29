@@ -35,6 +35,11 @@
 - `no such table`、`no such column` 等永久性 schema 错误不得快速自动重试。Alarm 必须设置最小延迟、指数退避、最大重试次数或熔断，禁止把已过去的时间直接传给 `setAlarm()`。
 - 详细事故复盘、迁移范式和审查清单见 [`docs/durable-object-schema-migrations.md`](docs/durable-object-schema-migrations.md)。
 
+### 游戏规则契约
+
+- [`docs/game-rules-contract.md`](docs/game-rules-contract.md) 是游戏规则、阶段流转、计分与结算语义的统一规则文档；实现和测试应与其保持一致。
+- 改动涉及游戏规则、阶段流程、玩家操作语义、计分或结算行为时，必须先核对该文档，并在同一次变更中及时更新相关规则说明，不得只修改代码或测试。
+
 ### 测试与额度
 
 - 完成修改后必须按 [`docs/testing.md`](docs/testing.md) 自行选择并运行相关测试，不等待用户提醒；涉及业务行为时不能只跑类型检查。

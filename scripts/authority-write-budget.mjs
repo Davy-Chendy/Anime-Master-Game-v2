@@ -29,6 +29,25 @@ const vnextBoundaryRows = questions * 2;
 const vnextProjectionRows = 2;
 const vnextRows = vnextCheckpointRows + vnextBoundaryRows + vnextProjectionRows;
 
+// TEAM_BATTLE timer example used by the rules/budget review: one question,
+// six active team members, ten reveal phases and ten guess phases. A phase-end
+// deadline checkpoint persists one active_game row. With one submission per
+// member per phase, each phase stays below the 20-action rolling threshold. If
+// all members finish early, the early-completion checkpoint absorbs those dirty
+// actions before the later deadline checkpoint. D1 remains untouched until the
+// final projection.
+const teamExample = {
+  activeMembers: 6,
+  revealPhases: 10,
+  guessPhases: 10,
+};
+const teamExamplePhases = teamExample.revealPhases + teamExample.guessPhases;
+const teamExampleVoteMutations = teamExample.activeMembers * teamExamplePhases;
+const teamExampleDeadlineCheckpointRows = teamExamplePhases;
+const teamExampleEarlyCompletionCheckpointRows = teamExamplePhases;
+const teamExampleExtraRollingRows = Math.floor(teamExample.activeMembers / checkpointEvery) * teamExamplePhases;
+const teamExampleAlarmSchedules = teamExamplePhases * 2;
+
 // D1 billing is based on rows read/written, not SQL statement count. The new
 // result archive is one aggregate row. Roster reconciliation writes nothing
 // when the expected D1 roster is already current; genuinely changed members
@@ -66,6 +85,16 @@ console.log(JSON.stringify({
     questionBoundaryRows: vnextBoundaryRows,
     finalProjectionRows: vnextProjectionRows,
     estimatedRowsWritten: vnextRows,
+    teamTimerExample: {
+      ...teamExample,
+      voteMutations: teamExampleVoteMutations,
+      alarmSchedulesAtMostWhenEveryPhaseCompletesEarly: teamExampleAlarmSchedules,
+      alarmExecutions: teamExamplePhases,
+      deadlineCheckpointRows: teamExampleDeadlineCheckpointRows,
+      earlyCompletionCheckpointRowsAtMost: teamExampleEarlyCompletionCheckpointRows,
+      extraRollingCheckpointRows: teamExampleExtraRollingRows,
+      d1RowsDuringGame: 0,
+    },
   },
   d1FinalProjection: {
     aggregateArchiveRows: d1ArchiveRows,

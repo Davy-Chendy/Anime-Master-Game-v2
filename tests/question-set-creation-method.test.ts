@@ -11,6 +11,8 @@ import {
   getCommunityQuestionSets,
   publishQuestionSetToCommunity,
   runWithGameDatabase,
+  startGameWithQuestionSet,
+  updateRoomGameSettings,
 } from "../worker/gameService";
 
 const root = resolve(import.meta.dirname, "..");
@@ -60,12 +62,38 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0013") {
+function applyMigrations(db: DatabaseSync, through = "0014") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
   }
 }
+
+test("D1 0013 upgrades rooms to TEAM_BATTLE vote durations transactionally", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0013");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,game_status) VALUES(?,?,?,?)")
+    .run("legacy-room", "LEGACY", "host", "LOBBY");
+  const migration = readFileSync(join(migrationsDirectory, "0014_team_battle_vote_durations.sql"), "utf8");
+  const firstStatement = migration.split(";").map((statement) => statement.trim()).filter(Boolean)[0];
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`${firstStatement};`);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_team_reveal_vote_seconds'").get().count, 0);
+
+  db.exec(migration);
+  const room = db.prepare("SELECT * FROM rooms WHERE id='legacy-room'").get();
+  assert.equal(room.room_code, "LEGACY");
+  assert.equal(room.lobby_team_reveal_vote_seconds, 15);
+  assert.equal(room.lobby_team_guess_vote_seconds, 50);
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_reveal_vote_seconds=0 WHERE id='legacy-room'").run(), /CHECK constraint failed/);
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_guess_vote_seconds=601 WHERE id='legacy-room'").run(), /CHECK constraint failed/);
+});
 
 test("D1 0012 upgrades to nullable creation methods without rewriting historical rows", () => {
   const db = new DatabaseSync(":memory:");
@@ -130,5 +158,46 @@ test("new question sets default by creation path, publishing can confirm the met
     assert.deepEqual(assistedPage.items.map((item) => item.id), [manual.id]);
     assert.equal(manualPage.total, 1);
     assert.equal(assistedPage.total, 1);
+  });
+});
+
+test("custom room TEAM_BATTLE vote durations flow into the initial game state", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  db.sqlite.prepare(`INSERT INTO rooms(id,room_code,host_player_id,game_status,current_presenter_player_id,prepared_question_set_id)
+    VALUES(?,?,?,?,?,?)`).run("room-team", "TEAM01", "host", "QUESTION_SETUP", "host", "set-team");
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["p1", "P1", 0], ["p2", "P2", 0]] as const) {
+    db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+      .run(id, "room-team", nickname, isHost, "PLAYER");
+  }
+  db.sqlite.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
+    .run("set-team", "Team Set", "host", 1);
+  db.sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
+    .run("question-team", "set-team", "https://example.com/team.webp", 0);
+
+  await runWithGameDatabase(db, async () => {
+    const room = await updateRoomGameSettings({
+      roomId: "room-team",
+      hostPlayerId: "host",
+      gameMode: "TEAM_BATTLE",
+      teamRevealVoteSeconds: 23,
+      teamGuessVoteSeconds: 61,
+    });
+    assert.equal(room.teamRevealVoteSeconds, 23);
+    assert.equal(room.teamGuessVoteSeconds, 61);
+
+    const started = await startGameWithQuestionSet({
+      startRequestId: "team-countdown-01",
+      roomId: "room-team",
+      hostPlayerId: "host",
+      presenterPlayerId: "host",
+      questionSetId: "set-team",
+      gameMode: "TEAM_BATTLE",
+    });
+    assert.equal(started.gameSession.teamBattleState?.revealVoteSeconds, 23);
+    assert.equal(started.gameSession.teamBattleState?.guessVoteSeconds, 61);
+    const deadlineMs = new Date(started.gameSession.teamBattleState!.voteDeadlineAt!).getTime();
+    const createdAtMs = new Date(started.gameSession.createdAt).getTime();
+    assert.ok(deadlineMs >= createdAtMs + 22_000 && deadlineMs <= Date.now() + 23_000);
   });
 });

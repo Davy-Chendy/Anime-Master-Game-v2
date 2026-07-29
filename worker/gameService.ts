@@ -1,5 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRoomCode } from "../src/lib/id";
+import {
+  DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
+} from "../src/types/game";
 import { createD1QueryClient, type GameDatabase, type GameDatabaseMutationTracker } from "./d1QueryCompat";
 import type {
   Answer,
@@ -149,6 +154,10 @@ function normalizeRoundSeconds(value: unknown) {
   return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_ROUND_SECONDS)));
 }
 
+function normalizeTeamBattleVoteSeconds(value: unknown, fallback: number) {
+  return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : fallback)));
+}
+
 function normalizeRoundScores(value: unknown, maxRevealRounds: number) {
   let source: unknown[] = [];
   if (Array.isArray(value)) {
@@ -183,6 +192,14 @@ function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
     maxRevealRounds,
     roundSeconds: normalizeRoundSeconds(room.lobby_round_seconds),
     roundScores: normalizeRoundScores(room.lobby_round_scores, maxRevealRounds),
+    teamRevealVoteSeconds: normalizeTeamBattleVoteSeconds(
+      room.lobby_team_reveal_vote_seconds,
+      DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+    ),
+    teamGuessVoteSeconds: normalizeTeamBattleVoteSeconds(
+      room.lobby_team_guess_vote_seconds,
+      DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+    ),
     createdAt: room.created_at,
     updatedAt: room.updated_at,
   };
@@ -322,6 +339,14 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     revealBlockCount: normalizeRevealBlockCount(record.revealBlockCount),
     revealLimit: Math.max(1, Math.min(10, Math.floor(Number(record.revealLimit) || 1))),
     turnNumber: Math.max(1, Math.floor(Number(record.turnNumber) || 1)),
+    revealVoteSeconds: normalizeTeamBattleVoteSeconds(
+      record.revealVoteSeconds,
+      DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+    ),
+    guessVoteSeconds: normalizeTeamBattleVoteSeconds(
+      record.guessVoteSeconds,
+      DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+    ),
     voteDeadlineAt: typeof record.voteDeadlineAt === "string" ? record.voteDeadlineAt : null,
     revealVotes: normalizeRevealVotes(record.revealVotes),
     guessVotes: normalizeGuessVotes(record.guessVotes),
@@ -434,7 +459,48 @@ function shuffleItems<T>(items: T[]) {
   return shuffled;
 }
 
-function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: string, previousScores?: Record<TeamBattleTeam, number>): TeamBattleState {
+function getTeamBattleVoteSeconds(state: TeamBattleState, phase: "REVEAL_VOTE" | "GUESS_VOTE") {
+  return phase === "REVEAL_VOTE"
+    ? normalizeTeamBattleVoteSeconds(state.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS)
+    : normalizeTeamBattleVoteSeconds(state.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS);
+}
+
+function withFixedTeamBattleDeadline(
+  state: TeamBattleState,
+  phase: "REVEAL_VOTE" | "GUESS_VOTE",
+  nowMs = Date.now(),
+): TeamBattleState {
+  if (state.teams.red.length === 0 && state.teams.blue.length === 0) {
+    return { ...state, phase, voteDeadlineAt: null };
+  }
+  return {
+    ...state,
+    phase,
+    voteDeadlineAt: new Date(nowMs + getTeamBattleVoteSeconds(state, phase) * 1000).toISOString(),
+  };
+}
+
+function withShortenedTeamBattleDeadlineAfterAllSubmitted(state: TeamBattleState, nowMs: number) {
+  if ((state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") || !state.voteDeadlineAt) return state;
+  const members = state.teams[state.activeTeam];
+  const votes = state.phase === "REVEAL_VOTE" ? state.revealVotes : state.guessVotes;
+  if (!members.length || !members.every((playerId) => Object.prototype.hasOwnProperty.call(votes, playerId))) return state;
+  const currentRunAtMs = new Date(state.voteDeadlineAt).getTime();
+  const shortenedRunAtMs = nowMs + TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS * 1000;
+  if (!Number.isFinite(currentRunAtMs) || currentRunAtMs <= shortenedRunAtMs) return state;
+  return { ...state, voteDeadlineAt: new Date(shortenedRunAtMs).toISOString() };
+}
+
+function createInitialTeamBattleState(
+  players: DbPlayer[],
+  presenterPlayerId: string,
+  options?: {
+    previousScores?: Record<TeamBattleTeam, number>;
+    revealVoteSeconds?: number;
+    guessVoteSeconds?: number;
+    nowMs?: number;
+  },
+): TeamBattleState {
   const guessers = shuffleItems(players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId));
   const largerTeamSize = Math.ceil(guessers.length / 2);
   const redGetsExtraPlayer = guessers.length % 2 === 1 ? randomInt(2) === 0 : true;
@@ -443,7 +509,7 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
   const blue = guessers.slice(redTeamSize).map((player) => player.id);
   const teamMemberNames = Object.fromEntries(guessers.map((player) => [player.id, player.nickname.trim() || "已离开玩家"]));
 
-  return {
+  return withFixedTeamBattleDeadline({
     teams: { red, blue },
     initialTeams: { red, blue },
     teamMemberNames,
@@ -451,14 +517,22 @@ function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: st
     phase: "REVEAL_VOTE",
     revealLimit: 1,
     turnNumber: 1,
+    revealVoteSeconds: normalizeTeamBattleVoteSeconds(
+      options?.revealVoteSeconds,
+      DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+    ),
+    guessVoteSeconds: normalizeTeamBattleVoteSeconds(
+      options?.guessVoteSeconds,
+      DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+    ),
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
     previousTurnAction: null,
     pendingGuess: null,
-    teamScores: previousScores ?? { red: 0, blue: 0 },
+    teamScores: options?.previousScores ?? { red: 0, blue: 0 },
     message: "红队先手，请投票选择要打开的方块。",
-  };
+  }, "REVEAL_VOTE", options?.nowMs);
 }
 
 async function resetTeamBattleStateForQuestion(
@@ -512,7 +586,7 @@ async function resetTeamBattleStateForQuestion(
   const activeTeam = getAvailableTeamBattleStartingTeam(teams, questionIndex);
   const activeTeamName = getTeamName(activeTeam);
 
-  return {
+  return withFixedTeamBattleDeadline({
     teams,
     initialTeams,
     teamMemberNames: {
@@ -523,6 +597,8 @@ async function resetTeamBattleStateForQuestion(
     phase: "REVEAL_VOTE",
     revealLimit: 1,
     turnNumber: state.turnNumber + 1,
+    revealVoteSeconds: getTeamBattleVoteSeconds(state, "REVEAL_VOTE"),
+    guessVoteSeconds: getTeamBattleVoteSeconds(state, "GUESS_VOTE"),
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
@@ -532,7 +608,7 @@ async function resetTeamBattleStateForQuestion(
     message: newGuessers.length > 0
       ? `进入下一张图，新加入玩家已分配队伍，${activeTeamName}先手选择要打开的方块。`
       : `进入下一张图，${activeTeamName}先手选择要打开的方块。`,
-  };
+  }, "REVEAL_VOTE");
 }
 
 function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
@@ -567,24 +643,7 @@ function getPlayerTeam(state: TeamBattleState, playerId: string): TeamBattleTeam
   return null;
 }
 
-function isTeamVotingComplete(state: TeamBattleState, votes: Record<string, unknown>) {
-  const members = getTeamMembers(state, state.activeTeam);
-  return members.length > 0 && members.every((memberId) => Object.prototype.hasOwnProperty.call(votes, memberId));
-}
-
-function withVoteDeadlineIfComplete(state: TeamBattleState, votes: Record<string, unknown>) {
-  if (state.voteDeadlineAt || !isTeamVotingComplete(state, votes)) {
-    return state;
-  }
-
-  return {
-    ...state,
-    voteDeadlineAt: new Date(Date.now() + TEAM_BATTLE_VOTE_GRACE_SECONDS * 1000).toISOString(),
-    message: `${getTeamName(state.activeTeam)}所有成员都已提交，进入 ${TEAM_BATTLE_VOTE_GRACE_SECONDS} 秒自由修改时间。`,
-  };
-}
-
-function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: string): TeamBattleState {
+export function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: string, nowMs = Date.now()): TeamBattleState {
   const teams = {
     red: state.teams.red.filter((memberId) => memberId !== playerId),
     blue: state.teams.blue.filter((memberId) => memberId !== playerId),
@@ -609,7 +668,7 @@ function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: strin
   if (teams[nextState.activeTeam].length === 0) {
     const nextTeam = getOpposingTeam(nextState.activeTeam);
     if (teams[nextTeam].length > 0) {
-      nextState = {
+      const switchedState: TeamBattleState = {
         ...nextState,
         activeTeam: nextTeam,
         voteDeadlineAt: null,
@@ -618,13 +677,23 @@ function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: strin
         pendingGuess: null,
         message: `${getTeamName(getOpposingTeam(nextTeam))}没有在线队员，轮到${getTeamName(nextTeam)}。`,
       };
+      nextState = switchedState.phase === "REVEAL_VOTE" || switchedState.phase === "GUESS_VOTE"
+        ? withFixedTeamBattleDeadline(switchedState, switchedState.phase)
+        : switchedState.phase === "JUDGING"
+          ? withFixedTeamBattleDeadline(switchedState, "REVEAL_VOTE")
+          : switchedState;
+    } else {
+      nextState = {
+        ...nextState,
+        voteDeadlineAt: null,
+        revealVotes: {},
+        guessVotes: {},
+        pendingGuess: null,
+        message: "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。",
+      };
     }
   }
-
-  const currentVotes =
-    nextState.phase === "REVEAL_VOTE" ? nextState.revealVotes : nextState.phase === "GUESS_VOTE" ? nextState.guessVotes : null;
-
-  return currentVotes ? withVoteDeadlineIfComplete(nextState, currentVotes) : nextState;
+  return withShortenedTeamBattleDeadlineAfterAllSubmitted(nextState, nowMs);
 }
 
 async function removePlayerFromCurrentTeamBattle(gameSessionId: string, playerId: string) {
@@ -1445,7 +1514,6 @@ const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 50;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
-const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 const ROUND_DEADLINE_GRACE_MS = 3000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = BUZZER_JUDGING_STABILIZE_MS;
@@ -2539,6 +2607,8 @@ export async function updateRoomGameSettings(params: {
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
+  teamRevealVoteSeconds?: number;
+  teamGuessVoteSeconds?: number;
 }) {
   assertD1Env();
 
@@ -2549,6 +2619,14 @@ export async function updateRoomGameSettings(params: {
   const maxRevealRounds = normalizeMaxRevealRounds(params.maxRevealRounds);
   const roundSeconds = normalizeRoundSeconds(params.roundSeconds);
   const roundScores = normalizeRoundScores(params.roundScores, maxRevealRounds);
+  const teamRevealVoteSeconds = normalizeTeamBattleVoteSeconds(
+    params.teamRevealVoteSeconds,
+    DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  );
+  const teamGuessVoteSeconds = normalizeTeamBattleVoteSeconds(
+    params.teamGuessVoteSeconds,
+    DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  );
 
   const { data: currentRoom, error: currentRoomError } = await d1
     .from("rooms")
@@ -2572,6 +2650,8 @@ export async function updateRoomGameSettings(params: {
       lobby_max_reveal_rounds: maxRevealRounds,
       lobby_round_seconds: roundSeconds,
       lobby_round_scores: roundScores,
+      lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
+      lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
     })
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)
@@ -2638,6 +2718,8 @@ export async function startGameWithQuestionSet(params: {
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
+  teamRevealVoteSeconds?: number;
+  teamGuessVoteSeconds?: number;
   authorityVersion?: 2;
 }) {
   assertD1Env();
@@ -2732,6 +2814,14 @@ export async function startGameWithQuestionSet(params: {
 
   const maxRevealRounds = normalizeMaxRevealRounds(params.maxRevealRounds ?? room.lobby_max_reveal_rounds);
   const roundSeconds = normalizeRoundSeconds(params.roundSeconds ?? room.lobby_round_seconds);
+  const teamRevealVoteSeconds = normalizeTeamBattleVoteSeconds(
+    params.teamRevealVoteSeconds ?? room.lobby_team_reveal_vote_seconds,
+    DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  );
+  const teamGuessVoteSeconds = normalizeTeamBattleVoteSeconds(
+    params.teamGuessVoteSeconds ?? room.lobby_team_guess_vote_seconds,
+    DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  );
   const gameMode = isGameMode(params.gameMode) ? params.gameMode : room.lobby_game_mode ?? "ROUND_REVEAL";
   const { data: players, error: playersError } = await d1
     .from("players")
@@ -2755,7 +2845,12 @@ export async function startGameWithQuestionSet(params: {
     throw new Error("红蓝对抗模式至少需要 2 名答题者。");
   }
 
-  const teamBattleState = gameMode === "TEAM_BATTLE" ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId) : null;
+  const teamBattleState = gameMode === "TEAM_BATTLE"
+    ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId, {
+        revealVoteSeconds: teamRevealVoteSeconds,
+        guessVoteSeconds: teamGuessVoteSeconds,
+      })
+    : null;
   const roundScores = normalizeRoundScores(params.roundScores ?? room.lobby_round_scores, maxRevealRounds);
 
   const initialGameSessionValues = {
@@ -5237,15 +5332,12 @@ export async function submitTeamBattleRevealVote(params: {
     ...state.revealVotes,
     [params.playerId]: selectedBlocks,
   };
-  const nextState = withVoteDeadlineIfComplete(
-    {
-      ...state,
-      revealBlockCount,
-      revealVotes,
-      message: `${getTeamName(state.activeTeam)}正在投票选择 ${requiredCount} 个方块。`,
-    },
+  const nextState = withShortenedTeamBattleDeadlineAfterAllSubmitted({
+    ...state,
+    revealBlockCount,
     revealVotes,
-  );
+    message: `${getTeamName(state.activeTeam)}正在投票选择 ${requiredCount} 个方块。`,
+  }, getServerReceivedAtMs(params));
   const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
 
   if (error) {
@@ -5305,14 +5397,11 @@ export async function submitTeamBattleGuessVote(params: {
     ...state.guessVotes,
     [params.playerId]: vote,
   };
-  const nextState = withVoteDeadlineIfComplete(
-    {
-      ...state,
-      guessVotes,
-      message: `${getTeamName(state.activeTeam)}正在投票决定是否猜测。`,
-    },
+  const nextState = withShortenedTeamBattleDeadlineAfterAllSubmitted({
+    ...state,
     guessVotes,
-  );
+    message: `${getTeamName(state.activeTeam)}正在投票决定是否猜测。`,
+  }, getServerReceivedAtMs(params));
   const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
 
   if (error) {
@@ -5347,6 +5436,30 @@ export async function finalizeTeamBattleVote(params: {
 
   if ((state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") || !voteDeadlineReached(state)) {
     return { gameSession: session };
+  }
+
+  if (getTeamMembers(state, state.activeTeam).length === 0) {
+    const availableTeam = getOpposingTeam(state.activeTeam);
+    const nextState = getTeamMembers(state, availableTeam).length > 0
+      ? withFixedTeamBattleDeadline({
+          ...state,
+          activeTeam: availableTeam,
+          revealVotes: {},
+          guessVotes: {},
+          pendingGuess: null,
+          message: `${getTeamName(state.activeTeam)}没有在线队员，轮到${getTeamName(availableTeam)}。`,
+        }, state.phase)
+      : {
+          ...state,
+          voteDeadlineAt: null,
+          revealVotes: {},
+          guessVotes: {},
+          pendingGuess: null,
+          message: "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。",
+        };
+    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
+    if (error) throw new Error(error.message);
+    return { gameSession: toGameSession(updatedGameSession) };
   }
 
   if (state.phase === "REVEAL_VOTE") {
@@ -5390,7 +5503,7 @@ export async function finalizeTeamBattleVote(params: {
     }
 
     const nextBlocks = Array.from(new Set([...session.revealedBlocks, ...selectedBlocks])).sort((a, b) => a - b);
-    const nextState: TeamBattleState = {
+    const nextState = withFixedTeamBattleDeadline({
       ...state,
       phase: "GUESS_VOTE",
       voteDeadlineAt: null,
@@ -5398,7 +5511,7 @@ export async function finalizeTeamBattleVote(params: {
       guessVotes: {},
       pendingGuess: null,
       message: `${getTeamName(state.activeTeam)}打开了 ${selectedBlocks.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
-    };
+    }, "GUESS_VOTE");
     const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
       revealed_blocks: nextBlocks,
     });
@@ -5420,23 +5533,25 @@ export async function finalizeTeamBattleVote(params: {
     });
   }
 
-  if (optionCounts.size === 0) {
-    throw new Error("当前没有可结算的投票。");
-  }
-
-  const highest = Math.max(...Array.from(optionCounts.values()).map((option) => option.count));
-  const tiedOptions = Array.from(optionCounts.values()).filter((option) => option.count === highest);
+  const noVotes = optionCounts.size === 0;
+  const highest = noVotes ? 0 : Math.max(...Array.from(optionCounts.values()).map((option) => option.count));
+  const tiedOptions = noVotes
+    ? [{ count: 0, vote: { type: "skip" as const } }]
+    : Array.from(optionCounts.values()).filter((option) => option.count === highest);
   const winningOption = tiedOptions.length > 1 ? randomChoice(tiedOptions) : tiedOptions[0];
   const tieMessage =
-    tiedOptions.length > 1
+    noVotes
+      ? "由于无人提交，视为不猜。"
+      : tiedOptions.length > 1
       ? `由于最高票选项票数相同，随机选择了${winningOption.vote.type === "skip" ? "不猜" : `猜「${winningOption.vote.answerText}」`}。`
       : "";
 
   if (winningOption.vote.type === "skip") {
     const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
-    const nextTeam = getOpposingTeam(state.activeTeam);
+    const opposingTeam = getOpposingTeam(state.activeTeam);
+    const nextTeam = getTeamMembers(state, opposingTeam).length > 0 ? opposingTeam : state.activeTeam;
     const nextPhase = getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount) >= revealBlockCount ? "GUESS_VOTE" : "REVEAL_VOTE";
-    const nextState: TeamBattleState = {
+    const nextState = withFixedTeamBattleDeadline({
       ...state,
       activeTeam: nextTeam,
       phase: nextPhase,
@@ -5454,7 +5569,7 @@ export async function finalizeTeamBattleVote(params: {
         nextPhase === "REVEAL_VOTE"
           ? `${getTeamName(state.activeTeam)}选择不猜，轮到${getTeamName(nextTeam)}打开 1 个方块。${tieMessage}`
           : `${getTeamName(state.activeTeam)}选择不猜，图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。${tieMessage}`,
-    };
+    }, nextPhase);
     const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
       current_reveal_round: currentGameSession.current_reveal_round + 1,
     });
@@ -5527,7 +5642,7 @@ export async function judgeTeamBattleGuess(params: {
     }
 
     const nextPhase = getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount) >= revealBlockCount ? "GUESS_VOTE" : "REVEAL_VOTE";
-    const nextState: TeamBattleState = {
+    const nextState = withFixedTeamBattleDeadline({
       ...state,
       activeTeam: nextTeam,
       phase: nextPhase,
@@ -5546,7 +5661,7 @@ export async function judgeTeamBattleGuess(params: {
         nextPhase === "REVEAL_VOTE"
           ? `${getTeamName(state.pendingGuess.team)}猜错，${getTeamName(nextTeam)}本回合可以打开 2 个方块。`
           : `${getTeamName(state.pendingGuess.team)}猜错，图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。`,
-    };
+    }, nextPhase);
     const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
       current_reveal_round: currentGameSession.current_reveal_round + 1,
     });

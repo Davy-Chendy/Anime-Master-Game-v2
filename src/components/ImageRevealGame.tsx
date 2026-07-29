@@ -2375,7 +2375,7 @@ export function ImageRevealGame({
   const teamBattleActiveMemberSet = useMemo(() => new Set(teamBattleActiveMembers), [teamBattleActiveMembers]);
   const teamBattleCanAct = Boolean(!isPresenter && !isSpectator && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
   const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
-  const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
+  const canSeeTeamBattleCountdown = Boolean(teamBattleState);
   const teamBattleAvailableBlockCount = Math.max(0, visibleBlockCount - visibleRevealedBlockCount);
   const teamBattleRequiredBlockCount = Math.min(teamBattleState?.revealLimit ?? 1, teamBattleAvailableBlockCount);
   const teamBattleVoteSeconds = teamBattleState?.voteDeadlineAt
@@ -3169,9 +3169,9 @@ export function ImageRevealGame({
       return;
     }
 
-    setTeamBattleClockMs(Date.now());
+    setTeamBattleClockMs(getEstimatedServerNowMs());
     const timer = window.setInterval(() => {
-      setTeamBattleClockMs(Date.now());
+      setTeamBattleClockMs(getEstimatedServerNowMs());
     }, 250);
 
     return () => window.clearInterval(timer);

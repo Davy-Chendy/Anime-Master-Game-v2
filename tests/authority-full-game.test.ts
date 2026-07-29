@@ -135,7 +135,9 @@ function initialTeamState(players: Player[], questionIndex = 0): TeamBattleState
     revealBlockCount: 45,
     revealLimit: 1,
     turnNumber: 1,
-    voteDeadlineAt: null,
+    revealVoteSeconds: 15,
+    guessVoteSeconds: 50,
+    voteDeadlineAt: new Date(1_015_000).toISOString(),
     revealVotes: {},
     guessVotes: {},
     previousTurnAction: null,
@@ -567,16 +569,45 @@ test("BUZZER_RANKED completes across rounds with whole-question descending score
 async function teamVote(sim: FullGameSimulator, phase: "REVEAL_VOTE" | "GUESS_VOTE", value: number[] | { type: "skip" | "guess"; answerText?: string }) {
   const state = sim.session.teamBattleState!;
   assert.equal(state.phase, phase);
+  const fixedDeadline = state.voteDeadlineAt;
+  assert.ok(fixedDeadline, "team phase must start with a deadline");
   const members = state.teams[state.activeTeam];
-  for (const playerId of members) {
+  for (const [index, playerId] of members.entries()) {
     const outcome = phase === "REVEAL_VOTE"
       ? await sim.act(playerId, "submitTeamBattleRevealVote", { playerId, selectedBlocks: value, revealBlockCount: 45 })
       : await sim.act(playerId, "submitTeamBattleGuessVote", { playerId, vote: value });
     assert.equal(outcome.error, undefined);
+    if (index + 1 < members.length) {
+      assert.equal(sim.session.teamBattleState?.voteDeadlineAt, fixedDeadline, "partial submissions must not move the phase deadline");
+    } else {
+      assert.ok(new Date(sim.session.teamBattleState!.voteDeadlineAt!).getTime() < new Date(fixedDeadline!).getTime(), "all submissions should shorten a long deadline");
+    }
   }
   assert.ok(sim.session.teamBattleState?.voteDeadlineAt);
   await sim.runDeadline();
 }
+
+test("TEAM_BATTLE fixed timers settle zero and partial submissions without early completion", async () => {
+  const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 6, spectatorCount: 1, questionCount: 1 });
+  const initialDeadline = sim.session.teamBattleState?.voteDeadlineAt;
+  assert.equal(initialDeadline, new Date(1_015_000).toISOString());
+
+  await sim.runDeadline();
+  assert.equal(sim.session.revealedBlocks.length, 1, "zero reveal votes must randomly open one cell");
+  assert.equal(sim.session.teamBattleState?.phase, "GUESS_VOTE");
+  assert.equal(new Date(sim.session.teamBattleState!.voteDeadlineAt!).getTime(), new Date(initialDeadline!).getTime() + 50_000);
+
+  await sim.runDeadline();
+  assert.equal(sim.session.teamBattleState?.previousTurnAction?.type, "skip", "zero guess votes must skip");
+  assert.equal(sim.session.teamBattleState?.phase, "REVEAL_VOTE");
+  const partialDeadline = sim.session.teamBattleState!.voteDeadlineAt!;
+  const activeMember = sim.session.teamBattleState!.teams[sim.session.teamBattleState!.activeTeam][0];
+  const partial = await sim.act(activeMember, "submitTeamBattleRevealVote", { playerId: activeMember, selectedBlocks: [10], revealBlockCount: 45 });
+  assert.equal(partial.error, undefined);
+  assert.equal(sim.session.teamBattleState?.voteDeadlineAt, partialDeadline);
+  await sim.runDeadline();
+  assert.ok(sim.session.revealedBlocks.includes(10), "the only submitted reveal vote must win");
+});
 
 test("TEAM_BATTLE completes alternating-team votes, wrong guess, bonus reveal, and final scoring", async () => {
   const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 6, spectatorCount: 1, questionCount: 2 });

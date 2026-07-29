@@ -2,7 +2,7 @@ import { DurableSqlDatabase } from "./durableSqlDatabase";
 
 type Row = Record<string, unknown>;
 
-const AUTHORITY_SCHEMA_VERSION = 8;
+const AUTHORITY_SCHEMA_VERSION = 9;
 const AUTHORITY_VNEXT_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS authority_vnext_active_game (
     id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, game_id TEXT NOT NULL,
@@ -33,7 +33,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS mutation_journal (id INTEGER PRIMARY KEY CHECK(id=1), room_id TEXT NOT NULL, name TEXT NOT NULL, action_key TEXT, started_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mutation_journal_payload (id INTEGER PRIMARY KEY CHECK(id=1), payload_json TEXT NOT NULL)`,
   MUTATION_JOURNAL_VALIDATION_SCHEMA,
-  `CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, room_code TEXT NOT NULL UNIQUE, host_player_id TEXT NOT NULL, game_status TEXT NOT NULL, current_presenter_player_id TEXT, current_game_id TEXT, prepared_question_set_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL', lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3, lobby_round_seconds INTEGER NOT NULL DEFAULT 45, lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]')`,
+  `CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, room_code TEXT NOT NULL UNIQUE, host_player_id TEXT NOT NULL, game_status TEXT NOT NULL, current_presenter_player_id TEXT, current_game_id TEXT, prepared_question_set_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, lobby_game_mode TEXT NOT NULL DEFAULT 'ROUND_REVEAL', lobby_max_reveal_rounds INTEGER NOT NULL DEFAULT 3, lobby_round_seconds INTEGER NOT NULL DEFAULT 45, lobby_round_scores TEXT NOT NULL DEFAULT '[5,3,1]', lobby_team_reveal_vote_seconds INTEGER NOT NULL DEFAULT 15 CHECK (lobby_team_reveal_vote_seconds BETWEEN 1 AND 600), lobby_team_guess_vote_seconds INTEGER NOT NULL DEFAULT 50 CHECK (lobby_team_guess_vote_seconds BETWEEN 1 AND 600))`,
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, nickname TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), role TEXT NOT NULL DEFAULT 'PLAYER')`,
   `CREATE TABLE IF NOT EXISTS question_sets (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by_player_id TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'uploaded', creation_method TEXT CHECK (creation_method IS NULL OR creation_method IN ('player_manual','creation_tool_assisted')), is_public INTEGER NOT NULL DEFAULT 0, image_urls_text TEXT, image_count INTEGER NOT NULL DEFAULT 0, rating_avg REAL NOT NULL DEFAULT 0, rating_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by_nickname TEXT, play_count INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, question_set_id TEXT NOT NULL, image_url TEXT NOT NULL, order_index INTEGER NOT NULL, label_text TEXT, label_source TEXT, label_source_answer_id TEXT, label_updated_by_player_id TEXT, label_updated_at TEXT, created_at TEXT NOT NULL)`,
@@ -158,6 +158,36 @@ export class RoomGameAuthority {
         this.storage.sql.exec("UPDATE authority_schema SET version=8 WHERE id=1 AND version=7");
         const advanced = this.storage.sql.exec<{ version: number }>("SELECT version FROM authority_schema WHERE id=1").one();
         if (advanced.version !== 8) throw new Error("authority schema v8 version did not advance");
+      });
+      currentVersion = 8;
+    }
+    if (currentVersion < 9) {
+      this.storage.transactionSync(() => {
+        const existing = new Set(
+          this.storage.sql.exec<{ name: string }>("PRAGMA table_info(rooms)").toArray().map((row) => row.name),
+        );
+        if (!existing.has("lobby_team_reveal_vote_seconds")) {
+          this.storage.sql.exec(
+            "ALTER TABLE rooms ADD COLUMN lobby_team_reveal_vote_seconds INTEGER NOT NULL DEFAULT 15 CHECK (lobby_team_reveal_vote_seconds BETWEEN 1 AND 600)",
+          );
+        }
+        if (!existing.has("lobby_team_guess_vote_seconds")) {
+          this.storage.sql.exec(
+            "ALTER TABLE rooms ADD COLUMN lobby_team_guess_vote_seconds INTEGER NOT NULL DEFAULT 50 CHECK (lobby_team_guess_vote_seconds BETWEEN 1 AND 600)",
+          );
+        }
+        const migratedColumns = new Set(
+          this.storage.sql.exec<{ name: string }>("PRAGMA table_info(rooms)").toArray().map((row) => row.name),
+        );
+        if (
+          !migratedColumns.has("lobby_team_reveal_vote_seconds") ||
+          !migratedColumns.has("lobby_team_guess_vote_seconds")
+        ) {
+          throw new Error("authority schema v9 validation failed: rooms.team vote durations");
+        }
+        this.storage.sql.exec("UPDATE authority_schema SET version=9 WHERE id=1 AND version=8");
+        const advanced = this.storage.sql.exec<{ version: number }>("SELECT version FROM authority_schema WHERE id=1").one();
+        if (advanced.version !== 9) throw new Error("authority schema v9 version did not advance");
       });
     }
   }
