@@ -208,6 +208,8 @@ const SERVER_RECEIVED_AT_ACTION_NAMES = new Set([
   "submitForfeitAnswer",
   "cancelForfeitAnswer",
   "submitBuzzerAnswer",
+  "completeTeamBattleBlockSelection",
+  "advanceTeamBattleTurn",
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",
   "autoForfeitExpiredRound",
@@ -240,10 +242,12 @@ const MUTATION_REGISTRY = {
   setAnswerJudgements: { deadline: "authoritative-post-state" },
   markPendingRoundAnswersWrong: { deadline: "authoritative-post-state" },
   settleBuzzerRound: { deadline: "authoritative-post-state" },
+  completeTeamBattleBlockSelection: { deadline: "authoritative-post-state" },
   submitTeamBattleRevealVote: { deadline: "authoritative-post-state" },
   submitTeamBattleGuessVote: { deadline: "authoritative-post-state" },
   finalizeTeamBattleVote: { deadline: "authoritative-post-state" },
   judgeTeamBattleGuess: { deadline: "authoritative-post-state" },
+  advanceTeamBattleTurn: { deadline: "authoritative-post-state" },
   revealTeamBattleAnswer: { deadline: "authoritative-post-state" },
   gradeAnswersAndAdvance: { deadline: "authoritative-post-state" },
   advanceReviewedQuestion: { deadline: "authoritative-post-state" },
@@ -314,8 +318,10 @@ const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "confirmRevealBlocks",
   "autoForfeitExpiredRound",
   "settleBuzzerRound",
+  "completeTeamBattleBlockSelection",
   "finalizeTeamBattleVote",
   "judgeTeamBattleGuess",
+  "advanceTeamBattleTurn",
   "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance",
   "advanceReviewedQuestion",
@@ -348,8 +354,8 @@ const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
   "getAnswersForQuestion", "getAnswersForQuestionRound", "getAnswerForPlayerRound", "getBuzzerAnswersForQuestion",
   "getBuzzerAnswersForQuestionRound", "getBuzzerAnswerForPlayerRound", "getQuestionsByQuestionSetId",
   "confirmRevealBlocks", "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "submitBuzzerAnswer",
-  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "submitTeamBattleRevealVote",
-  "submitTeamBattleGuessVote", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "completeTeamBattleBlockSelection", "submitTeamBattleRevealVote",
+  "submitTeamBattleGuessVote", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "updateQuestionLabel", "skipCurrentQuestion",
   "endCurrentGameEarly", "returnRoomToLobby",
 ]);
@@ -379,11 +385,11 @@ const AUTHORITY_PROJECTION_BOUNDARY_NAMES = new Set<string>([
 const AUTHORITY_HANDOFF_NAMES = new Set(["returnRoomToLobby", "cancelCurrentRound", "dissolveRoom"]);
 const AUTHORITY_JOURNALED_NAMES = new Set([
   "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound",
-  "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer", "gradeAnswersAndAdvance",
+  "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer", "gradeAnswersAndAdvance",
   "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", "joinRoom", "leaveRoom", "kickPlayerFromRoom", "updatePlayerRole", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 const AUTHORITY_PERSIST_RESULT_NAMES = new Set([
-  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "revealTeamBattleAnswer",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 

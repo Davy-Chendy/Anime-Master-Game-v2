@@ -109,12 +109,14 @@
 - `setAnswerJudgements/markPendingWrong/judgeBuzzerAnswer` 可在答案继续到达时执行；按 actionId 去重并从结果重算累计分数。
 - `BUZZER_FIRST_CORRECT` 按 orderToken 判定；更早 pending 未判不得接受后项正确；首个正确强制 checkpoint 后进 REVIEW。
 - `BUZZER_RANKED` 按整道题跨轮的稳定接收顺序计分，本题初始 N 名有效玩家依次获 N..1；每次改判重建本题全部正确 result、buzzer 分值和累计分数；后续轮只统计仍在房的 PLAYER 且本题尚未答对者。
-- `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭方块，数量为 min(revealLimit,remaining)；阶段开始时立即产生 deadline（默认25秒）。activeTeam 全员首次提交完成且剩余超过5秒时，只允许把 deadline 单调缩短为5秒确认期；缩短后的 aggregate 必须先强制 checkpoint，再重排一次 Alarm，之后修改不得再次重排或延长。
+- `TEAM_BATTLE` 每题先进入无 deadline/Alarm 的 `PRESENTER_BLOCK`；仅出题人通过一次 `completeTeamBattleBlockSelection` 提交去重、排序并按实际 35/45 格范围校验的 `disabledBlocks`。该 mutation 强制 phase-boundary checkpoint 并一次广播全房，然后才启动首个投票 deadline；旧进行中状态缺少 `disabledBlocks` 时按空集合兼容，不改变其当前阶段。
+- `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭且未禁用的方块，数量为 min(revealLimit,remainingSelectable)；阶段开始时立即产生 deadline（默认25秒）。activeTeam 全员首次提交完成且剩余超过5秒时，只允许把 deadline 单调缩短为5秒确认期；缩短后的 aggregate 必须先强制 checkpoint，再重排一次 Alarm，之后修改不得再次重排或延长。
 - `TEAM_BATTLE GUESS_VOTE` 在阶段开始时立即产生 deadline（默认50秒），使用同一全员提交确认期规则；两种时长由房间设置限制在1～600秒，旧状态缺字段时使用默认值。
-- `finalizeTeamBattleVote` 在 deadline 后原子结算截止前已提交的票；部分提交只统计提交者，选格零票时所有未揭格为0票平票并随机开格，猜测零票时视为skip；其他最高票同票仍在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip 换队并推进回合。
-- TEAM_BATTLE 猜错换到有成员的对队、revealLimit=2、记录 previousTurnAction、turnNumber+1；全揭时直接 GUESS_VOTE。
+- `finalizeTeamBattleVote` 在 deadline 后原子结算截止前已提交的票；Room Alarm 是主触发源，Alarm 超过 deadline 仍未广播时仅出题人客户端在1秒后发送一次兜底意图，服务端必须再次校验出题人身份、题号、阶段、回合号和权威 deadline，普通玩家或旧阶段乱序消息不能触发。部分提交只统计提交者，选格零票时所有未揭且未禁用格为0票平票并随机开格，猜测零票时视为skip；其他最高票同票仍在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip→TURN_RESULT。
+- `TEAM_BATTLE TURN_RESULT` 保存 `previousTurnAction` 并向全房展示“不猜”或错误猜测，不设置 deadline/Alarm，且保持原 activeTeam、turnNumber、currentRevealRound 不变。仅出题人可调用 `advanceTeamBattleTurn(expectedTurnNumber)`；Room DO 在确认时选择仍有成员的下一队、将 turnNumber/currentRevealRound 各加1，并依据上一动作设置 revealLimit（skip=1、guess=2），然后才进入 REVEAL_VOTE；未禁用格全部揭开（包括全部格子被禁用）时直接进入 GUESS_VOTE。若 revealLimit=2 但只剩一个可选格，只要求并揭开这一格。
+- `advanceTeamBattleTurn` 对旧回合、重复和乱序请求返回当前公开状态而不推进；普通玩家无权调用。TURN_RESULT 在 Hibernation 恢复后继续等待确认，行动队员在此期间离房不会提前切队；确认时若只有原队仍有成员则原队继续，双方都无人则保留结算状态并要求出题人公布答案或结束游戏。
 - TEAM_BATTLE 猜对给胜队现有成员各1分并进 REVIEW；`revealTeamBattleAnswer` 无分进 REVIEW；两者均全揭并停 deadline。
-- TEAM_BATTLE 成员离开时移除 teams/votes/memberNames；activeTeam 空则切换可行动队、清 votes/pending，并为当前投票阶段重新开始完整 deadline；当前队仍有人且其余成员已全部提交时可按同一规则缩短为5秒，但不得延长。只有一队有成员时 skip 留在该队，双方都空时清除 deadline/Alarm，禁止形成无人自动循环。
+- TEAM_BATTLE 成员离开时移除 teams/votes/memberNames；除 TURN_RESULT 外，activeTeam 空则切换可行动队、清 votes/pending，并为当前投票阶段重新开始完整 deadline；当前队仍有人且其余成员已全部提交时可按同一规则缩短为5秒，但不得延长。TURN_RESULT 不因离房推进，双方都空时清除 deadline/Alarm，禁止形成无人自动循环。
 - `advanceReviewedQuestion` 仅允许完整图片且 `roundStartedAt=null` 的复盘阶段；`skipCurrentQuestion` 保持显式跳题语义；二者均归档并强制 checkpoint。
 - `updateQuestionLabel` 仅允许当前题复盘时首次填写；引用来源必须是本局当前题的普通或 buzzer answer，成功后广播公开 label delta。
 - 四模式均测试前置条件、aggregate 字段、delta、deadline、计分、放弃/批判/切题，以及 legacy/vNext 等价结果。
@@ -131,6 +133,8 @@
 ## 写入量和观测目标
 
 - 50人×30题：DO changed rows 目标150–300；普通答案/判定0行；每题边界约2行；rolling checkpoint约1行。
+- TEAM_BATTLE 禁选每题增加1个主持人 mutation 和1行 phase-boundary checkpoint；首个投票 Alarm 从题目建立时延后到禁选完成时设置，不增加每题 Alarm 总数。30题增加30个 mutation/30行，60局每天增加1,800个 mutation/1,800行。
+- TEAM_BATTLE 每个未结束本题的猜测阶段最多增加1个 `advanceTeamBattleTurn` 主持人 mutation、1次小广播和1行 phase-boundary checkpoint；不增加 Alarm、D1 或轮询，50名玩家不会放大。
 - 当前 legacy 普通答案约7–9行；判定为固定 journal/版本写加每目标2行及全员积分重算，最坏数十行。
 - 结构化日志只在 checkpoint/阶段边界输出，不记录答案正文：authorityVersion、restore ms、active/Attachment bytes。
 - 同时记录 checkpoint trigger/version/duration/changed rows、D1读写、广播次数/字节、ACK、duplicate、Alarm。

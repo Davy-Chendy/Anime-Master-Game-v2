@@ -131,13 +131,14 @@ function initialTeamState(players: Player[], questionIndex = 0): TeamBattleState
     initialTeams: structuredClone(teams),
     teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])),
     activeTeam: teams[preferred].length ? preferred : preferred === "red" ? "blue" : "red",
-    phase: "REVEAL_VOTE",
+    phase: "PRESENTER_BLOCK",
     revealBlockCount: 45,
+    disabledBlocks: [],
     revealLimit: 1,
     turnNumber: 1,
     revealVoteSeconds: 25,
     guessVoteSeconds: 50,
-    voteDeadlineAt: new Date(1_025_000).toISOString(),
+    voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
     previousTurnAction: null,
@@ -587,8 +588,36 @@ async function teamVote(sim: FullGameSimulator, phase: "REVEAL_VOTE" | "GUESS_VO
   await sim.runDeadline();
 }
 
+async function completeTeamBlockSelection(sim: FullGameSimulator, disabledBlocks: number[] = []) {
+  assert.equal(sim.session.teamBattleState?.phase, "PRESENTER_BLOCK");
+  assert.equal(sim.session.teamBattleState?.voteDeadlineAt, null);
+  const outcome = await sim.act("host", "completeTeamBattleBlockSelection", {
+    presenterPlayerId: "host",
+    disabledBlocks,
+    revealBlockCount: 45,
+  });
+  assert.equal(outcome.error, undefined);
+  assert.deepEqual(sim.session.teamBattleState?.disabledBlocks, disabledBlocks);
+  assert.ok(sim.session.teamBattleState?.voteDeadlineAt);
+}
+
+async function advanceTeamTurn(sim: FullGameSimulator) {
+  const state = sim.session.teamBattleState!;
+  assert.equal(state.phase, "TURN_RESULT");
+  assert.ok(state.previousTurnAction);
+  assert.equal(state.voteDeadlineAt, null);
+  assert.equal(sim.authority.getDeadline(), null);
+  const outcome = await sim.act("host", "advanceTeamBattleTurn", {
+    presenterPlayerId: "host",
+    expectedTurnNumber: state.turnNumber,
+  });
+  assert.equal(outcome.error, undefined);
+  assert.ok(sim.session.teamBattleState?.voteDeadlineAt);
+}
+
 test("TEAM_BATTLE fixed timers settle zero and partial submissions without early completion", async () => {
   const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 6, spectatorCount: 1, questionCount: 1 });
+  await completeTeamBlockSelection(sim);
   const initialDeadline = sim.session.teamBattleState?.voteDeadlineAt;
   assert.equal(initialDeadline, new Date(1_025_000).toISOString());
 
@@ -599,6 +628,8 @@ test("TEAM_BATTLE fixed timers settle zero and partial submissions without early
 
   await sim.runDeadline();
   assert.equal(sim.session.teamBattleState?.previousTurnAction?.type, "skip", "zero guess votes must skip");
+  assert.equal(sim.session.teamBattleState?.phase, "TURN_RESULT");
+  await advanceTeamTurn(sim);
   assert.equal(sim.session.teamBattleState?.phase, "REVEAL_VOTE");
   const partialDeadline = sim.session.teamBattleState!.voteDeadlineAt!;
   const activeMember = sim.session.teamBattleState!.teams[sim.session.teamBattleState!.activeTeam][0];
@@ -612,6 +643,7 @@ test("TEAM_BATTLE fixed timers settle zero and partial submissions without early
 test("TEAM_BATTLE completes alternating-team votes, wrong guess, bonus reveal, and final scoring", async () => {
   const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 6, spectatorCount: 1, questionCount: 2 });
 
+  await completeTeamBlockSelection(sim, [44]);
   await teamVote(sim, "REVEAL_VOTE", [0]);
   assert.equal(sim.session.teamBattleState?.phase, "GUESS_VOTE");
   await teamVote(sim, "GUESS_VOTE", { type: "guess", answerText: "red correct" });
@@ -622,13 +654,20 @@ test("TEAM_BATTLE completes alternating-team votes, wrong guess, bonus reveal, a
   await labelAndAdvance(sim, "team answer 1");
 
   assert.equal(sim.session.teamBattleState?.activeTeam, "blue");
+  await completeTeamBlockSelection(sim);
   await teamVote(sim, "REVEAL_VOTE", [1]);
   await teamVote(sim, "GUESS_VOTE", { type: "skip" });
+  assert.equal(sim.session.teamBattleState?.phase, "TURN_RESULT");
+  assert.equal(sim.session.teamBattleState?.activeTeam, "blue");
+  await advanceTeamTurn(sim);
   assert.equal(sim.session.teamBattleState?.activeTeam, "red");
   assert.equal(sim.session.currentRevealRound, 2);
   await teamVote(sim, "REVEAL_VOTE", [2]);
   await teamVote(sim, "GUESS_VOTE", { type: "guess", answerText: "red wrong" });
   await sim.act("host", "judgeTeamBattleGuess", { presenterPlayerId: "host", isCorrect: false });
+  assert.equal(sim.session.teamBattleState?.phase, "TURN_RESULT");
+  assert.equal(sim.session.teamBattleState?.previousTurnAction?.type, "guess");
+  await advanceTeamTurn(sim);
   assert.equal(sim.session.teamBattleState?.activeTeam, "blue");
   assert.equal(sim.session.teamBattleState?.revealLimit, 2);
   await teamVote(sim, "REVEAL_VOTE", [3, 4]);
@@ -666,7 +705,8 @@ function shuffled<T>(values: readonly T[], random: () => number) {
 
 function randomAvailableBlocks(sim: FullGameSimulator, count: number, random: () => number) {
   const revealed = new Set(sim.session.revealedBlocks);
-  return shuffled(ALL_BLOCKS.filter((block) => !revealed.has(block)), random).slice(0, count);
+  const disabled = new Set(sim.session.teamBattleState?.disabledBlocks ?? []);
+  return shuffled(ALL_BLOCKS.filter((block) => !revealed.has(block) && !disabled.has(block)), random).slice(0, count);
 }
 
 async function runRoundRevealRandomScenario(seed: number) {
@@ -845,6 +885,7 @@ async function runTeamRandomScenario(seed: number) {
   const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 8, spectatorCount: 2, questionCount: 2, random });
   try {
     for (let question = 0; question < 2; question += 1) {
+      await completeTeamBlockSelection(sim, [44]);
       const nonWinningTurns = 1 + Math.floor(random() * 3);
       for (let turn = 0; turn < nonWinningTurns; turn += 1) {
         await randomTeamVote(sim, random, "reveal");
@@ -855,6 +896,7 @@ async function runTeamRandomScenario(seed: number) {
           await randomTeamVote(sim, random, "guess", `wrong-${seed}-${question}-${turn}`);
           assert.equal((await sim.act("host", "judgeTeamBattleGuess", { presenterPlayerId: "host", isCorrect: false })).error, undefined);
         }
+        await advanceTeamTurn(sim);
       }
       await randomTeamVote(sim, random, "reveal");
       await randomTeamVote(sim, random, "guess", `correct-${seed}-${question}`);

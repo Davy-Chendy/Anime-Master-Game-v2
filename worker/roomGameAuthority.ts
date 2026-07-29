@@ -949,12 +949,12 @@ export class RoomGameAuthority {
       const validPlayerIds = new Set(this.storage.sql.exec<Row>("SELECT id FROM players WHERE room_id = ? AND role = 'PLAYER'", roomId).toArray().map((row) => String(row.id)));
       for (const session of this.storage.sql.exec<Row>("SELECT id,team_battle_state FROM game_sessions WHERE room_id = ? AND game_mode = 'TEAM_BATTLE' AND status = 'PLAYING'", roomId).toArray()) {
         if (typeof session.team_battle_state !== "string") continue;
-        const state = JSON.parse(session.team_battle_state) as { teams?: { red?: string[]; blue?: string[] }; revealVotes?: Record<string, unknown>; guessVotes?: Record<string, unknown>; teamMemberNames?: Record<string, string>; activeTeam?: "red" | "blue"; voteDeadlineAt?: string | null; pendingGuess?: unknown };
+        const state = JSON.parse(session.team_battle_state) as { teams?: { red?: string[]; blue?: string[] }; revealVotes?: Record<string, unknown>; guessVotes?: Record<string, unknown>; teamMemberNames?: Record<string, string>; activeTeam?: "red" | "blue"; phase?: string; voteDeadlineAt?: string | null; pendingGuess?: unknown };
         if (!state.teams) continue;
         state.teams.red = (state.teams.red ?? []).filter((id) => validPlayerIds.has(id));
         state.teams.blue = (state.teams.blue ?? []).filter((id) => validPlayerIds.has(id));
         for (const votes of [state.revealVotes, state.guessVotes, state.teamMemberNames]) if (votes) for (const id of Object.keys(votes)) if (!validPlayerIds.has(id)) delete votes[id];
-        if (state.activeTeam && (state.teams[state.activeTeam] ?? []).length === 0) {
+        if (state.phase !== "TURN_RESULT" && state.activeTeam && (state.teams[state.activeTeam] ?? []).length === 0) {
           state.activeTeam = state.activeTeam === "red" ? "blue" : "red";
           state.voteDeadlineAt = null;
           state.revealVotes = {};

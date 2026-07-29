@@ -36,6 +36,7 @@ const FINAL_PROJECTION_LIMIT_BYTES = 1024 * 1024;
 const FINAL_PROJECTION_RESERVE_BYTES = 400 * 1024;
 const GAME_RESULT_ARCHIVE_LIMIT_BYTES = 512 * 1024;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: 45 }, (_, index) => index);
 const QUESTION_SCOPED_MUTATION_NAMES = new Set([
   "confirmRevealBlocks",
@@ -49,10 +50,12 @@ const QUESTION_SCOPED_MUTATION_NAMES = new Set([
   "settleBuzzerRound",
   "autoForfeitExpiredRound",
   "gradeAnswersAndAdvance",
+  "completeTeamBattleBlockSelection",
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",
   "finalizeTeamBattleVote",
   "judgeTeamBattleGuess",
+  "advanceTeamBattleTurn",
   "revealTeamBattleAnswer",
   "advanceReviewedQuestion",
   "skipCurrentQuestion",
@@ -275,8 +278,21 @@ function teamName(team: TeamBattleTeam) {
   return team === "red" ? "红队" : "蓝队";
 }
 
-function visibleRevealCount(blocks: number[], blockCount: number) {
-  return new Set(blocks.filter((block) => block >= 0 && block < blockCount)).size;
+function normalizeRevealBlockCount(value: unknown) {
+  return Number(value) === PORTRAIT_REVEAL_BLOCK_COUNT ? PORTRAIT_REVEAL_BLOCK_COUNT : ALL_REVEALED_BLOCKS.length;
+}
+
+function normalizeDisabledBlocks(value: unknown, blockCount: number) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(value.filter((block): block is number => Number.isInteger(block) && block >= 0 && block < blockCount)),
+  ).sort((a, b) => a - b);
+}
+
+function selectableTeamBlocks(session: Pick<GameSession, "revealedBlocks">, state: TeamBattleState, blockCount: number) {
+  const revealed = new Set(session.revealedBlocks);
+  const disabled = new Set(normalizeDisabledBlocks(state.disabledBlocks, blockCount));
+  return Array.from({ length: blockCount }, (_, index) => index).filter((block) => !revealed.has(block) && !disabled.has(block));
 }
 
 function normalizeTeamVoteSeconds(value: unknown, fallback: number) {
@@ -317,7 +333,20 @@ function normalizeTeamSessionDeadline(session: GameSession, nowMs: number) {
     state.guessVoteSeconds = guessVoteSeconds;
     changed = true;
   }
-  if (state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") return { changed, deadline: null as VNextDeadline };
+  if (Array.isArray(state.disabledBlocks)) {
+    const disabledBlocks = normalizeDisabledBlocks(state.disabledBlocks, normalizeRevealBlockCount(state.revealBlockCount));
+    if (disabledBlocks.length !== state.disabledBlocks.length || disabledBlocks.some((block, index) => block !== state.disabledBlocks?.[index])) {
+      state.disabledBlocks = disabledBlocks;
+      changed = true;
+    }
+  }
+  if (state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") {
+    if (state.voteDeadlineAt != null) {
+      state.voteDeadlineAt = null;
+      changed = true;
+    }
+    return { changed, deadline: null as VNextDeadline };
+  }
   if (!getTeamMembers(state, "red").length && !getTeamMembers(state, "blue").length) {
     if (state.voteDeadlineAt != null) {
       state.voteDeadlineAt = null;
@@ -721,10 +750,12 @@ export class RoomAuthorityVNext {
       case "settleBuzzerRound": outcome = this.settleRound(action); break;
       case "autoForfeitExpiredRound": outcome = this.autoForfeit(action); break;
       case "gradeAnswersAndAdvance": outcome = this.gradeRoundReveal(action); break;
+      case "completeTeamBattleBlockSelection": outcome = this.completeTeamBlockSelection(action); break;
       case "submitTeamBattleRevealVote": outcome = this.teamRevealVote(action); break;
       case "submitTeamBattleGuessVote": outcome = this.teamGuessVote(action); break;
       case "finalizeTeamBattleVote": outcome = this.finalizeTeamVote(action); break;
       case "judgeTeamBattleGuess": outcome = this.judgeTeamGuess(action); break;
+      case "advanceTeamBattleTurn": outcome = this.advanceTeamTurn(action); break;
       case "revealTeamBattleAnswer": outcome = this.revealTeamAnswer(action); break;
       case "advanceReviewedQuestion": outcome = this.advanceQuestion(action, false); break;
       case "skipCurrentQuestion": outcome = this.advanceQuestion(action, true); break;
@@ -1010,13 +1041,49 @@ export class RoomAuthorityVNext {
     return { data, provisional: true, publicDeltas: [{ scope: "game", type: "round_snapshot", snapshot: this.getSnapshot() }], presenterDeltas: [], playerDeltas: [], forceCheckpoint: "phase-boundary", deadlineChanged: true };
   }
 
+  private completeTeamBlockSelection(action: VNextPendingMutation): VNextMutationOutcome {
+    const aggregate = this.requireActive();
+    const session = aggregate.gameSession!;
+    this.assertPresenter(action.actorId);
+    const state = session.teamBattleState;
+    if (!state || session.gameMode !== "TEAM_BATTLE") throw new TerminalMutationError("当前不是红蓝对抗模式。");
+    const blockCount = normalizeRevealBlockCount(action.payload.revealBlockCount ?? state.revealBlockCount);
+    const disabledBlocks = normalizeDisabledBlocks(action.payload.disabledBlocks, blockCount);
+    if (state.phase !== "PRESENTER_BLOCK") {
+      const isCompletedRetry =
+        Array.isArray(state.disabledBlocks) &&
+        normalizeRevealBlockCount(state.revealBlockCount) === blockCount &&
+        disabledBlocks.length === state.disabledBlocks.length &&
+        disabledBlocks.every((block, index) => block === state.disabledBlocks?.[index]);
+      if (isCompletedRetry) return this.publicSessionOutcome(session);
+      throw new TerminalMutationError("禁用已确认，不能再次修改。");
+    }
+    state.revealBlockCount = blockCount;
+    state.disabledBlocks = disabledBlocks;
+    state.revealVotes = {};
+    state.guessVotes = {};
+    state.pendingGuess = null;
+    const selectable = selectableTeamBlocks(session, state, blockCount);
+    const nextPhase = selectable.length > 0 ? "REVEAL_VOTE" : "GUESS_VOTE";
+    state.message = selectable.length > 0
+      ? disabledBlocks.length > 0
+        ? `已禁用 ${disabledBlocks.length} 格 · ${teamName(state.activeTeam)}选格`
+        : `未禁用格子 · ${teamName(state.activeTeam)}选格`
+      : `全部格子已禁用 · ${teamName(state.activeTeam)}猜测`;
+    this.startTeamVoteDeadline(state, nextPhase, action.serverReceivedAtMs);
+    if (!getTeamMembers(state, "red").length && !getTeamMembers(state, "blue").length) {
+      state.message = "禁用完成 · 等待出题人公布答案";
+    }
+    return this.publicSessionOutcome(session, "phase-boundary", true);
+  }
+
   private teamRevealVote(action: VNextPendingMutation): VNextMutationOutcome {
     const aggregate = this.requireActive();
     const session = aggregate.gameSession!;
     this.assertTeamVoter(action.actorId, "REVEAL_VOTE", action.serverReceivedAtMs);
     const state = session.teamBattleState!;
-    const blockCount = getInteger(action.payload.revealBlockCount) ?? state.revealBlockCount ?? 45;
-    const remaining = Array.from({ length: blockCount }, (_, index) => index).filter((block) => !session.revealedBlocks.includes(block));
+    const blockCount = normalizeRevealBlockCount(action.payload.revealBlockCount ?? state.revealBlockCount);
+    const remaining = selectableTeamBlocks(session, state, blockCount);
     const required = Math.min(state.revealLimit, remaining.length);
     const selected = Array.isArray(action.payload.selectedBlocks) ? Array.from(new Set(action.payload.selectedBlocks.filter((block): block is number => typeof block === "number" && remaining.includes(block)))).sort((a, b) => a - b) : [];
     if (selected.length !== required) throw new TerminalMutationError("本轮选择的方块数量不正确。");
@@ -1042,6 +1109,17 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActive();
     const session = aggregate.gameSession!;
     const state = session.teamBattleState;
+    if (action.actorId !== "__server__") {
+      this.assertPresenter(action.actorId);
+      if (
+        !state ||
+        action.payload.expectedPhase !== state.phase ||
+        getInteger(action.payload.expectedTurnNumber) !== state.turnNumber ||
+        getString(action.payload.expectedVoteDeadlineAt) !== state.voteDeadlineAt
+      ) {
+        return this.publicSessionOutcome(session);
+      }
+    }
     if (!state || !state.voteDeadlineAt || action.serverReceivedAtMs < new Date(state.voteDeadlineAt).getTime()) return this.publicSessionOutcome(session);
     if (!getTeamMembers(state, state.activeTeam).length) {
       const availableTeam = oppositeTeam(state.activeTeam);
@@ -1060,16 +1138,15 @@ export class RoomAuthorityVNext {
       return this.publicSessionOutcome(session, "phase-boundary", true);
     }
     if (state.phase === "REVEAL_VOTE") {
-      const blockCount = state.revealBlockCount ?? 45;
+      const blockCount = normalizeRevealBlockCount(state.revealBlockCount);
+      const selectable = selectableTeamBlocks(session, state, blockCount);
       const counts = new Map(
-        Array.from({ length: blockCount }, (_, block) => block)
-          .filter((block) => !session.revealedBlocks.includes(block))
-          .map((block) => [block, 0]),
+        selectable.map((block) => [block, 0]),
       );
       for (const blocks of Object.values(state.revealVotes)) {
         for (const block of blocks) if (counts.has(block)) counts.set(block, (counts.get(block) ?? 0) + 1);
       }
-      const count = Math.min(state.revealLimit, blockCount - visibleRevealCount(session.revealedBlocks, blockCount));
+      const count = Math.min(state.revealLimit, selectable.length);
       const remaining = [...counts.keys()];
       const selected: number[] = [];
       let tieMessage = "";
@@ -1120,26 +1197,12 @@ export class RoomAuthorityVNext {
         ? `由于最高票选项票数相同，随机选择了${winner.type === "skip" ? "不猜" : `猜「${winner.answerText}」`}。`
         : "";
     if (winner.type === "skip") {
-      const previous = state.activeTeam;
-      const opposing = oppositeTeam(previous);
-      const nextTeam = getTeamMembers(state, opposing).length ? opposing : getTeamMembers(state, previous).length ? previous : null;
-      if (nextTeam) state.activeTeam = nextTeam;
-      state.phase = visibleRevealCount(session.revealedBlocks, state.revealBlockCount ?? 45) >= (state.revealBlockCount ?? 45) ? "GUESS_VOTE" : "REVEAL_VOTE";
-      state.revealLimit = 1;
-      state.turnNumber += 1;
-      session.currentRevealRound += 1;
-      state.previousTurnAction = { team: previous, type: "skip" };
+      state.phase = "TURN_RESULT";
+      state.previousTurnAction = { team: state.activeTeam, type: "skip" };
       state.pendingGuess = null;
-      state.message = nextTeam
-        ? state.phase === "REVEAL_VOTE"
-          ? `${teamName(previous)}选择不猜，轮到${teamName(nextTeam)}打开 1 个方块。${tieMessage}`
-          : `${teamName(previous)}选择不猜，图片已全部打开，轮到${teamName(nextTeam)}决定是否猜测。${tieMessage}`
-        : "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。";
-      if (nextTeam) this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
-      else {
-        state.voteDeadlineAt = null;
-        aggregate.deadline = null;
-      }
+      state.message = `${teamName(state.activeTeam)}选择不猜。${tieMessage}`;
+      state.voteDeadlineAt = null;
+      aggregate.deadline = null;
     } else {
       state.phase = "JUDGING";
       state.pendingGuess = { team: state.activeTeam, answerText: winner.answerText?.trim() ?? "" };
@@ -1174,15 +1237,11 @@ export class RoomAuthorityVNext {
       session.roundStartedAt = null;
       this.recalculateScores();
     } else {
-      const next = getTeamMembers(state, oppositeTeam(guessedBy)).length ? oppositeTeam(guessedBy) : guessedBy;
-      if (!getTeamMembers(state, next).length) throw new TerminalMutationError("没有可继续行动的队伍。");
-      state.activeTeam = next;
-      state.phase = visibleRevealCount(session.revealedBlocks, state.revealBlockCount ?? 45) >= (state.revealBlockCount ?? 45) ? "GUESS_VOTE" : "REVEAL_VOTE";
-      state.revealLimit = 2;
-      state.turnNumber += 1;
+      state.phase = "TURN_RESULT";
       state.previousTurnAction = { team: guessedBy, type: "guess", answerText: state.pendingGuess.answerText };
-      session.currentRevealRound += 1;
-      this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
+      state.message = `${teamName(guessedBy)}猜测「${state.pendingGuess.answerText}」，猜测错误。`;
+      state.voteDeadlineAt = null;
+      aggregate.deadline = null;
     }
     state.pendingGuess = null;
     if (state.phase === "REVIEW") state.voteDeadlineAt = null;
@@ -1198,6 +1257,45 @@ export class RoomAuthorityVNext {
       }));
     }
     return outcome;
+  }
+
+  private advanceTeamTurn(action: VNextPendingMutation): VNextMutationOutcome {
+    const aggregate = this.requireActive();
+    const session = aggregate.gameSession!;
+    this.assertPresenter(action.actorId);
+    const state = session.teamBattleState;
+    if (
+      !state ||
+      state.phase !== "TURN_RESULT" ||
+      !state.previousTurnAction ||
+      getInteger(action.payload.expectedTurnNumber) !== state.turnNumber
+    ) {
+      return this.publicSessionOutcome(session);
+    }
+
+    const previous = state.previousTurnAction.team;
+    const opposing = oppositeTeam(previous);
+    const nextTeam = getTeamMembers(state, opposing).length
+      ? opposing
+      : getTeamMembers(state, previous).length
+        ? previous
+        : null;
+    if (!nextTeam) throw new TerminalMutationError("没有可继续行动的队伍，请公布答案或结束游戏。");
+
+    state.activeTeam = nextTeam;
+    const blockCount = normalizeRevealBlockCount(state.revealBlockCount);
+    const nextPhase = selectableTeamBlocks(session, state, blockCount).length === 0 ? "GUESS_VOTE" : "REVEAL_VOTE";
+    state.revealLimit = state.previousTurnAction.type === "guess" ? 2 : 1;
+    state.turnNumber += 1;
+    session.currentRevealRound += 1;
+    state.revealVotes = {};
+    state.guessVotes = {};
+    state.pendingGuess = null;
+    state.message = nextPhase === "REVEAL_VOTE"
+      ? `${teamName(nextTeam)}本回合可以打开 ${state.revealLimit} 个方块。`
+      : `图片已全部打开，轮到${teamName(nextTeam)}决定是否猜测。`;
+    this.startTeamVoteDeadline(state, nextPhase, action.serverReceivedAtMs);
+    return this.publicSessionOutcome(session, "phase-boundary", true);
   }
 
   private revealTeamAnswer(action: VNextPendingMutation): VNextMutationOutcome {
@@ -1232,7 +1330,7 @@ export class RoomAuthorityVNext {
     session.eligiblePlayerIds = this.eligiblePlayers(aggregate.players, session.presenterPlayerId);
     if (session.gameMode === "TEAM_BATTLE") {
       session.teamBattleState = this.resetTeamState(session.teamBattleState, aggregate.players, session.presenterPlayerId, session.currentQuestionIndex);
-      this.startTeamVoteDeadline(session.teamBattleState, "REVEAL_VOTE", action.serverReceivedAtMs);
+      aggregate.deadline = null;
     } else {
       aggregate.deadline = null;
     }
@@ -1364,7 +1462,11 @@ export class RoomAuthorityVNext {
       delete state.revealVotes[targetPlayerId];
       delete state.guessVotes[targetPlayerId];
       if (state.teamMemberNames) delete state.teamMemberNames[targetPlayerId];
-      if (!getTeamMembers(state, state.activeTeam).length && getTeamMembers(state, oppositeTeam(state.activeTeam)).length) {
+      if (
+        state.phase !== "TURN_RESULT" &&
+        !getTeamMembers(state, state.activeTeam).length &&
+        getTeamMembers(state, oppositeTeam(state.activeTeam)).length
+      ) {
         state.activeTeam = oppositeTeam(state.activeTeam);
         state.revealVotes = {};
         state.guessVotes = {};
@@ -1373,12 +1475,16 @@ export class RoomAuthorityVNext {
           this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
           teamDeadlineChanged = true;
         } else if (state.phase === "JUDGING" && aggregate.gameSession) {
-          const blockCount = state.revealBlockCount ?? 45;
-          const nextPhase = visibleRevealCount(aggregate.gameSession.revealedBlocks, blockCount) >= blockCount
+          const blockCount = normalizeRevealBlockCount(state.revealBlockCount);
+          const nextPhase = selectableTeamBlocks(aggregate.gameSession, state, blockCount).length === 0
             ? "GUESS_VOTE"
             : "REVEAL_VOTE";
           this.startTeamVoteDeadline(state, nextPhase, action.serverReceivedAtMs);
           teamDeadlineChanged = true;
+        } else if (state.phase === "PRESENTER_BLOCK") {
+          state.voteDeadlineAt = null;
+          aggregate.deadline = null;
+          state.message = "等待出题人禁用格子";
         } else {
           state.voteDeadlineAt = null;
           aggregate.deadline = null;
@@ -1989,7 +2095,27 @@ export class RoomAuthorityVNext {
     }
     const teams = { red: initial.red.filter((id) => valid.has(id)), blue: initial.blue.filter((id) => valid.has(id)) };
     const activeTeam: TeamBattleTeam = questionIndex % 2 === 0 ? "red" : "blue";
-    return { teams, initialTeams: initial, teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])), activeTeam: teams[activeTeam].length ? activeTeam : oppositeTeam(activeTeam), phase: "REVEAL_VOTE", revealBlockCount: previous?.revealBlockCount ?? 45, revealLimit: 1, turnNumber: 1, revealVoteSeconds: normalizeTeamVoteSeconds(previous?.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS), guessVoteSeconds: normalizeTeamVoteSeconds(previous?.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS), voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: previous?.teamScores ?? { red: 0, blue: 0 } };
+    const nextActiveTeam = teams[activeTeam].length ? activeTeam : oppositeTeam(activeTeam);
+    return {
+      teams,
+      initialTeams: initial,
+      teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])),
+      activeTeam: nextActiveTeam,
+      phase: "PRESENTER_BLOCK",
+      revealBlockCount: previous?.revealBlockCount ?? 45,
+      disabledBlocks: [],
+      revealLimit: 1,
+      turnNumber: 1,
+      revealVoteSeconds: normalizeTeamVoteSeconds(previous?.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS),
+      guessVoteSeconds: normalizeTeamVoteSeconds(previous?.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS),
+      voteDeadlineAt: null,
+      revealVotes: {},
+      guessVotes: {},
+      previousTurnAction: null,
+      pendingGuess: null,
+      teamScores: previous?.teamScores ?? { red: 0, blue: 0 },
+      message: "等待出题人禁用格子",
+    };
   }
 
   private eligiblePlayers(players: Player[], presenterId: string) {
@@ -2200,8 +2326,10 @@ export class RoomAuthorityVNext {
         break;
       case "settleBuzzerRound":
       case "autoForfeitExpiredRound":
+      case "completeTeamBattleBlockSelection":
       case "finalizeTeamBattleVote":
       case "judgeTeamBattleGuess":
+      case "advanceTeamBattleTurn":
       case "revealTeamBattleAnswer":
         data = { gameSession: clone(session) };
         break;

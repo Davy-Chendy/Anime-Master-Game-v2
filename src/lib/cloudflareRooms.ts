@@ -374,17 +374,33 @@ export const markPendingRoundAnswersWrong = (params: {
 export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
 
+export const completeTeamBattleBlockSelection = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  disabledBlocks: number[];
+  revealBlockCount?: number;
+}) => rpc<{ gameSession: GameSession }>("completeTeamBattleBlockSelection", params);
+
 export const submitTeamBattleRevealVote = (params: { gameSessionId: string; playerId: string; selectedBlocks: number[]; revealBlockCount?: number }) =>
   rpc<GameSession>("submitTeamBattleRevealVote", params);
 
 export const submitTeamBattleGuessVote = (params: { gameSessionId: string; playerId: string; vote: TeamBattleGuessVote }) =>
   rpc<GameSession>("submitTeamBattleGuessVote", params);
 
-export const finalizeTeamBattleVote = (params: { gameSessionId: string }) =>
+export const finalizeTeamBattleVote = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedPhase: "REVEAL_VOTE" | "GUESS_VOTE";
+  expectedTurnNumber: number;
+  expectedVoteDeadlineAt: string;
+}) =>
   rpc<{ gameSession: GameSession }>("finalizeTeamBattleVote", params);
 
 export const judgeTeamBattleGuess = (params: { gameSessionId: string; presenterPlayerId: string; isCorrect: boolean }) =>
   rpc<{ gameSession: GameSession }>("judgeTeamBattleGuess", params);
+
+export const advanceTeamBattleTurn = (params: { gameSessionId: string; presenterPlayerId: string; expectedTurnNumber: number }) =>
+  rpc<{ gameSession: GameSession }>("advanceTeamBattleTurn", params);
 
 export const revealTeamBattleAnswer = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("revealTeamBattleAnswer", params);

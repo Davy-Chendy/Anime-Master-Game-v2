@@ -30,23 +30,43 @@ const vnextProjectionRows = 2;
 const vnextRows = vnextCheckpointRows + vnextBoundaryRows + vnextProjectionRows;
 
 // TEAM_BATTLE timer example used by the rules/budget review: one question,
-// six active team members, ten reveal phases and ten guess phases. A phase-end
-// deadline checkpoint persists one active_game row. With one submission per
-// member per phase, each phase stays below the 20-action rolling threshold. If
-// all members finish early, the early-completion checkpoint absorbs those dirty
-// actions before the later deadline checkpoint. D1 remains untouched until the
-// final projection.
+// six active team members, one presenter block-selection mutation, ten reveal
+// phases and ten guess phases. Completing block selection persists one
+// active_game row but only defers the first reveal Alarm; it does not add an
+// Alarm. A phase-end deadline checkpoint also persists one active_game row.
+// With one submission per member per phase, each phase stays below the 20-action
+// rolling threshold. If all members finish early, the early-completion checkpoint
+// absorbs those dirty actions before the later deadline checkpoint. D1 remains
+// untouched until the final projection.
 const teamExample = {
   activeMembers: 6,
+  presenterBlockMutations: 1,
   revealPhases: 10,
   guessPhases: 10,
 };
 const teamExamplePhases = teamExample.revealPhases + teamExample.guessPhases;
 const teamExampleVoteMutations = teamExample.activeMembers * teamExamplePhases;
-const teamExampleDeadlineCheckpointRows = teamExamplePhases;
+const teamExamplePresenterFallbackMutationsAtMost = teamExamplePhases;
+const teamExampleTurnResultConfirmationMutationsAtMost = teamExample.guessPhases;
+const teamExampleBlockCheckpointRows = teamExample.presenterBlockMutations;
+const teamExampleDeadlineCheckpointRows = teamExamplePhases + teamExampleBlockCheckpointRows;
+const teamExampleTurnResultConfirmationCheckpointRowsAtMost = teamExample.guessPhases;
 const teamExampleEarlyCompletionCheckpointRows = teamExamplePhases;
 const teamExampleExtraRollingRows = Math.floor(teamExample.activeMembers / checkpointEvery) * teamExamplePhases;
 const teamExampleAlarmSchedules = teamExamplePhases * 2;
+const teamBlockSelectionBudget = {
+  perGameMutations: questions,
+  perGameCheckpointRows: questions,
+  perDayMutationsAt60Games: questions * 60,
+  perDayCheckpointRowsAt60Games: questions * 60,
+};
+const teamTurnResultBudget = {
+  confirmationsPerQuestionAtMost: teamExample.guessPhases,
+  perGameMutationsAtMost: questions * teamExample.guessPhases,
+  perGameCheckpointRowsAtMost: questions * teamExample.guessPhases,
+  perDayMutationsAt60GamesAtMost: questions * teamExample.guessPhases * 60,
+  perDayCheckpointRowsAt60GamesAtMost: questions * teamExample.guessPhases * 60,
+};
 
 // D1 billing is based on rows read/written, not SQL statement count. The new
 // result archive is one aggregate row. Roster reconciliation writes nothing
@@ -68,6 +88,26 @@ assert.equal(judgements, players * questions);
 if (players === 50 && questions === 30) {
   assert.ok(vnextRows >= 150 && vnextRows <= 300, `vNext write target missed: ${vnextRows}`);
   assert.ok(d1EstimatedRows.upper <= 500, `D1 final projection target missed: ${d1EstimatedRows.upper}`);
+  assert.deepEqual(teamBlockSelectionBudget, {
+    perGameMutations: 30,
+    perGameCheckpointRows: 30,
+    perDayMutationsAt60Games: 1_800,
+    perDayCheckpointRowsAt60Games: 1_800,
+  });
+  assert.deepEqual(teamTurnResultBudget, {
+    confirmationsPerQuestionAtMost: 10,
+    perGameMutationsAtMost: 300,
+    perGameCheckpointRowsAtMost: 300,
+    perDayMutationsAt60GamesAtMost: 18_000,
+    perDayCheckpointRowsAt60GamesAtMost: 18_000,
+  });
+  assert.equal(
+    teamExampleVoteMutations
+      + teamExample.presenterBlockMutations
+      + teamExamplePresenterFallbackMutationsAtMost
+      + teamExampleTurnResultConfirmationMutationsAtMost,
+    151,
+  );
 }
 
 console.log(JSON.stringify({
@@ -85,9 +125,20 @@ console.log(JSON.stringify({
     questionBoundaryRows: vnextBoundaryRows,
     finalProjectionRows: vnextProjectionRows,
     estimatedRowsWritten: vnextRows,
+    teamBlockSelectionBudget,
+    teamTurnResultBudget,
     teamTimerExample: {
       ...teamExample,
       voteMutations: teamExampleVoteMutations,
+      presenterDeadlineFallbackMutationsAtMost: teamExamplePresenterFallbackMutationsAtMost,
+      turnResultConfirmationMutationsAtMost: teamExampleTurnResultConfirmationMutationsAtMost,
+      totalMutationsAtMost:
+        teamExampleVoteMutations
+        + teamExample.presenterBlockMutations
+        + teamExamplePresenterFallbackMutationsAtMost
+        + teamExampleTurnResultConfirmationMutationsAtMost,
+      blockSelectionCheckpointRows: teamExampleBlockCheckpointRows,
+      turnResultConfirmationCheckpointRowsAtMost: teamExampleTurnResultConfirmationCheckpointRowsAtMost,
       alarmSchedulesAtMostWhenEveryPhaseCompletesEarly: teamExampleAlarmSchedules,
       alarmExecutions: teamExamplePhases,
       deadlineCheckpointRows: teamExampleDeadlineCheckpointRows,

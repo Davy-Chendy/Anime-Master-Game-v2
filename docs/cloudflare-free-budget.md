@@ -92,7 +92,13 @@ WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接
 
 团队倒计时上线后应按单局记录并复核：投票 mutation 数、DO 请求折算、Alarm 设置/执行/重试次数、checkpoint 次数及 changed rows、最大 active game/Attachment 体积、广播次数/字节和最终 D1 写入。若一局开销明显高于预算基线，再决定是否启用上述提交合并，或增加最大团队回合数等游戏规则限制。
 
-当前计量模型为：每个投票阶段设置并执行一个 Alarm；若全员提前提交且剩余超过5秒，该阶段先增加一次1行 active-game checkpoint，再最多额外 `setAlarm()` 一次，后续修改不再重排。deadline 阶段边界仍强制 checkpoint，游戏中 D1 写入保持0。若一道题发生 R 次选格和 G 次猜测，则 Alarm 执行与 deadline checkpoint 均约为 `R + G` 次；全员均提前完成时，Alarm 设置和阶段 checkpoint 均最多为 `2 × (R + G)` 次。例如10次选格+10次猜测约20次 Alarm 执行、最多40次 Alarm 设置和40次1行 checkpoint。玩家投票 mutation 仍可能达到“提交人数×修改次数”；每个阶段内每累计20个 dirty action 会多一次1行 rolling checkpoint，已被提前完成 checkpoint 持久化的 action 不会再次累计到 deadline。以每阶段6人各提交一次为例，不会额外触发 rolling checkpoint；频繁修改才会增加。这正是上述后续优化的观测重点。
+当前计量模型为：每题禁选只在出题人确认时产生1个 WebSocket mutation、1次小状态广播和1行 phase-boundary checkpoint，不设置独立 Alarm，也不写 D1。首个选格 Alarm 从题目建立时延后到禁选完成时设置，因此不增加投票阶段的 Alarm 总数。每个投票阶段设置并执行一个 Alarm；若全员提前提交且剩余超过5秒，该阶段先增加一次1行 active-game checkpoint，再最多额外 `setAlarm()` 一次，后续修改不再重排。deadline 阶段边界仍强制 checkpoint，游戏中 D1 写入保持0。若一道题发生 R 次选格和 G 次猜测，其中 C 次猜测以“不猜”或猜错继续游戏（`C ≤ G`），则 Alarm 执行与 deadline checkpoint 均约为 `R + G` 次，另有1次禁选和 C 次出题人回合确认 mutation/checkpoint；全员均提前完成时，Alarm 设置最多为 `2 × (R + G)`，阶段 checkpoint 最多为 `1 + 2 × (R + G) + C`。例如10次选格+10次猜测且10次都继续游戏，约20次 Alarm 执行、最多40次 Alarm 设置和51次1行 checkpoint。回合结算本身不设置 Alarm；仅出题人的 `advanceTeamBattleTurn` 产生1次小广播，50名玩家不会形成入站请求放大。玩家投票 mutation 仍可能达到“提交人数×修改次数”；每个阶段内每累计20个 dirty action 会多一次1行 rolling checkpoint，已被提前完成 checkpoint 持久化的 action 不会再次累计到 deadline。以每阶段6人各提交一次为例，不会额外触发 rolling checkpoint；频繁修改才会增加。这正是上述后续优化的观测重点。
+
+为吸收本地运行时及平台可能出现的 Alarm 短暂触发抖动，每个团队投票阶段在 deadline 过去1秒仍未收到阶段广播时，只允许出题人客户端发送一次 `finalizeTeamBattleVote` 兜底 mutation；普通玩家不会共同触发，Room DO 仍复核出题人身份和权威 deadline。兜底成功时它替代本阶段尚未执行的 Alarm 完成同一次 phase-boundary checkpoint，并把物理 Alarm 重排到下一阶段，因此不增加 D1、阶段 checkpoint 或 Alarm 执行；最坏只增加 `R + G` 条入站 WebSocket 消息。按一题10次选格+10次猜测为20条，50人不会放大；若极端按30题均达到该回合数，则每局最多600条、每天60局36,000条，按20:1折算约1,800个 DO 请求，占日硬额度1.8%。Alarm 在1秒内正常执行时兜底不会发送。
+
+按团队模式50人×30题估算，禁选阶段额外产生30个入站 mutation、30次小广播和30行 DO SQLite checkpoint，WebSocket 入站按20:1折算约1.5个 DO 请求；不增加 D1、图片转换或 Alarm 执行。每天60局增加1,800个入站 mutation、1,800次小广播和1,800行 DO SQLite，折算约90个 DO 请求，DO SQLite 日硬额度占比1.8%。重连只恢复已 checkpoint 的禁选结果；Outbox 重放由 actionId/clientSeq 幂等去重，不会重复应用或新增无界写入。
+
+回合结算确认最多等于猜测阶段数量。按一题10次猜测的示例，每题最多增加10个出题人 mutation、10次小广播和10行 DO SQLite checkpoint；不增加 Alarm、D1、图片处理或客户端轮询。极端按30题都达到10次继续游戏计算，每局最多增加300个 mutation/300行，60局每天增加18,000个 mutation/18,000行；WebSocket 入站按20:1约折算900个 DO 请求/天，DO SQLite 日硬额度占比18%。该成本与50人房间人数无关，不产生全员确认或补拉风暴。
 
 ## 手动分队计量
 

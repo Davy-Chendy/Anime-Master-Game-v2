@@ -356,7 +356,13 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
   const teamMemberNames = normalizeTeamMemberNames(record.teamMemberNames);
   const activeTeam = record.activeTeam === "blue" ? "blue" : "red";
   const phase =
-    record.phase === "GUESS_VOTE" || record.phase === "JUDGING" || record.phase === "REVIEW" ? record.phase : "REVEAL_VOTE";
+    record.phase === "PRESENTER_BLOCK" ||
+    record.phase === "GUESS_VOTE" ||
+    record.phase === "JUDGING" ||
+    record.phase === "TURN_RESULT" ||
+    record.phase === "REVIEW"
+      ? record.phase
+      : "REVEAL_VOTE";
   const teamScoresRecord = record.teamScores && typeof record.teamScores === "object" ? record.teamScores : null;
 
   return {
@@ -372,6 +378,9 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     activeTeam,
     phase,
     revealBlockCount: normalizeRevealBlockCount(record.revealBlockCount),
+    disabledBlocks: Array.isArray(record.disabledBlocks)
+      ? normalizeDisabledBlocks(record.disabledBlocks, normalizeRevealBlockCount(record.revealBlockCount))
+      : undefined,
     revealLimit: Math.max(1, Math.min(10, Math.floor(Number(record.revealLimit) || 1))),
     turnNumber: Math.max(1, Math.floor(Number(record.turnNumber) || 1)),
     revealVoteSeconds: normalizeTeamBattleVoteSeconds(
@@ -533,7 +542,6 @@ function createInitialTeamBattleState(
     previousScores?: Record<TeamBattleTeam, number>;
     revealVoteSeconds?: number;
     guessVoteSeconds?: number;
-    nowMs?: number;
     manualAssignments?: Partial<Record<string, TeamBattleTeam>>;
   },
 ): TeamBattleState {
@@ -550,12 +558,13 @@ function createInitialTeamBattleState(
     : guessers.slice(redTeamSize).map((player) => player.id);
   const teamMemberNames = Object.fromEntries(guessers.map((player) => [player.id, player.nickname.trim() || "已离开玩家"]));
 
-  return withFixedTeamBattleDeadline({
+  return {
     teams: { red, blue },
     initialTeams: { red, blue },
     teamMemberNames,
     activeTeam: "red",
-    phase: "REVEAL_VOTE",
+    phase: "PRESENTER_BLOCK",
+    disabledBlocks: [],
     revealLimit: 1,
     turnNumber: 1,
     revealVoteSeconds: normalizeTeamBattleVoteSeconds(
@@ -572,8 +581,8 @@ function createInitialTeamBattleState(
     previousTurnAction: null,
     pendingGuess: null,
     teamScores: options?.previousScores ?? { red: 0, blue: 0 },
-    message: "红队先手，请投票选择要打开的方块。",
-  }, "REVEAL_VOTE", options?.nowMs);
+    message: "等待出题人禁用格子",
+  };
 }
 
 async function resetTeamBattleStateForQuestion(
@@ -625,9 +634,8 @@ async function resetTeamBattleStateForQuestion(
     }
   }
   const activeTeam = getAvailableTeamBattleStartingTeam(teams, questionIndex);
-  const activeTeamName = getTeamName(activeTeam);
 
-  return withFixedTeamBattleDeadline({
+  return {
     teams,
     initialTeams,
     teamMemberNames: {
@@ -635,7 +643,8 @@ async function resetTeamBattleStateForQuestion(
       ...teamMemberNames,
     },
     activeTeam,
-    phase: "REVEAL_VOTE",
+    phase: "PRESENTER_BLOCK",
+    disabledBlocks: [],
     revealLimit: 1,
     turnNumber: state.turnNumber + 1,
     revealVoteSeconds: getTeamBattleVoteSeconds(state, "REVEAL_VOTE"),
@@ -647,9 +656,9 @@ async function resetTeamBattleStateForQuestion(
     pendingGuess: null,
     teamScores: state.teamScores,
     message: newGuessers.length > 0
-      ? `进入下一张图，新加入玩家已分配队伍，${activeTeamName}先手选择要打开的方块。`
-      : `进入下一张图，${activeTeamName}先手选择要打开的方块。`,
-  }, "REVEAL_VOTE");
+      ? "新玩家已分队 · 等待出题人禁用格子"
+      : "等待出题人禁用格子",
+  };
 }
 
 function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
@@ -684,7 +693,12 @@ function getPlayerTeam(state: TeamBattleState, playerId: string): TeamBattleTeam
   return null;
 }
 
-export function removePlayerFromTeamBattleState(state: TeamBattleState, playerId: string, nowMs = Date.now()): TeamBattleState {
+export function removePlayerFromTeamBattleState(
+  state: TeamBattleState,
+  playerId: string,
+  nowMs = Date.now(),
+  revealedBlocks: number[] = [],
+): TeamBattleState {
   const teams = {
     red: state.teams.red.filter((memberId) => memberId !== playerId),
     blue: state.teams.blue.filter((memberId) => memberId !== playerId),
@@ -706,7 +720,7 @@ export function removePlayerFromTeamBattleState(state: TeamBattleState, playerId
     guessVotes,
   };
 
-  if (teams[nextState.activeTeam].length === 0) {
+  if (nextState.phase !== "TURN_RESULT" && teams[nextState.activeTeam].length === 0) {
     const nextTeam = getOpposingTeam(nextState.activeTeam);
     if (teams[nextTeam].length > 0) {
       const switchedState: TeamBattleState = {
@@ -721,7 +735,16 @@ export function removePlayerFromTeamBattleState(state: TeamBattleState, playerId
       nextState = switchedState.phase === "REVEAL_VOTE" || switchedState.phase === "GUESS_VOTE"
         ? withFixedTeamBattleDeadline(switchedState, switchedState.phase)
         : switchedState.phase === "JUDGING"
-          ? withFixedTeamBattleDeadline(switchedState, "REVEAL_VOTE")
+          ? withFixedTeamBattleDeadline(
+              switchedState,
+              getSelectableTeamBattleBlocks(
+                { revealedBlocks },
+                switchedState,
+                normalizeRevealBlockCount(switchedState.revealBlockCount),
+              ).length === 0
+                ? "GUESS_VOTE"
+                : "REVEAL_VOTE",
+            )
           : switchedState;
     } else {
       nextState = {
@@ -753,7 +776,7 @@ async function removePlayerFromCurrentTeamBattle(gameSessionId: string, playerId
     return;
   }
 
-  const nextState = removePlayerFromTeamBattleState(state, playerId);
+  const nextState = removePlayerFromTeamBattleState(state, playerId, Date.now(), toGameSession(gameSession).revealedBlocks);
   if (nextState === state) {
     return;
   }
@@ -1593,12 +1616,25 @@ function normalizeRevealBlockCount(value: unknown) {
   return Number(value) === PORTRAIT_REVEAL_BLOCK_COUNT ? PORTRAIT_REVEAL_BLOCK_COUNT : REVEAL_BLOCK_COUNT;
 }
 
+function normalizeDisabledBlocks(value: unknown, revealBlockCount: number) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(value.filter((block): block is number => Number.isInteger(block) && block >= 0 && block < revealBlockCount)),
+  ).sort((a, b) => a - b);
+}
+
 function getVisibleRevealedBlockCount(blocks: number[], revealBlockCount: number) {
   return blocks.filter((block) => block >= 0 && block < revealBlockCount).length;
 }
 
 function getRevealBlocks(revealBlockCount: number) {
   return Array.from({ length: revealBlockCount }, (_, index) => index);
+}
+
+function getSelectableTeamBattleBlocks(session: Pick<GameSession, "revealedBlocks">, state: TeamBattleState, revealBlockCount: number) {
+  const revealed = new Set(session.revealedBlocks);
+  const disabled = new Set(normalizeDisabledBlocks(state.disabledBlocks, revealBlockCount));
+  return getRevealBlocks(revealBlockCount).filter((block) => !revealed.has(block) && !disabled.has(block));
 }
 
 export type QuestionImportItem = {
@@ -5454,6 +5490,69 @@ export async function settleBuzzerRound(params: {
   };
 }
 
+export async function completeTeamBattleBlockSelection(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  disabledBlocks: number[];
+  revealBlockCount?: number;
+} & ServerTimedActionParams) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) throw new Error(currentError.message);
+  if (!currentGameSession) {
+    throw new Error("确认禁用失败：当前游戏不存在，或你不是出题人。");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+  const revealBlockCount = normalizeRevealBlockCount(params.revealBlockCount);
+  const disabledBlocks = normalizeDisabledBlocks(params.disabledBlocks, revealBlockCount);
+
+  if (state.phase !== "PRESENTER_BLOCK") {
+    const isCompletedRetry =
+      Array.isArray(state.disabledBlocks) &&
+      normalizeRevealBlockCount(state.revealBlockCount) === revealBlockCount &&
+      disabledBlocks.length === state.disabledBlocks.length &&
+      disabledBlocks.every((block, index) => block === state.disabledBlocks?.[index]);
+    if (isCompletedRetry) return { gameSession: session };
+    throw new Error("禁用已确认，不能再次修改。");
+  }
+
+  const stateWithDisabledBlocks: TeamBattleState = {
+    ...state,
+    revealBlockCount,
+    disabledBlocks,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: null,
+  };
+  const selectableBlocks = getSelectableTeamBattleBlocks(session, stateWithDisabledBlocks, revealBlockCount);
+  const nextPhase = selectableBlocks.length > 0 ? "REVEAL_VOTE" : "GUESS_VOTE";
+  const nextState = withFixedTeamBattleDeadline({
+    ...stateWithDisabledBlocks,
+    message: selectableBlocks.length > 0
+      ? disabledBlocks.length > 0
+        ? `已禁用 ${disabledBlocks.length} 格 · ${getTeamName(state.activeTeam)}选格`
+        : `未禁用格子 · ${getTeamName(state.activeTeam)}选格`
+      : `全部格子已禁用 · ${getTeamName(state.activeTeam)}猜测`,
+  }, nextPhase, getServerReceivedAtMs(params));
+  if (nextState.teams.red.length === 0 && nextState.teams.blue.length === 0) {
+    nextState.message = "禁用完成 · 等待出题人公布答案";
+  }
+
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
+  if (error) throw new Error(error.message);
+  return { gameSession: toGameSession(updatedGameSession) };
+}
+
 export async function submitTeamBattleRevealVote(params: {
   gameSessionId: string;
   playerId: string;
@@ -5490,11 +5589,11 @@ export async function submitTeamBattleRevealVote(params: {
     throw new Error("本轮投票时间已结束，不能再修改选择。");
   }
 
-  const revealedSet = new Set(session.revealedBlocks);
-  const availableCount = revealBlockCount - getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount);
-  const requiredCount = Math.min(state.revealLimit, availableCount);
+  const selectableBlocks = getSelectableTeamBattleBlocks(session, state, revealBlockCount);
+  const selectableSet = new Set(selectableBlocks);
+  const requiredCount = Math.min(state.revealLimit, selectableBlocks.length);
   const selectedBlocks = Array.from(
-    new Set(params.selectedBlocks.filter((block) => Number.isInteger(block) && block >= 0 && block < revealBlockCount && !revealedSet.has(block))),
+    new Set(params.selectedBlocks.filter((block) => Number.isInteger(block) && selectableSet.has(block))),
   ).sort((a, b) => a - b);
 
   if (selectedBlocks.length !== requiredCount) {
@@ -5637,8 +5736,7 @@ export async function finalizeTeamBattleVote(params: {
 
   if (state.phase === "REVEAL_VOTE") {
     const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
-    const revealedSet = new Set(session.revealedBlocks);
-    const availableBlocks = getRevealBlocks(revealBlockCount).filter((block) => !revealedSet.has(block));
+    const availableBlocks = getSelectableTeamBattleBlocks(session, state, revealBlockCount);
     const revealCount = Math.min(state.revealLimit, availableBlocks.length);
     const voteCounts = new Map(availableBlocks.map((block) => [block, 0]));
 
@@ -5720,15 +5818,9 @@ export async function finalizeTeamBattleVote(params: {
       : "";
 
   if (winningOption.vote.type === "skip") {
-    const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
-    const opposingTeam = getOpposingTeam(state.activeTeam);
-    const nextTeam = getTeamMembers(state, opposingTeam).length > 0 ? opposingTeam : state.activeTeam;
-    const nextPhase = getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount) >= revealBlockCount ? "GUESS_VOTE" : "REVEAL_VOTE";
-    const nextState = withFixedTeamBattleDeadline({
+    const nextState: TeamBattleState = {
       ...state,
-      activeTeam: nextTeam,
-      phase: nextPhase,
-      revealLimit: 1,
+      phase: "TURN_RESULT",
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
@@ -5737,15 +5829,9 @@ export async function finalizeTeamBattleVote(params: {
         type: "skip",
       },
       pendingGuess: null,
-      turnNumber: state.turnNumber + 1,
-      message:
-        nextPhase === "REVEAL_VOTE"
-          ? `${getTeamName(state.activeTeam)}选择不猜，轮到${getTeamName(nextTeam)}打开 1 个方块。${tieMessage}`
-          : `${getTeamName(state.activeTeam)}选择不猜，图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。${tieMessage}`,
-    }, nextPhase);
-    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
-      current_reveal_round: currentGameSession.current_reveal_round + 1,
-    });
+      message: `${getTeamName(state.activeTeam)}选择不猜。${tieMessage}`,
+    };
+    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
 
     if (error) {
       throw new Error(error.message);
@@ -5807,19 +5893,9 @@ export async function judgeTeamBattleGuess(params: {
   }
 
   if (!params.isCorrect) {
-    const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
-    const opposingTeam = getOpposingTeam(state.pendingGuess.team);
-    const nextTeam = getTeamMembers(state, opposingTeam).length > 0 ? opposingTeam : state.pendingGuess.team;
-    if (getTeamMembers(state, nextTeam).length === 0) {
-      throw new Error("红蓝对抗判定失败：没有可继续行动的队伍，请取消本局。");
-    }
-
-    const nextPhase = getVisibleRevealedBlockCount(session.revealedBlocks, revealBlockCount) >= revealBlockCount ? "GUESS_VOTE" : "REVEAL_VOTE";
-    const nextState = withFixedTeamBattleDeadline({
+    const nextState: TeamBattleState = {
       ...state,
-      activeTeam: nextTeam,
-      phase: nextPhase,
-      revealLimit: 2,
+      phase: "TURN_RESULT",
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
@@ -5829,15 +5905,9 @@ export async function judgeTeamBattleGuess(params: {
         answerText: state.pendingGuess.answerText,
       },
       pendingGuess: null,
-      turnNumber: state.turnNumber + 1,
-      message:
-        nextPhase === "REVEAL_VOTE"
-          ? `${getTeamName(state.pendingGuess.team)}猜错，${getTeamName(nextTeam)}本回合可以打开 2 个方块。`
-          : `${getTeamName(state.pendingGuess.team)}猜错，图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。`,
-    }, nextPhase);
-    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
-      current_reveal_round: currentGameSession.current_reveal_round + 1,
-    });
+      message: `${getTeamName(state.pendingGuess.team)}猜测「${state.pendingGuess.answerText}」，猜测错误。`,
+    };
+    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
 
     if (error) {
       throw new Error(error.message);
@@ -5890,6 +5960,74 @@ export async function judgeTeamBattleGuess(params: {
     throw new Error(error.message);
   }
 
+  return { gameSession: toGameSession(updatedGameSession) };
+}
+
+export async function advanceTeamBattleTurn(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedTurnNumber: number;
+  serverReceivedAtMs?: number | null;
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) throw new Error(currentError.message);
+  if (!currentGameSession) {
+    throw new Error("进入下一轮失败：当前游戏不存在，或你不是出题人。");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+  if (
+    state.phase !== "TURN_RESULT" ||
+    !state.previousTurnAction ||
+    state.turnNumber !== params.expectedTurnNumber
+  ) {
+    return { gameSession: session };
+  }
+
+  const previousTeam = state.previousTurnAction.team;
+  const opposingTeam = getOpposingTeam(previousTeam);
+  const nextTeam = getTeamMembers(state, opposingTeam).length > 0
+    ? opposingTeam
+    : getTeamMembers(state, previousTeam).length > 0
+      ? previousTeam
+      : null;
+  if (!nextTeam) {
+    throw new Error("没有可继续行动的队伍，请公布答案或结束游戏。");
+  }
+
+  const revealBlockCount = normalizeRevealBlockCount(state.revealBlockCount);
+  const nextPhase = getSelectableTeamBattleBlocks(session, state, revealBlockCount).length === 0
+    ? "GUESS_VOTE"
+    : "REVEAL_VOTE";
+  const revealLimit = state.previousTurnAction.type === "guess" ? 2 : 1;
+  const nextState = withFixedTeamBattleDeadline({
+    ...state,
+    activeTeam: nextTeam,
+    phase: nextPhase,
+    revealLimit,
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: null,
+    turnNumber: state.turnNumber + 1,
+    message: nextPhase === "REVEAL_VOTE"
+      ? `${getTeamName(nextTeam)}本回合可以打开 ${revealLimit} 个方块。`
+      : `图片已全部打开，轮到${getTeamName(nextTeam)}决定是否猜测。`,
+  }, nextPhase, getServerReceivedAtMs(params));
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
+    current_reveal_round: currentGameSession.current_reveal_round + 1,
+  });
+  if (error) throw new Error(error.message);
   return { gameSession: toGameSession(updatedGameSession) };
 }
 

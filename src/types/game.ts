@@ -14,7 +14,7 @@ export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED"
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
 export type TeamAssignmentMode = "AUTO" | "MANUAL";
-export type TeamBattlePhase = "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "REVIEW";
+export type TeamBattlePhase = "PRESENTER_BLOCK" | "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "TURN_RESULT" | "REVIEW";
 export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 25;
 export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
 export const TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS = 5;
@@ -42,6 +42,7 @@ export type TeamBattleState = {
   activeTeam: TeamBattleTeam;
   phase: TeamBattlePhase;
   revealBlockCount?: number;
+  disabledBlocks?: number[];
   revealLimit: number;
   turnNumber: number;
   revealVoteSeconds?: number;
