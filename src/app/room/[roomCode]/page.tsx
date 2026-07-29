@@ -505,7 +505,10 @@ function PlayerList({
           {sortedPlayers.length > 0 ? (
             sortedPlayers.map((player, index) => {
               const isPresenter = player.id === presenterPlayerId;
-              const assignedTeam = isPresenter ? null : teamAssignments?.[player.id] ?? null;
+              const assignedTeam =
+                gameMode === "TEAM_BATTLE" && teamAssignmentMode === "MANUAL" && !isPresenter
+                  ? teamAssignments?.[player.id] ?? null
+                  : null;
               const canChooseTeam = gameMode === "TEAM_BATTLE" && teamAssignmentMode === "MANUAL" && player.id === playerId && !isPresenter;
 
               return (

@@ -2822,7 +2822,9 @@ export async function updateRoomGameSettings(params: {
       lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
       lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
       lobby_team_assignment_mode: teamAssignmentMode,
-      ...(teamAssignmentMode === "AUTO" ? { lobby_team_assignments: "{}" } : {}),
+      ...(params.gameMode !== "TEAM_BATTLE" || teamAssignmentMode === "AUTO"
+        ? { lobby_team_assignments: "{}" }
+        : {}),
     })
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)

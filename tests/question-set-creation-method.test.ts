@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { GameDatabase, GamePreparedStatement } from "../worker/d1QueryCompat";
 import {
+  completeTeamBattleBlockSelection,
   createRoom,
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
@@ -271,9 +272,21 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
     });
     assert.equal(started.gameSession.teamBattleState?.revealVoteSeconds, 23);
     assert.equal(started.gameSession.teamBattleState?.guessVoteSeconds, 61);
-    const deadlineMs = new Date(started.gameSession.teamBattleState!.voteDeadlineAt!).getTime();
-    const createdAtMs = new Date(started.gameSession.createdAt).getTime();
-    assert.ok(deadlineMs >= createdAtMs + 22_000 && deadlineMs <= Date.now() + 23_000);
+    assert.equal(started.gameSession.teamBattleState?.phase, "PRESENTER_BLOCK");
+    assert.equal(started.gameSession.teamBattleState?.voteDeadlineAt, null);
+
+    const blockSelectionReceivedAtMs = Date.now();
+    const afterBlockSelection = await completeTeamBattleBlockSelection({
+      gameSessionId: started.gameSession.id,
+      presenterPlayerId: "host",
+      disabledBlocks: [],
+      serverReceivedAtMs: blockSelectionReceivedAtMs,
+    });
+    assert.equal(afterBlockSelection.gameSession.teamBattleState?.phase, "REVEAL_VOTE");
+    assert.equal(
+      new Date(afterBlockSelection.gameSession.teamBattleState!.voteDeadlineAt!).getTime(),
+      blockSelectionReceivedAtMs + 23_000,
+    );
   });
 });
 
@@ -307,6 +320,26 @@ test("manual team setup blocks incomplete rosters, allows uneven teams, and swit
       questionSetId: "set-manual-team",
       gameMode: "TEAM_BATTLE",
     }), /尚未选择队伍/);
+
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p1", team: "red" });
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p2", team: "blue" });
+    room = await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p3", team: "blue" });
+    assert.deepEqual(room.teamAssignments, { p1: "red", p2: "blue", p3: "blue" });
+
+    room = await updateRoomGameSettings({
+      roomId: "room-manual-team",
+      hostPlayerId: "host",
+      gameMode: "ROUND_REVEAL",
+      teamAssignmentMode: "MANUAL",
+    });
+    assert.deepEqual(room.teamAssignments, {}, "leaving TEAM_BATTLE must discard manual assignments");
+    room = await updateRoomGameSettings({
+      roomId: "room-manual-team",
+      hostPlayerId: "host",
+      gameMode: "TEAM_BATTLE",
+      teamAssignmentMode: "MANUAL",
+    });
+    assert.deepEqual(room.teamAssignments, {}, "returning to TEAM_BATTLE must not restore stale assignments");
 
     await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p1", team: "red" });
     await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p2", team: "blue" });
