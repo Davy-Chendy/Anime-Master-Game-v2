@@ -473,14 +473,29 @@ export class RoomAuthorityVNext {
     const participantIds = this.participantIds(aggregate);
     const gameSession = clone(aggregate.gameSession!);
     gameSession.serverNow = nowIso(nowMs);
+    const questionResults = aggregate.questionResults.filter(
+      (result) => participantIds.has(result.playerId) && result.questionIndex === gameSession.currentQuestionIndex,
+    );
+    const correctAnswerKeys = new Set(
+      questionResults.map((result) => `${result.playerId}:${result.scoredRound}`),
+    );
+    const questionAnswers = aggregate.answers.filter(
+      (answer) => answer.questionIndex === gameSession.currentQuestionIndex,
+    );
+    const questionBuzzerAnswers = aggregate.buzzerAnswers.filter(
+      (answer) => answer.questionIndex === gameSession.currentQuestionIndex,
+    );
+    const isCurrentRound = (answer: { revealRound: number }) => answer.revealRound === gameSession.currentRevealRound;
+    const isCorrectRoundAnswer = (answer: { playerId: string; revealRound: number }) =>
+      correctAnswerKeys.has(`${answer.playerId}:${answer.revealRound}`);
     return {
       gameSession,
       scores: clone(aggregate.scores.filter((score) => participantIds.has(score.playerId))),
-      questionResults: clone(aggregate.questionResults.filter((result) => participantIds.has(result.playerId))),
-      answers: clone(aggregate.answers),
-      labelAnswers: clone(aggregate.answers.filter((answer) => answer.answerText !== FORFEIT_ANSWER_TEXT)),
-      buzzerAnswers: clone(aggregate.buzzerAnswers).sort(compareBuzzer),
-      labelBuzzerAnswers: clone(aggregate.buzzerAnswers.filter((answer) => answer.status === "correct")).sort(compareBuzzer),
+      questionResults: clone(questionResults),
+      answers: clone(questionAnswers.filter(isCurrentRound)),
+      labelAnswers: clone(questionAnswers.filter((answer) => answer.answerText !== FORFEIT_ANSWER_TEXT && isCorrectRoundAnswer(answer))),
+      buzzerAnswers: clone(questionBuzzerAnswers.filter(isCurrentRound)).sort(compareBuzzer),
+      labelBuzzerAnswers: clone(questionBuzzerAnswers.filter((answer) => answer.status === "correct" && isCorrectRoundAnswer(answer))).sort(compareBuzzer),
     };
   }
 

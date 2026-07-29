@@ -882,6 +882,13 @@ test("RANKED final-round forfeit settles immediately after another player scored
 
   authority.handleMutation(host, envelope("host", 7, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [3] }), now + 6010);
   authority.handleMutation(p1, envelope("p1", 3, "submitForfeitAnswer", { playerId: "p1" }), now + 6011);
+  const refreshedSnapshot = authority.getSnapshot(now + 6011);
+  assert.deepEqual(refreshedSnapshot.answers.map((answer) => [answer.playerId, answer.revealRound]), [["p1", 3]]);
+  assert.deepEqual(refreshedSnapshot.buzzerAnswers, []);
+  assert.deepEqual(
+    refreshedSnapshot.labelBuzzerAnswers.map((answer) => [answer.playerId, answer.revealRound, answer.status]),
+    [["p0", 2, "correct"]],
+  );
   const settled = authority.handleMutation(host, envelope("host", 8, "settleBuzzerRound", { presenterPlayerId: "host" }), now + 6012);
 
   assert.equal(settled.forceCheckpoint, "phase-boundary");
