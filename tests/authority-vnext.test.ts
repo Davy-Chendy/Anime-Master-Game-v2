@@ -2326,6 +2326,35 @@ test("D1 projection failure retains the aggregate outbox until a later retry suc
   assert.equal(state.storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_projection_outbox").get().count, 0);
 });
 
+test("an ended event-age checkpoint cannot recreate a flushed lobby handoff and overwrite the next setup", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(1);
+  const returned = authority.handleMutation(
+    socketFor(state, "host"),
+    envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }),
+    Date.now(),
+  );
+  await authority.forceCheckpoint(returned.forceCheckpoint ?? "projection");
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(authority.hasPendingFinalProjection(), false);
+  assert.equal(d1.db.prepare("SELECT game_status FROM rooms WHERE id='r1'").get().game_status, "LOBBY");
+
+  const staleAction = envelope("p0", 1, "submitAnswer", { playerId: "p0", answerText: "stale" });
+  staleAction.questionIndex = 99;
+  const rejected = authority.handleMutation(null, staleAction, Date.now() + 11_000);
+  assert.equal(rejected.terminal, true);
+  await authority.maybeCheckpoint("event-age");
+  assert.equal(authority.hasPendingFinalProjection(), false);
+
+  d1.db.prepare("UPDATE rooms SET game_status='QUESTION_SETUP' WHERE id='r1'").run();
+  await authority.flushFinalProjection();
+
+  assert.equal(
+    d1.db.prepare("SELECT game_status FROM rooms WHERE id='r1'").get().game_status,
+    "QUESTION_SETUP",
+    "a generic ended checkpoint must not recreate and later flush a stale LOBBY handoff",
+  );
+});
+
 test("an in-flight projection cannot erase a newer lobby roster payload", async () => {
   let releaseBatch!: () => void;
   let markBatchEntered!: () => void;

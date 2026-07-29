@@ -1648,7 +1648,7 @@ export class RoomAuthorityVNext {
           );
           changedRows += 1;
         }
-        if (captured.cutoverState === "ended") {
+        if (captured.cutoverState === "ended" && (trigger === "game-end" || trigger === "projection")) {
           this.mergeProjectionOutbox(captured);
           changedRows += 1;
         }
