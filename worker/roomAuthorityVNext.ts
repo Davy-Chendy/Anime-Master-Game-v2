@@ -1298,6 +1298,11 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActiveOrEnded();
     const nickname = getString(action.payload.nickname) ?? "玩家";
     const role = action.payload.role === "SPECTATOR" ? "SPECTATOR" as const : "PLAYER" as const;
+    const selectedTeam = action.payload.team === "red" || action.payload.team === "blue" ? action.payload.team : null;
+    const manualTeamBattle = aggregate.gameSession?.gameMode === "TEAM_BATTLE" && aggregate.room?.teamAssignmentMode === "MANUAL";
+    if (role === "PLAYER" && manualTeamBattle && action.actorId !== aggregate.gameSession?.presenterPlayerId && !selectedTeam && !aggregate.room?.teamAssignments?.[action.actorId]) {
+      throw new TerminalMutationError("手动分队已开启，请先选择加入红队或蓝队。");
+    }
     let player = aggregate.players.find((item) => item.id === action.actorId);
     if (player) Object.assign(player, { nickname, role, lastSeenAt: nowIso(action.serverReceivedAtMs) });
     else {
@@ -1306,7 +1311,22 @@ export class RoomAuthorityVNext {
       aggregate.players.push(player);
     }
     if (role === "PLAYER" && aggregate.cutoverState === "active") this.ensurePlayerScore(player.id);
-    if (aggregate.room) aggregate.room.players = aggregate.players;
+    if (aggregate.room) {
+      aggregate.room.players = aggregate.players;
+      aggregate.room.teamAssignments ??= {};
+      if (role === "SPECTATOR" || player.id === aggregate.gameSession?.presenterPlayerId) delete aggregate.room.teamAssignments[player.id];
+      else if (selectedTeam) aggregate.room.teamAssignments[player.id] = selectedTeam;
+    }
+    if (selectedTeam && aggregate.gameSession?.teamBattleState && player.id !== aggregate.gameSession.presenterPlayerId) {
+      const sourceTeams = aggregate.gameSession.teamBattleState.initialTeams ?? aggregate.gameSession.teamBattleState.teams;
+      const initialTeams = { red: [...sourceTeams.red], blue: [...sourceTeams.blue] };
+      initialTeams.red = initialTeams.red.filter((id) => id !== player!.id);
+      initialTeams.blue = initialTeams.blue.filter((id) => id !== player!.id);
+      initialTeams[selectedTeam].push(player.id);
+      aggregate.gameSession.teamBattleState.initialTeams = initialTeams;
+      aggregate.gameSession.teamBattleState.teamMemberNames ??= {};
+      aggregate.gameSession.teamBattleState.teamMemberNames[player.id] = player.nickname;
+    }
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room!) };
     return {
       data: { room: clone(aggregate.room), error: null, errorCode: null },
@@ -1326,6 +1346,7 @@ export class RoomAuthorityVNext {
     aggregate.players = aggregate.players.filter((player) => player.id !== targetPlayerId);
     if (aggregate.room) {
       aggregate.room.players = aggregate.players;
+      if (aggregate.room.teamAssignments) delete aggregate.room.teamAssignments[targetPlayerId];
       if (!aggregate.players.length) {
         aggregate.room = undefined;
         aggregate.dissolved = true;
@@ -1400,6 +1421,7 @@ export class RoomAuthorityVNext {
     const player = aggregate.players.find((item) => item.id === target);
     if (!player || (action.payload.role !== "PLAYER" && action.payload.role !== "SPECTATOR")) throw new TerminalMutationError("玩家身份参数无效。");
     player.role = action.payload.role;
+    if (player.role === "SPECTATOR" && aggregate.room?.teamAssignments) delete aggregate.room.teamAssignments[player.id];
     if (player.role === "PLAYER" && aggregate.cutoverState === "active") this.ensurePlayerScore(player.id);
     if (aggregate.room) aggregate.room.players = aggregate.players;
     const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room!) };
@@ -1655,7 +1677,15 @@ export class RoomAuthorityVNext {
         if (game.dissolved) {
           statements.push(this.d1.prepare("DELETE FROM rooms WHERE id=?").bind(game.roomId));
         } else {
-          if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_game_id=?,updated_at=? WHERE id=?").bind(game.room.hostPlayerId, game.room.status, game.room.currentGameId ?? null, nowIso(), game.room.id));
+          if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_game_id=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,updated_at=? WHERE id=?").bind(
+            game.room.hostPlayerId,
+            game.room.status,
+            game.room.currentGameId ?? null,
+            game.room.teamAssignmentMode ?? "AUTO",
+            JSON.stringify(game.room.teamAssignments ?? {}),
+            nowIso(),
+            game.room.id,
+          ));
           const players = game.players.map((player) => ({ ...player, joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt, lastSeenAt: player.lastSeenAt ?? nowIso() }));
           const playersJson = JSON.stringify(players);
           if (game.projectionVersion === 3) {
@@ -1939,8 +1969,24 @@ export class RoomAuthorityVNext {
 
   private resetTeamState(previous: TeamBattleState | null | undefined, players: Player[], presenterId: string, questionIndex: number): TeamBattleState {
     const ids = players.filter((player) => player.role === "PLAYER" && player.id !== presenterId).map((player) => player.id);
-    const initial = previous?.initialTeams ?? { red: ids.filter((_, index) => index % 2 === 0), blue: ids.filter((_, index) => index % 2 === 1) };
+    const aggregate = this.requireActive();
+    const initial = previous?.initialTeams
+      ? { red: [...previous.initialTeams.red], blue: [...previous.initialTeams.blue] }
+      : { red: ids.filter((_, index) => index % 2 === 0), blue: ids.filter((_, index) => index % 2 === 1) };
+    const alreadyAssigned = new Set([...initial.red, ...initial.blue]);
     const valid = new Set(ids);
+    const currentCounts = {
+      red: initial.red.filter((id) => valid.has(id)).length,
+      blue: initial.blue.filter((id) => valid.has(id)).length,
+    };
+    for (const playerId of ids) {
+      if (alreadyAssigned.has(playerId)) continue;
+      const manualTeam = aggregate.room?.teamAssignmentMode === "MANUAL" ? aggregate.room.teamAssignments?.[playerId] : null;
+      const targetTeam = manualTeam ?? (currentCounts.red <= currentCounts.blue ? "red" : "blue");
+      initial[targetTeam].push(playerId);
+      currentCounts[targetTeam] += 1;
+      alreadyAssigned.add(playerId);
+    }
     const teams = { red: initial.red.filter((id) => valid.has(id)), blue: initial.blue.filter((id) => valid.has(id)) };
     const activeTeam: TeamBattleTeam = questionIndex % 2 === 0 ? "red" : "blue";
     return { teams, initialTeams: initial, teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])), activeTeam: teams[activeTeam].length ? activeTeam : oppositeTeam(activeTeam), phase: "REVEAL_VOTE", revealBlockCount: previous?.revealBlockCount ?? 45, revealLimit: 1, turnNumber: 1, revealVoteSeconds: normalizeTeamVoteSeconds(previous?.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS), guessVoteSeconds: normalizeTeamVoteSeconds(previous?.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS), voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: previous?.teamScores ?? { red: 0, blue: 0 } };

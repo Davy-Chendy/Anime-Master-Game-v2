@@ -94,6 +94,12 @@ WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接
 
 当前计量模型为：每个投票阶段设置并执行一个 Alarm；若全员提前提交且剩余超过5秒，该阶段先增加一次1行 active-game checkpoint，再最多额外 `setAlarm()` 一次，后续修改不再重排。deadline 阶段边界仍强制 checkpoint，游戏中 D1 写入保持0。若一道题发生 R 次选格和 G 次猜测，则 Alarm 执行与 deadline checkpoint 均约为 `R + G` 次；全员均提前完成时，Alarm 设置和阶段 checkpoint 均最多为 `2 × (R + G)` 次。例如10次选格+10次猜测约20次 Alarm 执行、最多40次 Alarm 设置和40次1行 checkpoint。玩家投票 mutation 仍可能达到“提交人数×修改次数”；每个阶段内每累计20个 dirty action 会多一次1行 rolling checkpoint，已被提前完成 checkpoint 持久化的 action 不会再次累计到 deadline。以每阶段6人各提交一次为例，不会额外触发 rolling checkpoint；频繁修改才会增加。这正是上述后续优化的观测重点。
 
+## 手动分队计量
+
+手动分队是开局前的低频房间 mutation，不增加轮内 Alarm、图片操作或定期读取。每次真实选队产生一次 Room DO 入站操作、一次房间状态行更新和一次房间推送；客户端不轮询，也不在收到推送后补拉 snapshot。模式从手动切换为自动时通过一次房间行更新清空整份 JSON 映射，不逐玩家写入。
+
+按 50 人每局各选队一次、每天 60 局的极端上限估算，共 3,000 次 mutation 和至多 3,000 行房间状态写入，分别约占 Worker/DO 请求和 D1/DO SQLite 日硬额度的 3%（WebSocket 入站消息按平台规则折算时 DO 请求占用更低）。广播最多产生 50×50 次客户端投递，但出站 WebSocket 消息不按 DO 请求计量；实现仍复用房间推送并保持 payload 有界。游戏已经开始后的新玩家选队写入现有 active-game aggregate，随既有 checkpoint 合并，轮内 D1 写入仍为 0，最终 roster handoff 语句数不增加。
+
 ## 对应测试
 
 - `npm run test:authority-budget`：快速检查 50×30 的 DO/D1 写入预算。

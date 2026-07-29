@@ -81,6 +81,7 @@ const MUTATION_NAMES = new Set([
   "createQuestionSetFromUrlText",
   "prepareQuestionSetForStart",
   "updateRoomGameSettings",
+  "selectTeamForPlayer",
   "startGameWithQuestionSet",
   "confirmRevealBlocks",
   "submitAnswer",
@@ -287,7 +288,7 @@ function setTopicPlayerId(topic: string, playerId: string | null | undefined) {
 function getPositionalRoomMutation(name: string, args: unknown[]) {
   switch (name) {
     case "leaveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], playerId: args[1] } } : null;
-    case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3] } } : null;
+    case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3], team: args[4] } } : null;
     case "kickPlayerFromRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1], targetPlayerId: args[2] } } : null;
     case "dissolveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     case "cancelCurrentRound": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;

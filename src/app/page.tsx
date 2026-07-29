@@ -14,6 +14,7 @@ const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
 const SHOW_MAINTENANCE_ANNOUNCEMENT = false;
 
 function MaintenanceAnnouncement() {
@@ -83,6 +84,10 @@ function MaintenanceAnnouncement() {
 
 function isPlayerCapacityError(errorCode: string | null | undefined) {
   return errorCode === PLAYER_CAPACITY_FULL_ERROR_CODE;
+}
+
+function isTeamSelectionRequired(errorCode: string | null | undefined) {
+  return errorCode === TEAM_SELECTION_REQUIRED_ERROR_CODE;
 }
 
 type HomeFooterIcon = "video" | "rules" | "github" | "group" | "spark";
@@ -261,7 +266,7 @@ export default function HomePage() {
       const result = await joinRoom(trimmedRoomCode, session.playerId, trimmedNickname);
 
       if (result.error || !result.room) {
-        if (isPlayerCapacityError(result.errorCode)) {
+        if (isPlayerCapacityError(result.errorCode) || isTeamSelectionRequired(result.errorCode)) {
           saveLocalSession({
             playerId: session.playerId,
             nickname: trimmedNickname,

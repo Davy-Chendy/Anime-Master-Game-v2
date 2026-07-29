@@ -23,6 +23,7 @@ import {
   rateCommunityQuestionSet,
   returnRoomToLobby,
   selectPresenterForRound,
+  selectTeamForPlayer,
   startGameWithQuestionSet,
   updateRoomGameSettings,
   updatePlayerRole,
@@ -40,6 +41,7 @@ import type {
   Room,
   RoomStatus,
   TeamBattleTeam,
+  TeamAssignmentMode,
 } from "@/types/game";
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
@@ -53,6 +55,7 @@ const statusText: Record<RoomStatus, string> = {
   GAME_RESULT: "本局结算",
 };
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
 const START_GAME_ATTEMPT_STORAGE_PREFIX = "anime-master:start-game-attempt:";
 const START_GAME_ATTEMPT_TTL_MS = 30 * 60 * 1000;
 const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
@@ -65,6 +68,7 @@ type GameSettings = {
   roundScores: number[];
   teamRevealVoteSeconds: number;
   teamGuessVoteSeconds: number;
+  teamAssignmentMode: TeamAssignmentMode;
 };
 
 const defaultGameSettings: GameSettings = {
@@ -74,6 +78,7 @@ const defaultGameSettings: GameSettings = {
   roundScores: [5, 3, 1],
   teamRevealVoteSeconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
   teamGuessVoteSeconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  teamAssignmentMode: "AUTO",
 };
 
 function createStartRequestId() {
@@ -159,6 +164,7 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
       settings.teamGuessVoteSeconds,
       DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
     ),
+    teamAssignmentMode: settings.teamAssignmentMode === "MANUAL" ? "MANUAL" : "AUTO",
   };
 }
 
@@ -170,6 +176,7 @@ function getRoomGameSettings(room: Room | null | undefined): GameSettings {
     roundScores: room?.roundScores,
     teamRevealVoteSeconds: room?.teamRevealVoteSeconds,
     teamGuessVoteSeconds: room?.teamGuessVoteSeconds,
+    teamAssignmentMode: room?.teamAssignmentMode,
   });
 }
 
@@ -181,7 +188,8 @@ function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
     left.roundScores.length === right.roundScores.length &&
     left.roundScores.every((score, index) => score === right.roundScores[index]) &&
     left.teamRevealVoteSeconds === right.teamRevealVoteSeconds &&
-    left.teamGuessVoteSeconds === right.teamGuessVoteSeconds
+    left.teamGuessVoteSeconds === right.teamGuessVoteSeconds &&
+    left.teamAssignmentMode === right.teamAssignmentMode
   );
 }
 
@@ -449,6 +457,10 @@ function isPlayerCapacityError(errorCode: string | null | undefined) {
   return errorCode === PLAYER_CAPACITY_FULL_ERROR_CODE;
 }
 
+function isTeamSelectionRequired(errorCode: string | null | undefined) {
+  return errorCode === TEAM_SELECTION_REQUIRED_ERROR_CODE;
+}
+
 function canSwitchPlayerRole(room: Room | null | undefined, isCurrentPresenter: boolean) {
   return Boolean(room && (room.status === "LOBBY" || (room.status === "QUESTION_SETUP" && !isCurrentPresenter)));
 }
@@ -458,6 +470,10 @@ function PlayerList({
   playerId,
   presenterPlayerId,
   gameMode,
+  teamAssignmentMode,
+  teamAssignments,
+  pendingTeam,
+  onSelectTeam,
   spectatorAction,
   action,
 }: {
@@ -465,10 +481,18 @@ function PlayerList({
   playerId: string;
   presenterPlayerId?: string | null;
   gameMode: GameMode;
+  teamAssignmentMode?: TeamAssignmentMode;
+  teamAssignments?: Partial<Record<string, TeamBattleTeam>>;
+  pendingTeam?: TeamBattleTeam | null;
+  onSelectTeam?: (team: TeamBattleTeam) => void;
   spectatorAction?: ReactNode;
   action?: ReactNode;
 }) {
-  const sortedPlayers = sortPlayersByJoinedAt(getGamePlayers(players));
+  const sortedPlayers = sortPlayersByJoinedAt(getGamePlayers(players)).sort((left, right) => {
+    if (gameMode !== "TEAM_BATTLE" || teamAssignmentMode !== "MANUAL") return 0;
+    const order = (player: Player) => player.id === presenterPlayerId ? 2 : teamAssignments?.[player.id] === "red" ? 0 : teamAssignments?.[player.id] === "blue" ? 1 : 2;
+    return order(left) - order(right);
+  });
   const sortedSpectators = sortPlayersByJoinedAt(getSpectators(players));
   const title = `玩家 ${sortedPlayers.length}`;
 
@@ -479,34 +503,40 @@ function PlayerList({
           {sortedPlayers.length > 0 ? (
             sortedPlayers.map((player, index) => {
               const isPresenter = player.id === presenterPlayerId;
+              const assignedTeam = isPresenter ? null : teamAssignments?.[player.id] ?? null;
+              const canChooseTeam = gameMode === "TEAM_BATTLE" && teamAssignmentMode === "MANUAL" && player.id === playerId && !isPresenter;
 
               return (
                 <div
-                  className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
+                  className={`rounded-md border bg-white px-3 py-3 shadow-sm ${assignedTeam === "red" ? "border-rose-200" : assignedTeam === "blue" ? "border-sky-200" : "border-[var(--line)]"}`}
                   key={player.id}
                 >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">
-                      {index + 1}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="truncate font-semibold">{player.nickname}</p>
-                      <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
-                        {player.id === playerId ? <span>你</span> : null}
-                        {isPresenter ? <span>本局出题人</span> : null}
-                        {gameMode === "TEAM_BATTLE" ? <span>{isPresenter ? "裁判" : "答题玩家"}</span> : null}
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-md text-sm font-bold text-white ${assignedTeam === "red" ? "bg-rose-600" : assignedTeam === "blue" ? "bg-sky-600" : "bg-slate-900"}`}>
+                        {index + 1}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold">{player.nickname}</p>
+                        <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+                          {player.id === playerId ? <span>你</span> : null}
+                          {isPresenter ? <span>本局出题人 · 裁判</span> : null}
+                          {assignedTeam === "red" ? <span className="font-semibold text-rose-700">红队</span> : null}
+                          {assignedTeam === "blue" ? <span className="font-semibold text-sky-700">蓝队</span> : null}
+                          {gameMode === "TEAM_BATTLE" && teamAssignmentMode === "MANUAL" && !isPresenter && !assignedTeam ? <span className="font-semibold text-amber-700">未入队</span> : null}
+                        </div>
                       </div>
                     </div>
+                    <span className={player.isHost ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700" : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"}>
+                      {player.isHost ? "房主" : "玩家"}
+                    </span>
                   </div>
-                  <span
-                    className={
-                      player.isHost
-                        ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700"
-                        : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
-                    }
-                  >
-                    {player.isHost ? "房主" : "玩家"}
-                  </span>
+                  {canChooseTeam ? (
+                    <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3">
+                      <button className="min-h-10 rounded-md bg-rose-50 px-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50" disabled={Boolean(pendingTeam)} type="button" onClick={() => onSelectTeam?.("red")}>{pendingTeam === "red" ? "加入中…" : assignedTeam === "red" ? "已在红队" : "加入红队"}</button>
+                      <button className="min-h-10 rounded-md bg-sky-50 px-3 text-sm font-semibold text-sky-700 transition hover:bg-sky-100 disabled:opacity-50" disabled={Boolean(pendingTeam)} type="button" onClick={() => onSelectTeam?.("blue")}>{pendingTeam === "blue" ? "加入中…" : assignedTeam === "blue" ? "已在蓝队" : "加入蓝队"}</button>
+                    </div>
+                  ) : null}
                 </div>
               );
             })
@@ -999,6 +1029,31 @@ function GameSettingsPanel({
           </div>
         ) : isTeamBattleMode ? (
           <div className="mt-4 space-y-3">
+            <fieldset>
+              <legend className="mb-2 text-sm font-medium text-slate-900">分队方式</legend>
+              <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-100 p-1.5">
+                {(["AUTO", "MANUAL"] as const).map((mode) => {
+                  const selected = settings.teamAssignmentMode === mode;
+                  return (
+                    <button
+                      aria-pressed={selected}
+                      className={`min-h-11 rounded-md px-3 text-sm font-semibold transition ${selected ? "bg-white text-slate-950 shadow-sm ring-1 ring-slate-200" : "text-slate-600 hover:text-slate-950"}`}
+                      disabled={!canEdit}
+                      key={mode}
+                      type="button"
+                      onClick={() => onChange({ ...settings, teamAssignmentMode: mode })}
+                    >
+                      {mode === "AUTO" ? "自动分队" : "手动分队"}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+                {settings.teamAssignmentMode === "MANUAL"
+                  ? "玩家在大厅自行选择红队或蓝队；切换回自动会清空当前分队。"
+                  : "开始游戏时随机且尽量平均地分成红蓝两队。"}
+              </p>
+            </fieldset>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-slate-900">选格投票秒数</span>
@@ -1042,7 +1097,7 @@ function GameSettingsPanel({
               </label>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-              自动分队，猜对队伍得 1 分；投票截止前可反复修改。
+              猜对队伍得 1 分；投票截止前可反复修改。
             </div>
           </div>
         ) : (
@@ -1061,6 +1116,7 @@ function LobbyMainPanel({
   isHost,
   presenterName,
   isStartingGame,
+  isUpdatingSettings,
   isCancelingRound,
   onSettingsChange,
   onOpenPresenterPicker,
@@ -1072,6 +1128,7 @@ function LobbyMainPanel({
   isHost: boolean;
   presenterName: string;
   isStartingGame: boolean;
+  isUpdatingSettings: boolean;
   isCancelingRound: boolean;
   onSettingsChange: (settings: GameSettings) => void;
   onOpenPresenterPicker: () => void;
@@ -1082,6 +1139,15 @@ function LobbyMainPanel({
   const hasQuestionSet = Boolean(room.preparedQuestionSetId);
   const canEditSettings = isHost && (room.status === "LOBBY" || room.status === "QUESTION_SETUP");
   const gamePlayerCount = getGamePlayers(room.players).length;
+  const manualTeamStartIssue = (() => {
+    if (settings.gameMode !== "TEAM_BATTLE" || settings.teamAssignmentMode !== "MANUAL") return null;
+    const answerers = getGamePlayers(room.players).filter((player) => player.id !== room.currentPresenterPlayerId);
+    const unassigned = answerers.filter((player) => !room.teamAssignments?.[player.id]);
+    if (unassigned.length > 0) return `${unassigned.map((player) => player.nickname).join("、")}尚未选择队伍`;
+    if (!answerers.some((player) => room.teamAssignments?.[player.id] === "red")) return "红队至少需要 1 名答题玩家";
+    if (!answerers.some((player) => room.teamAssignments?.[player.id] === "blue")) return "蓝队至少需要 1 名答题玩家";
+    return null;
+  })();
 
   return (
     <Panel className="h-full" title="房间大厅">
@@ -1110,7 +1176,7 @@ function LobbyMainPanel({
             ) : null}
             {isHost && room.status === "QUESTION_SETUP" ? (
               <>
-                <Button type="button" onClick={onStartGame} disabled={isStartingGame || !hasQuestionSet}>
+                <Button type="button" onClick={onStartGame} disabled={isStartingGame || isUpdatingSettings || !hasQuestionSet || Boolean(manualTeamStartIssue)}>
                   {isStartingGame ? "启动中…" : "开始游戏"}
                 </Button>
                 <Button type="button" variant="secondary" onClick={onCancelRound} disabled={isCancelingRound}>
@@ -1121,6 +1187,12 @@ function LobbyMainPanel({
           </div>
         </div>
       </div>
+
+      {hasQuestionSet && manualTeamStartIssue ? (
+        <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          暂时不能开始：{manualTeamStartIssue}
+        </p>
+      ) : null}
 
       <div className="mt-5">
         <GameSettingsPanel settings={settings} canEdit={canEditSettings} onChange={onSettingsChange} />
@@ -1760,9 +1832,11 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isCancelingRound, setIsCancelingRound] = useState(false);
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
+  const [isUpdatingSettings, setIsUpdatingSettings] = useState(false);
   const [isLeavingRoom, setIsLeavingRoom] = useState(false);
   const [isSwitchingRole, setIsSwitchingRole] = useState(false);
   const [pendingJoinRole, setPendingJoinRole] = useState<PlayerRole | null>(null);
+  const [pendingTeam, setPendingTeam] = useState<TeamBattleTeam | null>(null);
   const [isPresenterPickerOpen, setIsPresenterPickerOpen] = useState(false);
   const [isKickPlayerModalOpen, setIsKickPlayerModalOpen] = useState(false);
   const [isCancelRoundModalOpen, setIsCancelRoundModalOpen] = useState(false);
@@ -1857,9 +1931,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         const joined = await joinRoom(roomCode, session.playerId, session.nickname);
 
         if (joined.error || !joined.room) {
-          const isCapacityFull = isPlayerCapacityError(joined.errorCode);
+          const isExpectedChoice = isPlayerCapacityError(joined.errorCode) || isTeamSelectionRequired(joined.errorCode);
           if (isMounted) {
-            setError(isCapacityFull ? "" : joined.error ?? "没有找到房间");
+            setError(isExpectedChoice ? "" : joined.error ?? "没有找到房间");
             setRoom(latestRoom);
           }
           return;
@@ -2141,6 +2215,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
+  const needsManualJoinChoice = Boolean(room?.gameMode === "TEAM_BATTLE" && room.teamAssignmentMode === "MANUAL");
 
   useEffect(() => {
     setGameSettings((currentSettings) => {
@@ -2213,7 +2288,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
   }
 
-  async function handleSwitchRole(role: PlayerRole) {
+  async function handleSwitchRole(role: PlayerRole, team?: TeamBattleTeam) {
     if (!room?.id || !playerId || !canSwitchPlayerRole(room, isCurrentPresenter) || currentPlayer?.role === role) {
       return;
     }
@@ -2222,7 +2297,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     setError("");
 
     try {
-      const nextRoom = await updatePlayerRole(room.id, playerId, playerId, role);
+      const nextRoom = await updatePlayerRole(room.id, playerId, playerId, role, team);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom } : nextRoom));
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "身份切换失败，请稍后重试");
@@ -2231,7 +2306,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     }
   }
 
-  async function handleJoinRoomAsRole(role: PlayerRole) {
+  async function handleJoinRoomAsRole(role: PlayerRole, team?: TeamBattleTeam) {
     if (!room || currentPlayer || pendingJoinRole) {
       return;
     }
@@ -2240,7 +2315,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     setError("");
 
     try {
-      const joined = await joinRoom(roomCode, playerId, nickname, role);
+      const joined = await joinRoom(roomCode, playerId, nickname, role, team);
       if (joined.error || !joined.room) {
         setError(joined.error ?? "加入房间失败，请稍后重试");
         return;
@@ -2257,6 +2332,20 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError(caughtError instanceof Error ? caughtError.message : "加入房间失败，请稍后重试");
     } finally {
       setPendingJoinRole(null);
+    }
+  }
+
+  async function handleSelectTeam(team: TeamBattleTeam) {
+    if (!room?.id || !playerId || pendingTeam || room.status === "PLAYING") return;
+    setPendingTeam(team);
+    setError("");
+    try {
+      const nextRoom = await selectTeamForPlayer(room.id, playerId, team);
+      setRoom(nextRoom);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "更换队伍失败，请稍后重试");
+    } finally {
+      setPendingTeam(null);
     }
   }
 
@@ -2362,6 +2451,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     const updateSeq = settingsUpdateSeqRef.current + 1;
     settingsUpdateSeqRef.current = updateSeq;
     setGameSettings(normalizedSettings);
+    setIsUpdatingSettings(true);
     setError("");
 
     try {
@@ -2374,6 +2464,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         roundScores: normalizedSettings.roundScores,
         teamRevealVoteSeconds: normalizedSettings.teamRevealVoteSeconds,
         teamGuessVoteSeconds: normalizedSettings.teamGuessVoteSeconds,
+        teamAssignmentMode: normalizedSettings.teamAssignmentMode,
       });
 
       if (settingsUpdateSeqRef.current === updateSeq) {
@@ -2392,6 +2483,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         setGameSettings(getRoomGameSettings(room));
         setError(caughtError instanceof Error ? caughtError.message : "修改游戏模式失败，请稍后重试");
       }
+    } finally {
+      if (settingsUpdateSeqRef.current === updateSeq) setIsUpdatingSettings(false);
     }
   }
 
@@ -2531,6 +2624,19 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             回到首页
           </Button>
         </Panel>
+      ) : !currentPlayer && needsManualJoinChoice ? (
+        <div className="mx-auto max-w-2xl">
+          <Panel title="选择队伍加入">
+            <p className="text-sm leading-6 text-[var(--muted)]">
+              手动分队已开启。请选择红队或蓝队；若游戏已经开始，本题先观看并从下一题正式参赛。
+            </p>
+            <div className="mt-5 grid gap-3 sm:grid-cols-3">
+              <Button type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "red")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入红队"}</Button>
+              <Button type="button" variant="secondary" onClick={() => handleJoinRoomAsRole("PLAYER", "blue")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入蓝队"}</Button>
+              <Button type="button" variant="secondary" onClick={() => handleJoinRoomAsRole("SPECTATOR")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}</Button>
+            </div>
+          </Panel>
+        </div>
       ) : !currentPlayer && room.status === "PLAYING" ? (
         <div className="mx-auto max-w-2xl">
           <Panel title="选择加入方式">
@@ -2623,17 +2729,22 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               playerId={playerId}
               presenterPlayerId={room.currentPresenterPlayerId}
               gameMode={gameSettings.gameMode}
+              teamAssignmentMode={room.teamAssignmentMode}
+              teamAssignments={room.teamAssignments}
+              pendingTeam={pendingTeam}
+              onSelectTeam={handleSelectTeam}
               spectatorAction={
                 canSwitchRole ? (
-                  <Button
-                    className="h-9 px-3"
-                    type="button"
-                    variant="secondary"
-                    onClick={() => handleSwitchRole(isCurrentSpectator ? "PLAYER" : "SPECTATOR")}
-                    disabled={isSwitchingRole}
-                  >
-                    {isSwitchingRole ? "切换中…" : isCurrentSpectator ? "退出观战" : "加入观战"}
-                  </Button>
+                  isCurrentSpectator && needsManualJoinChoice ? (
+                    <div className="flex gap-2">
+                      <Button className="h-9 px-3" type="button" onClick={() => handleSwitchRole("PLAYER", "red")} disabled={isSwitchingRole}>加入红队</Button>
+                      <Button className="h-9 px-3" type="button" variant="secondary" onClick={() => handleSwitchRole("PLAYER", "blue")} disabled={isSwitchingRole}>加入蓝队</Button>
+                    </div>
+                  ) : (
+                    <Button className="h-9 px-3" type="button" variant="secondary" onClick={() => handleSwitchRole(isCurrentSpectator ? "PLAYER" : "SPECTATOR")} disabled={isSwitchingRole}>
+                      {isSwitchingRole ? "切换中…" : isCurrentSpectator ? "退出观战" : "加入观战"}
+                    </Button>
+                  )
                 ) : null
               }
               action={
@@ -2657,6 +2768,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             isHost={isHost}
             presenterName={presenterName}
             isStartingGame={isStartingGame}
+            isUpdatingSettings={isUpdatingSettings}
             isCancelingRound={isCancelingRound}
             onSettingsChange={handleGameSettingsChange}
             onOpenPresenterPicker={() => setIsPresenterPickerOpen(true)}

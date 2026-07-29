@@ -12,7 +12,10 @@ import {
   getCommunityQuestionSets,
   publishQuestionSetToCommunity,
   runWithGameDatabase,
+  selectPresenterForRound,
   startGameWithQuestionSet,
+  selectTeamForPlayer,
+  updatePlayerRole,
   updateRoomGameSettings,
 } from "../worker/gameService";
 
@@ -63,7 +66,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0014") {
+function applyMigrations(db: DatabaseSync, through = "0015") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -94,6 +97,27 @@ test("D1 0013 upgrades rooms to TEAM_BATTLE vote durations transactionally", () 
   assert.equal(room.lobby_team_guess_vote_seconds, 50);
   assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_reveal_vote_seconds=0 WHERE id='legacy-room'").run(), /CHECK constraint failed/);
   assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_guess_vote_seconds=601 WHERE id='legacy-room'").run(), /CHECK constraint failed/);
+});
+
+test("D1 0015 adds manual team state transactionally with safe defaults", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0014");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,game_status) VALUES(?,?,?,?)").run("legacy-team", "TEAM15", "host", "LOBBY");
+  const migration = readFileSync(join(migrationsDirectory, "0015_manual_team_assignment.sql"), "utf8");
+  const firstStatement = migration.split(";").map((statement) => statement.trim()).filter(Boolean)[0];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`${firstStatement};`);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_team_assignment_mode'").get().count, 0);
+  db.exec(migration);
+  const room = db.prepare("SELECT * FROM rooms WHERE id='legacy-team'").get();
+  assert.equal(room.lobby_team_assignment_mode, "AUTO");
+  assert.equal(room.lobby_team_assignments, "{}");
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_assignment_mode='INVALID' WHERE id='legacy-team'").run(), /CHECK constraint failed/);
 });
 
 test("D1 0012 upgrades to nullable creation methods without rewriting historical rows", () => {
@@ -216,5 +240,105 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
     const deadlineMs = new Date(started.gameSession.teamBattleState!.voteDeadlineAt!).getTime();
     const createdAtMs = new Date(started.gameSession.createdAt).getTime();
     assert.ok(deadlineMs >= createdAtMs + 22_000 && deadlineMs <= Date.now() + 23_000);
+  });
+});
+
+test("manual team setup blocks incomplete rosters, allows uneven teams, and switching to AUTO clears assignments", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  db.sqlite.prepare(`INSERT INTO rooms(id,room_code,host_player_id,game_status,current_presenter_player_id,prepared_question_set_id)
+    VALUES(?,?,?,?,?,?)`).run("room-manual-team", "MTEAM1", "host", "QUESTION_SETUP", "host", "set-manual-team");
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["p1", "P1", 0], ["p2", "P2", 0], ["p3", "P3", 0], ["watch", "Watch", 0]] as const) {
+    db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+      .run(id, "room-manual-team", nickname, isHost, id === "watch" ? "SPECTATOR" : "PLAYER");
+  }
+  db.sqlite.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
+    .run("set-manual-team", "Manual Team Set", "host", 1);
+  db.sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
+    .run("question-manual-team", "set-manual-team", "https://example.com/manual-team.webp", 0);
+
+  await runWithGameDatabase(db, async () => {
+    let room = await updateRoomGameSettings({
+      roomId: "room-manual-team",
+      hostPlayerId: "host",
+      gameMode: "TEAM_BATTLE",
+      teamAssignmentMode: "MANUAL",
+    });
+    assert.equal(room.teamAssignmentMode, "MANUAL");
+    await assert.rejects(startGameWithQuestionSet({
+      startRequestId: "manual-team-start-01",
+      roomId: "room-manual-team",
+      hostPlayerId: "host",
+      presenterPlayerId: "host",
+      questionSetId: "set-manual-team",
+      gameMode: "TEAM_BATTLE",
+    }), /尚未选择队伍/);
+
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p1", team: "red" });
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p2", team: "blue" });
+    room = await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p3", team: "blue" });
+    assert.deepEqual(room.teamAssignments, { p1: "red", p2: "blue", p3: "blue" });
+
+    room = await updateRoomGameSettings({ roomId: "room-manual-team", hostPlayerId: "host", gameMode: "TEAM_BATTLE", teamAssignmentMode: "AUTO" });
+    assert.deepEqual(room.teamAssignments, {});
+    room = await updateRoomGameSettings({ roomId: "room-manual-team", hostPlayerId: "host", gameMode: "TEAM_BATTLE", teamAssignmentMode: "MANUAL" });
+    assert.deepEqual(room.teamAssignments, {});
+
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p1", team: "red" });
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p2", team: "blue" });
+    await selectTeamForPlayer({ roomId: "room-manual-team", playerId: "p3", team: "blue" });
+    const started = await startGameWithQuestionSet({
+      startRequestId: "manual-team-start-02",
+      roomId: "room-manual-team",
+      hostPlayerId: "host",
+      presenterPlayerId: "host",
+      questionSetId: "set-manual-team",
+      gameMode: "TEAM_BATTLE",
+    });
+    assert.deepEqual(started.gameSession.teamBattleState?.teams, { red: ["p1"], blue: ["p2", "p3"] });
+    assert.equal(started.gameSession.teamBattleState?.initialTeams?.red.includes("host"), false);
+    assert.equal(started.gameSession.teamBattleState?.initialTeams?.blue.includes("watch"), false);
+  });
+});
+
+test("manual team setup removes presenter and spectator assignments and remains editable after question-set preparation", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  db.sqlite.prepare("INSERT INTO rooms(id,room_code,host_player_id,game_status) VALUES(?,?,?,?)")
+    .run("room-manual-lifecycle", "MTEAM2", "host", "LOBBY");
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["p1", "P1", 0], ["p2", "P2", 0]] as const) {
+    db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+      .run(id, "room-manual-lifecycle", nickname, isHost, "PLAYER");
+  }
+
+  await runWithGameDatabase(db, async () => {
+    await updateRoomGameSettings({
+      roomId: "room-manual-lifecycle",
+      hostPlayerId: "host",
+      gameMode: "TEAM_BATTLE",
+      teamAssignmentMode: "MANUAL",
+    });
+    await selectTeamForPlayer({ roomId: "room-manual-lifecycle", playerId: "host", team: "red" });
+    await selectTeamForPlayer({ roomId: "room-manual-lifecycle", playerId: "p1", team: "blue" });
+    await selectTeamForPlayer({ roomId: "room-manual-lifecycle", playerId: "p2", team: "red" });
+
+    let room = await selectPresenterForRound("room-manual-lifecycle", "host", "p1");
+    assert.equal(room.status, "QUESTION_SETUP");
+    assert.deepEqual(room.teamAssignments, { host: "red", p2: "red" });
+
+    db.sqlite.prepare("UPDATE rooms SET prepared_question_set_id=? WHERE id=?")
+      .run("prepared-set", "room-manual-lifecycle");
+    room = await selectTeamForPlayer({ roomId: "room-manual-lifecycle", playerId: "p2", team: "blue" });
+    assert.equal(room.preparedQuestionSetId, "prepared-set");
+    assert.deepEqual(room.teamAssignments, { host: "red", p2: "blue" });
+
+    room = await updatePlayerRole("room-manual-lifecycle", "p2", "p2", "SPECTATOR");
+    assert.deepEqual(room.teamAssignments, { host: "red" });
+    await assert.rejects(
+      updatePlayerRole("room-manual-lifecycle", "p2", "p2", "PLAYER"),
+      /请先选择加入红队或蓝队/,
+    );
+    room = await updatePlayerRole("room-manual-lifecycle", "p2", "p2", "PLAYER", "blue");
+    assert.deepEqual(room.teamAssignments, { host: "red", p2: "blue" });
   });
 });

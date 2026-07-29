@@ -14,6 +14,8 @@ import type {
   LeaderboardEntry,
   Player,
   PlayerRole,
+  TeamAssignmentMode,
+  TeamBattleTeam,
   PlayerScore,
   Question,
   QuestionSetUrlImportResult,
@@ -126,11 +128,11 @@ export const getRoomWithPlayers = (roomCode: string) => rpc<Room | null>("getRoo
 
 export const getPlayersByRoomId = (roomId: string) => rpc<Player[]>("getPlayersByRoomId", roomId);
 
-export const joinRoom = (roomCode: string, playerId: string, nickname: string, role?: PlayerRole) =>
-  rpc<{ room: Room | null; error: string | null; errorCode?: string | null }>("joinRoom", roomCode, playerId, nickname, role);
+export const joinRoom = (roomCode: string, playerId: string, nickname: string, role?: PlayerRole, team?: TeamBattleTeam) =>
+  rpc<{ room: Room | null; error: string | null; errorCode?: string | null }>("joinRoom", roomCode, playerId, nickname, role, team);
 
-export const updatePlayerRole = (roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole) =>
-  rpc<Room>("updatePlayerRole", roomId, actorPlayerId, targetPlayerId, role);
+export const updatePlayerRole = (roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole, team?: TeamBattleTeam) =>
+  rpc<Room>("updatePlayerRole", roomId, actorPlayerId, targetPlayerId, role, team);
 
 export const leaveRoom = (roomId: string, playerId: string) => rpc<Room | null>("leaveRoom", roomId, playerId);
 
@@ -154,6 +156,9 @@ export function dissolveRoomOnPageExit(roomId: string, playerId: string) {
 
 export const selectPresenterForRound = (roomId: string, hostPlayerId: string, presenterPlayerId: string) =>
   rpc<Room>("selectPresenterForRound", roomId, hostPlayerId, presenterPlayerId);
+
+export const selectTeamForPlayer = (roomId: string, playerId: string, team: TeamBattleTeam) =>
+  rpc<Room>("selectTeamForPlayer", { roomId, playerId, team });
 
 export const cancelCurrentRound = (roomId: string, hostPlayerId: string) =>
   rpc<Room>("cancelCurrentRound", roomId, hostPlayerId);
@@ -211,6 +216,7 @@ export const updateRoomGameSettings = (params: {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamAssignmentMode?: TeamAssignmentMode;
 }) => rpc<Room>("updateRoomGameSettings", params);
 
 export const startGameWithQuestionSet = (params: {

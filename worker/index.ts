@@ -228,6 +228,7 @@ const MUTATION_REGISTRY = {
   createQuestionSetFromUrlText: { deadline: "none" },
   prepareQuestionSetForStart: { deadline: "none" },
   updateRoomGameSettings: { deadline: "none" },
+  selectTeamForPlayer: { deadline: "none" },
   startGameWithQuestionSet: { deadline: "authoritative-post-state" },
   confirmRevealBlocks: { deadline: "authoritative-post-state" },
   submitAnswer: { deadline: "none" },
@@ -360,11 +361,11 @@ const VNEXT_POSITIONAL_ROOM_MUTATIONS = new Set(["joinRoom", "leaveRoom", "kickP
 
 function getVNextPositionalMutation(name: string, args: unknown[]) {
   switch (name) {
-    case "joinRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomCode: args[0], playerId: args[1], nickname: args[2], role: args[3] } } : null;
+    case "joinRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomCode: args[0], playerId: args[1], nickname: args[2], role: args[3], team: args[4] } } : null;
     case "leaveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], playerId: args[1] } } : null;
     case "kickPlayerFromRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1], targetPlayerId: args[2] } } : null;
     case "dissolveRoom": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
-    case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3] } } : null;
+    case "updatePlayerRole": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], actorPlayerId: args[1], targetPlayerId: args[2], role: args[3], team: args[4] } } : null;
     case "cancelCurrentRound": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     case "returnRoomToLobby": return typeof args[1] === "string" ? { actorId: args[1], payload: { roomId: args[0], hostPlayerId: args[1] } } : null;
     default: return null;
@@ -5041,6 +5042,8 @@ export default {
         if (
           body?.name === "joinRoom" ||
           body?.name === "updatePlayerRole" ||
+          body?.name === "selectTeamForPlayer" ||
+          body?.name === "updateRoomGameSettings" ||
           ROOM_AUTHORITY_GAME_NAMES.has(body?.name ?? "") ||
           ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body?.name ?? "") ||
           mutationDeadlinePolicy === "authoritative-post-state"
@@ -5049,6 +5052,8 @@ export default {
             ? await getJoinRoomTopic(env, body.args ?? [])
             : body.name === "updatePlayerRole" || body.name === "getPlayersByRoomId"
               ? getRoomIdArgTopic(body.args ?? [])
+              : (body.name === "selectTeamForPlayer" || body.name === "updateRoomGameSettings") && isRecord(body.args?.[0]) && typeof body.args[0].roomId === "string"
+                ? `room:${body.args[0].roomId}`
               : GAME_SESSION_ID_STRING_ARG_NAMES.has(body.name ?? "")
                 ? await getGameSessionTopic(env, body.args ?? [])
               : await runWithGameDatabase(env, () => getRoomTopicForBroadcast(body.name ?? "", body.args ?? [], null));

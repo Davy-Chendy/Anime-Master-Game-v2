@@ -40,6 +40,7 @@ import type {
   TeamBattlePreviousTurnAction,
   TeamBattleState,
   TeamBattleTeam,
+  TeamAssignmentMode,
 } from "../src/types/game";
 
 type D1QueryClient = ReturnType<typeof createD1QueryClient>;
@@ -154,6 +155,38 @@ function normalizeRoundSeconds(value: unknown) {
   return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_ROUND_SECONDS)));
 }
 
+function normalizeTeamAssignmentMode(value: unknown): TeamAssignmentMode {
+  return value === "MANUAL" ? "MANUAL" : "AUTO";
+}
+
+function normalizeTeamAssignments(value: unknown): Partial<Record<string, TeamBattleTeam>> {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source) as unknown;
+    } catch {
+      source = {};
+    }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  return Object.fromEntries(
+    Object.entries(source).filter((entry): entry is [string, TeamBattleTeam] => entry[1] === "red" || entry[1] === "blue"),
+  );
+}
+
+function sanitizeTeamAssignments(room: DbRoom, players: DbPlayer[]) {
+  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  if (room.current_presenter_player_id) delete assignments[room.current_presenter_player_id];
+  if (players.length === 0) return assignments;
+  const eligible = new Set(
+    players
+      .filter(isGamePlayer)
+      .filter((player) => player.id !== room.current_presenter_player_id)
+      .map((player) => player.id),
+  );
+  return Object.fromEntries(Object.entries(assignments).filter(([playerId]) => eligible.has(playerId)));
+}
+
 function normalizeTeamBattleVoteSeconds(value: unknown, fallback: number) {
   return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : fallback)));
 }
@@ -200,6 +233,8 @@ function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
       room.lobby_team_guess_vote_seconds,
       DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
     ),
+    teamAssignmentMode: normalizeTeamAssignmentMode(room.lobby_team_assignment_mode),
+    teamAssignments: sanitizeTeamAssignments(room, players),
     createdAt: room.created_at,
     updatedAt: room.updated_at,
   };
@@ -499,14 +534,20 @@ function createInitialTeamBattleState(
     revealVoteSeconds?: number;
     guessVoteSeconds?: number;
     nowMs?: number;
+    manualAssignments?: Partial<Record<string, TeamBattleTeam>>;
   },
 ): TeamBattleState {
-  const guessers = shuffleItems(players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId));
+  const eligibleGuessers = players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId);
+  const guessers = options?.manualAssignments ? eligibleGuessers : shuffleItems(eligibleGuessers);
   const largerTeamSize = Math.ceil(guessers.length / 2);
   const redGetsExtraPlayer = guessers.length % 2 === 1 ? randomInt(2) === 0 : true;
   const redTeamSize = redGetsExtraPlayer ? largerTeamSize : Math.floor(guessers.length / 2);
-  const red = guessers.slice(0, redTeamSize).map((player) => player.id);
-  const blue = guessers.slice(redTeamSize).map((player) => player.id);
+  const red = options?.manualAssignments
+    ? guessers.filter((player) => options.manualAssignments?.[player.id] === "red").map((player) => player.id)
+    : guessers.slice(0, redTeamSize).map((player) => player.id);
+  const blue = options?.manualAssignments
+    ? guessers.filter((player) => options.manualAssignments?.[player.id] === "blue").map((player) => player.id)
+    : guessers.slice(redTeamSize).map((player) => player.id);
   const teamMemberNames = Object.fromEntries(guessers.map((player) => [player.id, player.nickname.trim() || "已离开玩家"]));
 
   return withFixedTeamBattleDeadline({
@@ -1514,6 +1555,7 @@ const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 50;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
 const ROUND_DEADLINE_GRACE_MS = 3000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = BUZZER_JUDGING_STABILIZE_MS;
@@ -1674,6 +1716,8 @@ export async function createRoom(playerId: string, nickname: string) {
         lobby_round_scores: DEFAULT_ROUND_SCORES,
         lobby_team_reveal_vote_seconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
         lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+        lobby_team_assignment_mode: "AUTO",
+        lobby_team_assignments: "{}",
       })
       .select()
       .single<DbRoom>();
@@ -1817,12 +1861,26 @@ async function getDbPlayersByRoomId(roomId: string) {
   return data ?? [];
 }
 
+async function clearTeamAssignment(room: DbRoom, playerId: string) {
+  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  if (!assignments[playerId]) return room;
+  delete assignments[playerId];
+  const { data, error } = await d1
+    .from("rooms")
+    .update({ lobby_team_assignments: JSON.stringify(assignments) })
+    .eq("id", room.id)
+    .select()
+    .maybeSingle<DbRoom>();
+  if (error || !data) throw new Error(error?.message ?? "更新房间分队失败：房间状态已变化。");
+  return data;
+}
+
 export async function getPlayersByRoomId(roomId: string) {
   const players = await getDbPlayersByRoomId(roomId);
   return players.map(toPlayer);
 }
 
-export async function joinRoom(roomCode: string, playerId: string, nickname: string, role?: PlayerRole) {
+export async function joinRoom(roomCode: string, playerId: string, nickname: string, role?: PlayerRole, team?: TeamBattleTeam) {
   const room = await getRoomByCode(roomCode);
 
   if (!room) {
@@ -1847,6 +1905,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   const existingPlayer = players.find((player) => player.id === playerId);
   const isExistingPlayer = Boolean(existingPlayer);
   const requestedRole = isPlayerRole(role) ? role : "PLAYER";
+  const requestedTeam = team === "red" || team === "blue" ? team : null;
   let nextRole = existingPlayer ? normalizePlayerRole(existingPlayer.role) : requestedRole;
 
   if (existingPlayer && role && requestedRole !== nextRole) {
@@ -1874,6 +1933,19 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     };
   }
 
+  const existingAssignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  const needsManualTeam = room.lobby_game_mode === "TEAM_BATTLE"
+    && normalizeTeamAssignmentMode(room.lobby_team_assignment_mode) === "MANUAL"
+    && nextRole === "PLAYER"
+    && playerId !== room.current_presenter_player_id;
+  if (needsManualTeam && !requestedTeam && !existingAssignments[playerId]) {
+    return {
+      room: null,
+      errorCode: TEAM_SELECTION_REQUIRED_ERROR_CODE,
+      error: "手动分队已开启，请先选择加入红队或蓝队。",
+    };
+  }
+
   const isHost = room.host_player_id === playerId;
   const { error } = await d1.from("players").upsert(
     {
@@ -1898,6 +1970,21 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     throw new Error(error.message);
   }
 
+  const nextAssignments = { ...existingAssignments };
+  if (nextRole === "SPECTATOR" || playerId === room.current_presenter_player_id) delete nextAssignments[playerId];
+  else if (requestedTeam) nextAssignments[playerId] = requestedTeam;
+  let updatedRoom = room;
+  if (JSON.stringify(nextAssignments) !== JSON.stringify(existingAssignments)) {
+    const { data, error: assignmentError } = await d1
+      .from("rooms")
+      .update({ lobby_team_assignments: JSON.stringify(nextAssignments) })
+      .eq("id", room.id)
+      .select()
+      .maybeSingle<DbRoom>();
+    if (assignmentError || !data) throw new Error(assignmentError?.message ?? "加入队伍失败：房间状态已变化。");
+    updatedRoom = data;
+  }
+
   const nextPlayers = await getDbPlayersByRoomId(room.id);
   const joinedPlayer = nextPlayers.find((player) => player.id === playerId);
   if (
@@ -1910,7 +1997,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   }
 
   return {
-    room: toRoom(room, nextPlayers),
+    room: toRoom(updatedRoom, nextPlayers),
     error: null,
   };
 }
@@ -1949,13 +2036,14 @@ export async function leaveRoom(roomId: string, playerId: string) {
   }
 
   const remainingPlayers = await getDbPlayersByRoomId(roomId);
+  const roomAfterAssignment = await clearTeamAssignment(room, playerId);
 
   if (room.game_status === "PLAYING" && room.current_game_id) {
     await removePlayerFromCurrentGame(room.current_game_id, playerId);
   }
 
   if (!isLeavingHost && !(isLeavingPresenter && room.game_status === "QUESTION_SETUP")) {
-    return toRoom(room, remainingPlayers);
+    return toRoom(roomAfterAssignment, remainingPlayers);
   }
 
   const currentHostStillPresent = remainingPlayers.some((player) => player.id === room.host_player_id);
@@ -2075,7 +2163,7 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
     throw new Error(deleteError.message);
   }
 
-  let updatedRoom = room;
+  let updatedRoom = await clearTeamAssignment(room, targetPlayerId);
   if (room.game_status === "PLAYING" && room.current_game_id) {
     await removePlayerFromCurrentGame(room.current_game_id, targetPlayerId);
   }
@@ -2170,6 +2258,18 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
     throw new Error("选择出题人失败：观战者不能当出题人。");
   }
 
+  const { data: currentRoom, error: currentRoomError } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .eq("host_player_id", hostPlayerId)
+    .eq("game_status", "LOBBY")
+    .maybeSingle<DbRoom>();
+  if (currentRoomError) throw new Error(currentRoomError.message);
+  if (!currentRoom) throw new Error("只有房主可以在大厅阶段选择出题人。");
+  const nextAssignments = normalizeTeamAssignments(currentRoom.lobby_team_assignments);
+  delete nextAssignments[presenterPlayerId];
+
   const { data: room, error } = await d1
     .from("rooms")
     .update({
@@ -2177,6 +2277,7 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
       game_status: "QUESTION_SETUP",
       current_game_id: null,
       prepared_question_set_id: null,
+      lobby_team_assignments: JSON.stringify(nextAssignments),
     })
     .eq("id", roomId)
     .eq("host_player_id", hostPlayerId)
@@ -2192,7 +2293,35 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
     throw new Error("只有房主可以在大厅阶段选择出题人。");
   }
 
-  return toRoom(room);
+  return toRoom(room, await getDbPlayersByRoomId(roomId));
+}
+
+export async function selectTeamForPlayer(params: { roomId: string; playerId: string; team: TeamBattleTeam }) {
+  assertD1Env();
+  if (params.team !== "red" && params.team !== "blue") throw new Error("请选择有效的队伍。");
+  const { data: room, error: roomError } = await d1.from("rooms").select("*").eq("id", params.roomId).maybeSingle<DbRoom>();
+  if (roomError) throw new Error(roomError.message);
+  if (!room || (room.game_status !== "LOBBY" && room.game_status !== "QUESTION_SETUP")) {
+    throw new Error("只有游戏开始前可以更换队伍。");
+  }
+  if (room.lobby_game_mode !== "TEAM_BATTLE" || normalizeTeamAssignmentMode(room.lobby_team_assignment_mode) !== "MANUAL") {
+    throw new Error("当前房间未开启手动分队。");
+  }
+  if (room.current_presenter_player_id === params.playerId) throw new Error("出题人不需要加入队伍。");
+  const players = await getDbPlayersByRoomId(params.roomId);
+  const player = players.find((item) => item.id === params.playerId);
+  if (!player || !isGamePlayer(player)) throw new Error("只有玩家身份可以加入队伍。");
+  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  assignments[params.playerId] = params.team;
+  const { data: updatedRoom, error } = await d1
+    .from("rooms")
+    .update({ lobby_team_assignments: JSON.stringify(assignments) })
+    .eq("id", params.roomId)
+    .eq("game_status", room.game_status)
+    .select()
+    .maybeSingle<DbRoom>();
+  if (error || !updatedRoom) throw new Error(error?.message ?? "更换队伍失败：房间状态已变化。");
+  return toRoom(updatedRoom, players);
 }
 
 export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
@@ -2611,6 +2740,7 @@ export async function updateRoomGameSettings(params: {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamAssignmentMode?: TeamAssignmentMode;
 }) {
   assertD1Env();
 
@@ -2629,7 +2759,6 @@ export async function updateRoomGameSettings(params: {
     params.teamGuessVoteSeconds,
     DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   );
-
   const { data: currentRoom, error: currentRoomError } = await d1
     .from("rooms")
     .select("*")
@@ -2644,6 +2773,7 @@ export async function updateRoomGameSettings(params: {
   if (!currentRoom || (currentRoom.game_status !== "LOBBY" && currentRoom.game_status !== "QUESTION_SETUP")) {
     throw new Error("只有房主可以在房间大厅或题库准备阶段修改游戏模式。");
   }
+  const teamAssignmentMode = normalizeTeamAssignmentMode(params.teamAssignmentMode ?? currentRoom.lobby_team_assignment_mode);
 
   const { data: room, error } = await d1
     .from("rooms")
@@ -2654,6 +2784,8 @@ export async function updateRoomGameSettings(params: {
       lobby_round_scores: roundScores,
       lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
       lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
+      lobby_team_assignment_mode: teamAssignmentMode,
+      ...(teamAssignmentMode === "AUTO" ? { lobby_team_assignments: "{}" } : {}),
     })
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)
@@ -2847,10 +2979,25 @@ export async function startGameWithQuestionSet(params: {
     throw new Error("红蓝对抗模式至少需要 2 名答题者。");
   }
 
+  const teamAssignmentMode = normalizeTeamAssignmentMode(room.lobby_team_assignment_mode);
+  const manualAssignments = sanitizeTeamAssignments(room, activeGamePlayers);
+  if (gameMode === "TEAM_BATTLE" && teamAssignmentMode === "MANUAL") {
+    const unassigned = teamBattleGuessers.filter((player) => !manualAssignments[player.id]);
+    const redCount = teamBattleGuessers.filter((player) => manualAssignments[player.id] === "red").length;
+    const blueCount = teamBattleGuessers.filter((player) => manualAssignments[player.id] === "blue").length;
+    if (unassigned.length > 0) {
+      throw new Error(`开始游戏失败：${unassigned.map((player) => player.nickname).join("、")}尚未选择队伍。`);
+    }
+    if (redCount === 0 || blueCount === 0) {
+      throw new Error(`开始游戏失败：${redCount === 0 ? "红队" : "蓝队"}至少需要 1 名答题玩家。`);
+    }
+  }
+
   const teamBattleState = gameMode === "TEAM_BATTLE"
     ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId, {
         revealVoteSeconds: teamRevealVoteSeconds,
         guessVoteSeconds: teamGuessVoteSeconds,
+        manualAssignments: teamAssignmentMode === "MANUAL" ? manualAssignments : undefined,
       })
     : null;
   const roundScores = normalizeRoundScores(params.roundScores ?? room.lobby_round_scores, maxRevealRounds);
@@ -3049,7 +3196,7 @@ export async function startGameWithQuestionSet(params: {
   };
 }
 
-export async function updatePlayerRole(roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole) {
+export async function updatePlayerRole(roomId: string, actorPlayerId: string, targetPlayerId: string, role: PlayerRole, team?: TeamBattleTeam) {
   assertD1Env();
 
   if (!isPlayerRole(role)) {
@@ -3094,6 +3241,19 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以继续观战。`);
   }
 
+  const selectedTeam = team === "red" || team === "blue" ? team : null;
+  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  if (
+    role === "PLAYER"
+    && room.lobby_game_mode === "TEAM_BATTLE"
+    && normalizeTeamAssignmentMode(room.lobby_team_assignment_mode) === "MANUAL"
+    && targetPlayerId !== room.current_presenter_player_id
+    && !selectedTeam
+    && !assignments[targetPlayerId]
+  ) {
+    throw new Error("手动分队已开启，请先选择加入红队或蓝队。");
+  }
+
   const { data: updatedPlayer, error: updateError } = await d1
     .from("players")
     .update({
@@ -3113,8 +3273,18 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("身份切换失败：你不在当前房间。");
   }
 
+  if (role === "SPECTATOR" || targetPlayerId === room.current_presenter_player_id) delete assignments[targetPlayerId];
+  else if (selectedTeam) assignments[targetPlayerId] = selectedTeam;
+  const { data: updatedRoom, error: assignmentError } = await d1
+    .from("rooms")
+    .update({ lobby_team_assignments: JSON.stringify(assignments) })
+    .eq("id", roomId)
+    .select()
+    .maybeSingle<DbRoom>();
+  if (assignmentError || !updatedRoom) throw new Error(assignmentError?.message ?? "身份切换失败：房间状态已变化。");
+
   const nextPlayers = await getDbPlayersByRoomId(roomId);
-  return toRoom(room, nextPlayers);
+  return toRoom(updatedRoom, nextPlayers);
 }
 
 export async function getGameSessionById(gameSessionId: string) {

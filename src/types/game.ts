@@ -13,6 +13,7 @@ export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
 export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED" | "TEAM_BATTLE";
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
+export type TeamAssignmentMode = "AUTO" | "MANUAL";
 export type TeamBattlePhase = "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "REVIEW";
 export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 25;
 export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
@@ -72,6 +73,8 @@ export type Room = {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamAssignmentMode?: TeamAssignmentMode;
+  teamAssignments?: Partial<Record<string, TeamBattleTeam>>;
   createdAt: number | string;
   updatedAt?: string;
 };
@@ -90,6 +93,8 @@ export type DbRoom = {
   lobby_round_scores?: unknown;
   lobby_team_reveal_vote_seconds?: number | null;
   lobby_team_guess_vote_seconds?: number | null;
+  lobby_team_assignment_mode?: TeamAssignmentMode | null;
+  lobby_team_assignments?: unknown;
   created_at: string;
   updated_at: string;
 };
