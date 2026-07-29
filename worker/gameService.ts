@@ -1716,7 +1716,7 @@ export async function createRoom(playerId: string, nickname: string) {
         lobby_round_scores: DEFAULT_ROUND_SCORES,
         lobby_team_reveal_vote_seconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
         lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
-        lobby_team_assignment_mode: "AUTO",
+        lobby_team_assignment_mode: "MANUAL",
         lobby_team_assignments: "{}",
       })
       .select()
@@ -1936,6 +1936,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   const existingAssignments = normalizeTeamAssignments(room.lobby_team_assignments);
   const needsManualTeam = room.lobby_game_mode === "TEAM_BATTLE"
     && normalizeTeamAssignmentMode(room.lobby_team_assignment_mode) === "MANUAL"
+    && room.game_status === "PLAYING"
     && nextRole === "PLAYER"
     && playerId !== room.current_presenter_player_id;
   if (needsManualTeam && !requestedTeam && !existingAssignments[playerId]) {

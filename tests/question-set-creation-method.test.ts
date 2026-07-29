@@ -10,6 +10,7 @@ import {
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
   getCommunityQuestionSets,
+  joinRoom,
   publishQuestionSetToCommunity,
   runWithGameDatabase,
   selectPresenterForRound,
@@ -139,7 +140,7 @@ test("D1 0012 upgrades to nullable creation methods without rewriting historical
   );
 });
 
-test("new rooms explicitly use the current TEAM_BATTLE vote duration defaults", async () => {
+test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
   const db = new DatabaseAdapter();
   applyMigrations(db.sqlite);
 
@@ -147,11 +148,44 @@ test("new rooms explicitly use the current TEAM_BATTLE vote duration defaults", 
     const room = await createRoom("host-defaults", "Host");
     assert.equal(room.teamRevealVoteSeconds, 25);
     assert.equal(room.teamGuessVoteSeconds, 50);
+    assert.equal(room.teamAssignmentMode, "MANUAL");
 
-    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds FROM rooms WHERE id=?")
+    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_assignment_mode FROM rooms WHERE id=?")
       .get(room.id);
     assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
     assert.equal(stored.lobby_team_guess_vote_seconds, 50);
+    assert.equal(stored.lobby_team_assignment_mode, "MANUAL");
+  });
+});
+
+test("manual team joins enter the lobby unassigned before play and require an atomic team choice only while playing", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  db.sqlite.prepare(`INSERT INTO rooms(
+    id,room_code,host_player_id,game_status,lobby_game_mode,lobby_team_assignment_mode
+  ) VALUES(?,?,?,?,?,?)`).run("room-join-stage", "JOIN01", "host", "LOBBY", "TEAM_BATTLE", "MANUAL");
+  db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+    .run("host", "room-join-stage", "Host", 1, "PLAYER");
+
+  await runWithGameDatabase(db, async () => {
+    let joined = await joinRoom("JOIN01", "p1", "P1");
+    assert.equal(joined.error, null);
+    assert.equal(joined.room?.status, "LOBBY");
+    assert.equal(joined.room?.players.some((player) => player.id === "p1"), true);
+    assert.deepEqual(joined.room?.teamAssignments, {});
+
+    db.sqlite.prepare("UPDATE rooms SET game_status='QUESTION_SETUP',current_presenter_player_id='host' WHERE id='room-join-stage'").run();
+    joined = await joinRoom("JOIN01", "p2", "P2");
+    assert.equal(joined.error, null);
+    assert.equal(joined.room?.status, "QUESTION_SETUP");
+    assert.equal(joined.room?.players.some((player) => player.id === "p2"), true);
+    assert.deepEqual(joined.room?.teamAssignments, {});
+
+    db.sqlite.prepare("UPDATE rooms SET game_status='PLAYING' WHERE id='room-join-stage'").run();
+    joined = await joinRoom("JOIN01", "p3", "P3");
+    assert.equal(joined.room, null);
+    assert.equal(joined.errorCode, "TEAM_SELECTION_REQUIRED");
+    assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM players WHERE id='p3'").get().count, 0);
   });
 });
 

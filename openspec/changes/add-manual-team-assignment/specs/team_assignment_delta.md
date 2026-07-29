@@ -7,7 +7,12 @@
 
 ### Requirement: Manual Team Assignment
 
-The host can select automatic or manual assignment for team battle rooms. In manual mode each non-spectator, non-presenter player selects red or blue.
+New rooms default to manual assignment, and the host can switch team battle rooms between automatic and manual assignment. In manual mode each non-spectator, non-presenter player selects red or blue.
+
+#### Scenario: Join before play
+- GIVEN a manual team room is in `LOBBY` or `QUESTION_SETUP`
+- WHEN a new player joins the room
+- THEN the player enters the lobby unassigned and selects red or blue from the player list
 
 #### Scenario: Free switching before play
 - GIVEN a room is in `LOBBY` or `QUESTION_SETUP` with manual assignment enabled

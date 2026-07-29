@@ -56,6 +56,8 @@ const statusText: Record<RoomStatus, string> = {
 };
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
+const RED_TEAM_CHOICE_BUTTON_CLASS = "min-h-10 rounded-md bg-rose-50 px-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50";
+const BLUE_TEAM_CHOICE_BUTTON_CLASS = "min-h-10 rounded-md bg-sky-50 px-3 text-sm font-semibold text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50";
 const START_GAME_ATTEMPT_STORAGE_PREFIX = "anime-master:start-game-attempt:";
 const START_GAME_ATTEMPT_TTL_MS = 30 * 60 * 1000;
 const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
@@ -78,7 +80,7 @@ const defaultGameSettings: GameSettings = {
   roundScores: [5, 3, 1],
   teamRevealVoteSeconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
   teamGuessVoteSeconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
-  teamAssignmentMode: "AUTO",
+  teamAssignmentMode: "MANUAL",
 };
 
 function createStartRequestId() {
@@ -164,7 +166,7 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
       settings.teamGuessVoteSeconds,
       DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
     ),
-    teamAssignmentMode: settings.teamAssignmentMode === "MANUAL" ? "MANUAL" : "AUTO",
+    teamAssignmentMode: settings.teamAssignmentMode === "AUTO" ? "AUTO" : "MANUAL",
   };
 }
 
@@ -533,8 +535,8 @@ function PlayerList({
                   </div>
                   {canChooseTeam ? (
                     <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3">
-                      <button className="min-h-10 rounded-md bg-rose-50 px-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50" disabled={Boolean(pendingTeam)} type="button" onClick={() => onSelectTeam?.("red")}>{pendingTeam === "red" ? "加入中…" : assignedTeam === "red" ? "已在红队" : "加入红队"}</button>
-                      <button className="min-h-10 rounded-md bg-sky-50 px-3 text-sm font-semibold text-sky-700 transition hover:bg-sky-100 disabled:opacity-50" disabled={Boolean(pendingTeam)} type="button" onClick={() => onSelectTeam?.("blue")}>{pendingTeam === "blue" ? "加入中…" : assignedTeam === "blue" ? "已在蓝队" : "加入蓝队"}</button>
+                      <button className={RED_TEAM_CHOICE_BUTTON_CLASS} disabled={Boolean(pendingTeam)} type="button" onClick={() => onSelectTeam?.("red")}>{pendingTeam === "red" ? "加入中…" : assignedTeam === "red" ? "已在红队" : "加入红队"}</button>
+                      <button className={BLUE_TEAM_CHOICE_BUTTON_CLASS} disabled={Boolean(pendingTeam)} type="button" onClick={() => onSelectTeam?.("blue")}>{pendingTeam === "blue" ? "加入中…" : assignedTeam === "blue" ? "已在蓝队" : "加入蓝队"}</button>
                     </div>
                   ) : null}
                 </div>
@@ -2215,7 +2217,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
-  const needsManualJoinChoice = Boolean(room?.gameMode === "TEAM_BATTLE" && room.teamAssignmentMode === "MANUAL");
+  const isManualTeamRoom = Boolean(room?.gameMode === "TEAM_BATTLE" && room.teamAssignmentMode === "MANUAL");
+  const needsManualJoinChoice = Boolean(isManualTeamRoom && room?.status === "PLAYING");
 
   useEffect(() => {
     setGameSettings((currentSettings) => {
@@ -2631,8 +2634,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               手动分队已开启。请选择红队或蓝队；若游戏已经开始，本题先观看并从下一题正式参赛。
             </p>
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <Button type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "red")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入红队"}</Button>
-              <Button type="button" variant="secondary" onClick={() => handleJoinRoomAsRole("PLAYER", "blue")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入蓝队"}</Button>
+              <button className={RED_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "red")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入红队"}</button>
+              <button className={BLUE_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "blue")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入蓝队"}</button>
               <Button type="button" variant="secondary" onClick={() => handleJoinRoomAsRole("SPECTATOR")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}</Button>
             </div>
           </Panel>
@@ -2735,10 +2738,10 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               onSelectTeam={handleSelectTeam}
               spectatorAction={
                 canSwitchRole ? (
-                  isCurrentSpectator && needsManualJoinChoice ? (
+                  isCurrentSpectator && isManualTeamRoom ? (
                     <div className="flex gap-2">
-                      <Button className="h-9 px-3" type="button" onClick={() => handleSwitchRole("PLAYER", "red")} disabled={isSwitchingRole}>加入红队</Button>
-                      <Button className="h-9 px-3" type="button" variant="secondary" onClick={() => handleSwitchRole("PLAYER", "blue")} disabled={isSwitchingRole}>加入蓝队</Button>
+                      <button className={RED_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleSwitchRole("PLAYER", "red")} disabled={isSwitchingRole}>加入红队</button>
+                      <button className={BLUE_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleSwitchRole("PLAYER", "blue")} disabled={isSwitchingRole}>加入蓝队</button>
                     </div>
                   ) : (
                     <Button className="h-9 px-3" type="button" variant="secondary" onClick={() => handleSwitchRole(isCurrentSpectator ? "PLAYER" : "SPECTATOR")} disabled={isSwitchingRole}>
