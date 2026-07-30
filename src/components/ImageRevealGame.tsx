@@ -1306,7 +1306,7 @@ export function ImageRevealGame({
   const [roundPromptSoundVolume, setRoundPromptSoundVolume] = useState(getInitialRoundPromptSoundVolume);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
-  const [isPresenterImageReady, setIsPresenterImageReady] = useState(false);
+  const [presenterImageReadyQuestionId, setPresenterImageReadyQuestionId] = useState<string | null>(null);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [playerImageRetryAttempt, setPlayerImageRetryAttempt] = useState(0);
   const [playerImageRetryToken, setPlayerImageRetryToken] = useState(0);
@@ -2156,6 +2156,7 @@ export function ImageRevealGame({
   }, [gameSession?.roundSeconds, gameSession?.roundStartedAt]);
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
+  const isPresenterImageReady = presenterImageReadyQuestionId === currentQuestion?.id;
   const previousQuestionIndex = gameSession && gameSession.currentQuestionIndex > 0 ? gameSession.currentQuestionIndex - 1 : null;
   const previousQuestion = previousQuestionIndex == null ? null : questions[previousQuestionIndex] ?? null;
   const reviewedQuestion = reviewedQuestionIndex == null ? null : questions[reviewedQuestionIndex] ?? null;
@@ -2186,7 +2187,6 @@ export function ImageRevealGame({
     setPlayerImageRetryAttempt(0);
     setPlayerImageRetryToken(0);
     setTeamDisabledBlockDraft([]);
-    setIsPresenterImageReady(false);
     playerLoadedImageRef.current = null;
   }, [currentQuestion?.id]);
 
@@ -4295,17 +4295,20 @@ export function ImageRevealGame({
           <img
             alt=""
             className="h-full w-full object-cover"
+            key={currentQuestion.id}
             src={currentQuestion.imageUrl}
             onLoad={(event) => {
               const image = event.currentTarget;
               if (image.naturalWidth > 0 && image.naturalHeight > 0) {
                 setImageAspectRatio(image.naturalWidth / image.naturalHeight);
                 setIsPortraitImage(image.naturalHeight > image.naturalWidth);
-                setIsPresenterImageReady(true);
+                setPresenterImageReadyQuestionId(currentQuestion.id);
               }
             }}
             onError={() => {
-              setIsPresenterImageReady(false);
+              setPresenterImageReadyQuestionId((readyQuestionId) =>
+                readyQuestionId === currentQuestion.id ? null : readyQuestionId,
+              );
               setImageLoadFailed(true);
             }}
           />
