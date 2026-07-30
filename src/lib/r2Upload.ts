@@ -1,5 +1,7 @@
 "use client";
 
+import { isR2ImageUploadTooLarge, R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE } from "./r2UploadPolicy";
+
 export type UploadableImage = {
   file: File;
   path: string;
@@ -110,6 +112,9 @@ export async function uploadImagesToR2(
   await runPool(items, limit, async (item) => {
     try {
       const prepared = await compressImage(item);
+      if (isR2ImageUploadTooLarge(prepared.uploadBytes)) {
+        throw new Error(R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE);
+      }
       rawBytes += prepared.rawBytes;
       uploadBytes += prepared.uploadBytes;
 

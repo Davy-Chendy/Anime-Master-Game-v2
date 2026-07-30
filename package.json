@@ -18,6 +18,7 @@
     "test:game-result-archive": "tsx --test tests/game-result-archive.test.ts",
     "test:question-set-creation-method": "tsx --test tests/question-set-creation-method.test.ts",
     "test:question-set-creation-analysis": "tsx --test tests/question-set-creation-method-analysis.test.ts",
+    "test:r2-upload": "tsx --test tests/r2-upload.test.ts",
     "analyze:question-set-creation-method": "node scripts/analyze-question-set-creation-method.mjs",
     "backfill:question-set-creation-method": "node scripts/backfill-question-set-creation-method.mjs",
     "test:authority-state-machine": "tsx --test --test-name-pattern=\"seeded state-machine\" tests/authority-full-game.test.ts",

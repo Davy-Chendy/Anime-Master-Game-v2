@@ -9,6 +9,11 @@ import {
   type VNextStartBootstrap,
 } from "./roomAuthorityVNext";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
+import {
+  isR2ImageUploadTooLarge,
+  R2_IMAGE_UPLOAD_MAX_BYTES,
+  R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE,
+} from "../src/lib/r2UploadPolicy";
 
 import type {
   Answer,
@@ -38,7 +43,6 @@ export interface Env {
   R2_IMAGE_PREFIX?: string;
   R2_PUBLIC_BASE_URL?: string;
   R2_EXISTING_IMAGE_LIMIT?: string;
-  R2_IMAGE_STORAGE_LIMIT_BYTES?: string;
   REMOTE_IMAGE_PROXY_CANDIDATES?: string;
   REMOTE_IMPORT_STATE_SECRET?: string;
   REMOTE_UPLOAD_IMAGE_MAX_SIZE?: string;
@@ -163,9 +167,7 @@ const TEAM_BATTLE_VOTE_ALARM_RETRY_DELAY_MS = 1000;
 const TEAM_BATTLE_VOTE_ALARM_MAX_ATTEMPTS = 3;
 const BUSINESS_ALARM_RECOVERY_RETRY_DELAY_MS = 30_000;
 const BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS = 1000;
-const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
-const R2_IMAGE_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024;
-const R2_LIST_PAGE_LIMIT = 1000;
+const REMOTE_IMAGE_FETCH_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
 const REMOTE_IMPORT_CONCURRENCY = 2;
 const QUESTION_URL_IMPORT_MAX_COUNT = 30;
@@ -543,10 +545,6 @@ function getExportedFunction(name: string) {
 
 function getRoomObject(env: Env, topic: string) {
   return env.ROOM_OBJECTS.get(env.ROOM_OBJECTS.idFromName(topic));
-}
-
-function getR2UploadGateObject(env: Env) {
-  return getRoomObject(env, "r2-image-upload-gate");
 }
 
 async function runWithGameDatabase<T>(env: Env, callback: () => Promise<T>) {
@@ -1478,63 +1476,6 @@ function getR2ImagePrefix(env: Env) {
     .replace(/\.\./g, "");
 }
 
-function getR2ImageStorageLimitBytes(env: Env) {
-  const configuredLimit = Number(env.R2_IMAGE_STORAGE_LIMIT_BYTES);
-  return Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : R2_IMAGE_STORAGE_LIMIT_BYTES;
-}
-
-function formatBytes(bytes: number) {
-  if (bytes >= 1024 * 1024 * 1024) {
-    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-
-  if (bytes >= 1024 * 1024) {
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  }
-
-  if (bytes >= 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-
-  return `${bytes} B`;
-}
-
-async function getR2StoredImageBytes(env: Env) {
-  const prefix = getR2ImagePrefix(env);
-  const listPrefix = prefix ? `${prefix}/` : undefined;
-  let cursor: string | undefined;
-  let totalBytes = 0;
-
-  do {
-    const listed = await env.IMAGE_BUCKET.list({
-      prefix: listPrefix,
-      limit: R2_LIST_PAGE_LIMIT,
-      cursor,
-    });
-
-    totalBytes += listed.objects.reduce((sum, object) => sum + object.size, 0);
-    cursor = listed.truncated ? listed.cursor : undefined;
-  } while (cursor);
-
-  return totalBytes;
-}
-
-function r2StorageLimitResponse(request: Request, env: Env, currentBytes: number, uploadBytes: number, limitBytes: number) {
-  return json(
-    {
-      error: `图片存储空间不足：当前已使用 ${formatBytes(currentBytes)}，本次上传 ${formatBytes(uploadBytes)}，上限 ${formatBytes(
-        limitBytes,
-      )}。请先清理图片后再上传。`,
-      currentBytes,
-      uploadBytes,
-      limitBytes,
-    },
-    { status: 507 },
-    request,
-    env,
-  );
-}
-
 function sanitizeFileName(name: string) {
   const fallback = "image";
   const withoutPath = name.split(/[\\/]/).filter(Boolean).pop() ?? fallback;
@@ -1592,12 +1533,11 @@ async function putR2Image(
   fileName: string,
   customMetadata: Record<string, string> = {},
 ) {
-  const storageLimitBytes = getR2ImageStorageLimitBytes(env);
-  const currentStorageBytes = await getR2StoredImageBytes(env);
-  if (currentStorageBytes + body.byteLength > storageLimitBytes) {
+  if (isR2ImageUploadTooLarge(body.byteLength)) {
     return {
       ok: false as const,
-      response: r2StorageLimitResponse(request, env, currentStorageBytes, body.byteLength, storageLimitBytes),
+      error: R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE,
+      response: json({ error: R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE }, { status: 413 }, request, env),
     };
   }
 
@@ -1619,15 +1559,6 @@ async function putR2Image(
     throw new Error("图片写入 R2 失败，请稍后重试。");
   }
 
-  const storageBytesAfterUpload = await getR2StoredImageBytes(env);
-  if (storageBytesAfterUpload > storageLimitBytes) {
-    await env.IMAGE_BUCKET.delete(key);
-    return {
-      ok: false as const,
-      response: r2StorageLimitResponse(request, env, Math.max(0, storageBytesAfterUpload - object.size), object.size, storageLimitBytes),
-    };
-  }
-
   return {
     ok: true as const,
     key,
@@ -1635,8 +1566,6 @@ async function putR2Image(
     publicId: key,
     size: object.size,
     etag: object.httpEtag,
-    storageBytes: storageBytesAfterUpload,
-    storageLimitBytes,
   };
 }
 
@@ -1919,11 +1848,11 @@ async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchRe
       }
 
       const contentLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(contentLength) && contentLength > IMAGE_UPLOAD_MAX_BYTES) {
-        throw new Error("单张图片不能超过 20 MB。");
+      if (Number.isFinite(contentLength) && contentLength > REMOTE_IMAGE_FETCH_MAX_BYTES) {
+        throw new Error("远端原图不能超过 20 MB。");
       }
 
-      const body = await readResponseBodyWithLimit(response, IMAGE_UPLOAD_MAX_BYTES);
+      const body = await readBodyWithLimit(response.body, REMOTE_IMAGE_FETCH_MAX_BYTES, "远端原图不能超过 20 MB。");
       if (body.byteLength === 0) {
         lastError = "远端图片内容为空。";
         continue;
@@ -1938,12 +1867,11 @@ async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchRe
   throw new Error(lastError);
 }
 
-async function readResponseBodyWithLimit(response: Response, maxBytes: number) {
-  if (!response.body) {
-    throw new Error("远端图片响应为空。");
-  }
+class ImageBodyTooLargeError extends Error {}
 
-  const reader = response.body.getReader();
+async function readBodyWithLimit(body: ReadableStream<Uint8Array> | null, maxBytes: number, tooLargeMessage: string) {
+  if (!body) return new ArrayBuffer(0);
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
 
@@ -1956,8 +1884,8 @@ async function readResponseBodyWithLimit(response: Response, maxBytes: number) {
 
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
-        await reader.cancel();
-        throw new Error("单张图片不能超过 20 MB。");
+        await reader.cancel().catch(() => undefined);
+        throw new ImageBodyTooLargeError(tooLargeMessage);
       }
 
       chunks.push(value);
@@ -1966,14 +1894,14 @@ async function readResponseBodyWithLimit(response: Response, maxBytes: number) {
     reader.releaseLock();
   }
 
-  const body = new Uint8Array(totalBytes);
+  const combined = new Uint8Array(totalBytes);
   let offset = 0;
   for (const chunk of chunks) {
-    body.set(chunk, offset);
+    combined.set(chunk, offset);
     offset += chunk.byteLength;
   }
 
-  return body.buffer;
+  return combined.buffer;
 }
 
 async function compressRemoteImage(rawImage: RemoteFetchResult, env: Env) {
@@ -2027,7 +1955,7 @@ async function importRemoteQuestionImage(input: QuestionUrlImportInput, request:
       importSource: "url-text",
     });
     if (!uploaded.ok) {
-      throw new Error("图片存储空间不足。");
+      throw new Error(uploaded.error);
     }
 
     return {
@@ -2159,17 +2087,21 @@ async function handleR2Upload(request: Request, env: Env) {
   }
 
   const contentLength = getRequestContentLength(request);
-  if (contentLength != null && contentLength > IMAGE_UPLOAD_MAX_BYTES) {
-    return json({ error: "单张图片不能超过 20 MB。" }, { status: 413 }, request, env);
+  if (contentLength != null && contentLength > R2_IMAGE_UPLOAD_MAX_BYTES) {
+    return json({ error: R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE }, { status: 413 }, request, env);
   }
 
-  const body = await request.arrayBuffer();
+  let body: ArrayBuffer;
+  try {
+    body = await readBodyWithLimit(request.body, R2_IMAGE_UPLOAD_MAX_BYTES, R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE);
+  } catch (error) {
+    if (error instanceof ImageBodyTooLargeError) {
+      return json({ error: error.message }, { status: 413 }, request, env);
+    }
+    throw error;
+  }
   if (body.byteLength === 0) {
     return json({ error: "上传内容为空。" }, { status: 400 }, request, env);
-  }
-
-  if (body.byteLength > IMAGE_UPLOAD_MAX_BYTES) {
-    return json({ error: "单张图片不能超过 20 MB。" }, { status: 413 }, request, env);
   }
 
   const uploaded = await putR2Image(request, env, body, contentType, new URL(request.url).searchParams.get("filename") ?? "image");
@@ -2184,8 +2116,6 @@ async function handleR2Upload(request: Request, env: Env) {
       publicId: uploaded.publicId,
       size: uploaded.size,
       etag: uploaded.etag,
-      storageBytes: uploaded.storageBytes,
-      storageLimitBytes: uploaded.storageLimitBytes,
     },
     {},
     request,
@@ -2273,8 +2203,6 @@ async function handleR2ImagesList(request: Request, env: Env) {
       limit,
       truncated: listed.truncated,
       cursor: listed.cursor ?? null,
-      storageBytes: await getR2StoredImageBytes(env),
-      storageLimitBytes: getR2ImageStorageLimitBytes(env),
     },
     {},
     request,
@@ -2867,10 +2795,6 @@ export class RoomDurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/r2-upload" && request.method === "POST") {
-      return await this.enqueueR2Upload(request);
-    }
-
     if (url.pathname === "/api/rpc" && request.method === "POST") {
       return request.headers.has(LOCAL_ROOM_OBJECT_TOPIC_HEADER)
         ? await this.enqueueActionBoundRpc(request)
@@ -2923,26 +2847,6 @@ export class RoomDurableObject {
     }
 
     return new Response("未找到对应的实时接口。", { status: 404 });
-  }
-
-  private enqueueR2Upload(request: Request) {
-    const task = this.r2UploadQueue.then(
-      () => this.handleQueuedR2Upload(request),
-      () => this.handleQueuedR2Upload(request),
-    );
-    this.r2UploadQueue = task.then(
-      () => undefined,
-      () => undefined,
-    );
-    return task;
-  }
-
-  private async handleQueuedR2Upload(request: Request) {
-    try {
-      return await handleR2Upload(request, this.env);
-    } catch (error) {
-      return errorResponse(error, request, this.env);
-    }
   }
 
   private enqueueR2BoundRpc(request: Request) {
@@ -5040,10 +4944,6 @@ export default {
           headers: requestHeaders,
           body: JSON.stringify(body),
         });
-        if (body?.name === "createQuestionSetFromUrlText") {
-          return withCors(await getR2UploadGateObject(env).fetch(requestWithBody), request, env);
-        }
-
         const mutationDeadlinePolicy = getMutationDeadlinePolicy(body?.name ?? "");
         if (
           body?.name === "joinRoom" ||
@@ -5074,7 +4974,7 @@ export default {
       }
 
       if (url.pathname === "/api/r2-upload" && request.method === "POST") {
-        return withCors(await getR2UploadGateObject(env).fetch(request), request, env);
+        return await handleR2Upload(request, env);
       }
 
       if (url.pathname === "/api/r2-images" && request.method === "GET") {
