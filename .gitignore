@@ -29,6 +29,9 @@ wrangler-local/
 .codex-question-set-backfill/
 /scripts/find-active-rooms.mjs
 
+# local Cloudflare production usage data
+/docs/cloudflare-usage-history/
+
 # env files
 .env*
 !.env.example
