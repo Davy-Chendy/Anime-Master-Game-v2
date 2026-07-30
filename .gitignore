@@ -27,6 +27,7 @@ yarn-error.log*
 .wrangler.bak-*/
 wrangler-local/
 .codex-question-set-backfill/
+/scripts/find-active-rooms.mjs
 
 # env files
 .env*
