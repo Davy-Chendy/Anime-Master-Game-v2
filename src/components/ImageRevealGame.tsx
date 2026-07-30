@@ -29,6 +29,7 @@ import {
   submitTeamBattleRevealVote,
   updateQuestionLabel,
 } from "@/lib/cloudflareRooms";
+import { getTeamBattleViewerAccess } from "@/lib/teamBattleView";
 import type {
   Answer,
   BuzzerAnswer,
@@ -2408,8 +2409,14 @@ export function ImageRevealGame({
     [activePlayerById, teamBattleActiveTeam, teamBattleState?.teams],
   );
   const teamBattleActiveMemberSet = useMemo(() => new Set(teamBattleActiveMembers), [teamBattleActiveMembers]);
-  const teamBattleCanAct = Boolean(!isPresenter && !isSpectator && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
-  const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
+  const teamBattleViewerAccess = getTeamBattleViewerAccess({
+    activeTeam: teamBattleActiveTeam,
+    isPresenter,
+    isSpectator,
+    viewerTeam: teamBattlePlayerTeam,
+  });
+  const teamBattleCanAct = Boolean(teamBattleState && teamBattleViewerAccess.canAct);
+  const canSeeTeamBattleVotes = Boolean(teamBattleState && teamBattleViewerAccess.canSeeVotes);
   const canSeeTeamBattleCountdown = Boolean(teamBattleState);
   const teamBattleAvailableBlockCount = useMemo(
     () => Array.from({ length: visibleBlockCount }, (_, block) => block)
@@ -2692,9 +2699,9 @@ export function ImageRevealGame({
     } else if (teamBattleState.phase === "PRESENTER_BLOCK") {
       teamBattleTaskTitle = "等待出题人禁用格子";
       teamBattleTaskDetail = "";
-    } else if (!teamBattlePlayerTeam) {
-      teamBattleTaskTitle = isSpectator ? "观战" : "等待分队";
-      teamBattleTaskDetail = isSpectator ? "本局只观看" : "下一题开始参与";
+    } else if (!teamBattlePlayerTeam && !isSpectator) {
+      teamBattleTaskTitle = "等待分队";
+      teamBattleTaskDetail = "下一题开始参与";
     } else if (teamBattleCanAct && teamBattleState.phase === "REVEAL_VOTE") {
       teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
       teamBattleTaskBadge = teamBattleHasSubmittedRevealVote ? "可修改" : "轮到你";
@@ -2723,6 +2730,10 @@ export function ImageRevealGame({
       teamBattleTaskTitle = `等待${getTeamName(teamBattleActiveTeam)}`;
       teamBattleTaskDetail = `${teamBattlePhaseLabel}中`;
     }
+  }
+
+  if (isSpectator) {
+    teamBattleTaskBadge = "观战";
   }
 
   const areAllGuessersCorrect = eligibleGuesserIds.length > 0 && eligibleGuesserIds.every((guesserId) => correctPlayerSet.has(guesserId));
@@ -4470,7 +4481,7 @@ export function ImageRevealGame({
       className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
       style={sidePanelHeightStyle}
     >
-      {isSpectator ? (
+      {isSpectator && !isTeamBattleMode ? (
         <div className="space-y-4">
           <section className="rounded-md border border-slate-200 bg-white p-4">
             <div className="flex items-center justify-between gap-3">
@@ -4548,6 +4559,7 @@ export function ImageRevealGame({
         </div>
       ) : isQuestionReviewing ? (
         <>
+              {isSpectator ? <span className="mb-3 inline-flex rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">观战</span> : null}
               <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片</p>
               <p className="mt-1 text-sm text-[var(--muted)]">
                 {isPresenter ? "确认后进入下一步" : "等待出题人进入下一步"}
@@ -4605,7 +4617,7 @@ export function ImageRevealGame({
           {teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE" ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-950">队内进度</span>
+                <span className="font-semibold text-slate-950">{isSpectator ? "投票进度" : "队内进度"}</span>
                 <span className="font-bold text-slate-950">
                   {teamBattleSubmittedCount}/{teamBattleVoteTotal}
                 </span>
@@ -4625,7 +4637,7 @@ export function ImageRevealGame({
           {teamBattleState.phase !== "PRESENTER_BLOCK" || isPresenter ? (
             <section className="border-t border-[var(--line)] pt-4">
               <div className="mb-3 flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-slate-950">操作</p>
+                <p className="text-sm font-semibold text-slate-950">{isSpectator ? "当前状态" : "操作"}</p>
                 {teamBattleIsVoteClosed ? <span className="text-xs font-semibold text-amber-700">结算中</span> : null}
               </div>
 
@@ -4651,12 +4663,14 @@ export function ImageRevealGame({
 
             {teamBattleState.phase === "REVEAL_VOTE" ? (
               <div className="space-y-3">
-                <div className="rounded-md bg-white px-3 py-2 text-sm">
-                  <span className="font-semibold text-slate-950">选格：</span>
-                  <span className="text-[var(--muted)]">
-                    {teamSelectedBlocks.length}/{teamBattleRequiredBlockCount}
-                  </span>
-                </div>
+                {!isSpectator ? (
+                  <div className="rounded-md bg-white px-3 py-2 text-sm">
+                    <span className="font-semibold text-slate-950">选格：</span>
+                    <span className="text-[var(--muted)]">
+                      {teamSelectedBlocks.length}/{teamBattleRequiredBlockCount}
+                    </span>
+                  </div>
+                ) : null}
                 {teamBattleCanAct ? (
                   <Button
                     className="w-full"
@@ -4683,7 +4697,7 @@ export function ImageRevealGame({
                 {canSeeTeamBattleVotes ? (
                   <div className="rounded-md bg-white p-3 text-sm">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-semibold text-slate-950">队内已投</p>
+                      <p className="font-semibold text-slate-950">{isSpectator ? "实时投票" : "队内已投"}</p>
                       {teamBattleCanAct && !teamBattleIsVoteClosed ? (
                         <span className="text-xs font-semibold text-[var(--muted)]">点一下跟投</span>
                       ) : null}
@@ -4722,7 +4736,9 @@ export function ImageRevealGame({
                         ))}
                       </div>
                     ) : (
-                      <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">暂无队内投票</p>
+                      <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">
+                        {isSpectator ? "暂时没有人投票" : "暂无队内投票"}
+                      </p>
                     )}
                   </div>
                 ) : (

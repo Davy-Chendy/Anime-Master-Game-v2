@@ -14,6 +14,7 @@
     "test:authority-vnext": "tsx --test tests/authority-vnext.test.ts",
     "test:authority-outbox": "tsx --test tests/authority-outbox.test.ts",
     "test:authority-full-game": "tsx --test tests/authority-full-game.test.ts",
+    "test:team-battle-spectator-view": "tsx --test tests/team-battle-spectator-view.test.ts",
     "test:game-result-archive": "tsx --test tests/game-result-archive.test.ts",
     "test:question-set-creation-method": "tsx --test tests/question-set-creation-method.test.ts",
     "test:question-set-creation-analysis": "tsx --test tests/question-set-creation-method-analysis.test.ts",
