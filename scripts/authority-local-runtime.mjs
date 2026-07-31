@@ -269,6 +269,40 @@ async function queryLocalD1(persistTo, sql) {
   return result[0]?.results ?? [];
 }
 
+async function assertLegacyRoomExpired(worker) {
+  for (const [name, args] of [
+    ["getRoomByCode", ["OLD001"]],
+    ["joinRoom", ["OLD001", "legacy-joiner", "Legacy Joiner"]],
+  ]) {
+    const response = await fetch(`${worker.baseUrl}/api/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, args }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 410);
+    assert.equal(payload.code, "ROOM_VERSION_EXPIRED");
+  }
+
+  const socket = new WebSocket(`${worker.wsBaseUrl}/api/realtime/${encodeURIComponent("room:legacy-room")}/ws?playerId=legacy-host`);
+  const expired = await new Promise((resolveMessage, reject) => {
+    const timer = setTimeout(() => reject(new Error("legacy room expiration message timeout")), REQUEST_TIMEOUT_MS);
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(typeof event.data === "string" ? event.data : Buffer.from(event.data).toString("utf8"));
+      if (message.type !== "room_expired") return;
+      clearTimeout(timer);
+      resolveMessage(message);
+    });
+    socket.addEventListener("error", () => {
+      clearTimeout(timer);
+      reject(new Error("legacy room expiration WebSocket failed"));
+    }, { once: true });
+  });
+  assert.equal(expired.code, "ROOM_VERSION_EXPIRED");
+  socket.close();
+}
+
 function envelope(actorId, clientSeq, gameId, questionIndex, name, payload, actionId = `${gameId}:${actorId}:${clientSeq}:${name}`) {
   return { actionId, actorId, clientSeq, gameId, questionIndex, name, payload };
 }
@@ -406,7 +440,14 @@ async function main() {
   try {
     await runWrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", persistTo]);
     await runWrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", persistTo]);
+    await queryLocalD1(persistTo, `
+      INSERT INTO rooms(id,room_code,host_player_id,created_at,updated_at)
+      VALUES('legacy-room','OLD001','legacy-host','2026-07-30T00:00:00.000Z','2026-07-30T00:00:00.000Z');
+      INSERT INTO players(id,room_id,nickname,is_host,role)
+      VALUES('legacy-host','legacy-room','Legacy Host',1,'PLAYER');
+    `);
     await worker.start();
+    await assertLegacyRoomExpired(worker);
     contexts = await Promise.all(Array.from({ length: ROOM_COUNT }, (_, roomIndex) => setupRoom(worker, metrics, roomIndex)));
     await Promise.all(contexts.map((context) => connectRoom(worker, metrics, context)));
 

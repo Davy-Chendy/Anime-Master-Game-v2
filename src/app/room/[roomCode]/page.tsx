@@ -8,8 +8,9 @@ import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
-import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
+import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, isRoomVersionExpiredError, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
+import { ROOM_VERSION_EXPIRED_EVENT, ROOM_VERSION_EXPIRED_MESSAGE } from "@/lib/roomRuntime";
 import {
   cancelCurrentRound,
   cancelPresenterSetup,
@@ -1831,6 +1832,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [playerId, setPlayerId] = useState("");
   const [nickname, setNickname] = useState("");
   const [error, setError] = useState("");
+  const [roomExpired, setRoomExpired] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isDissolving, setIsDissolving] = useState(false);
   const [pendingPresenterId, setPendingPresenterId] = useState("");
@@ -1956,7 +1958,14 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
       } catch (caughtError) {
         if (isMounted) {
-          setError(caughtError instanceof Error ? caughtError.message : "加载房间失败，请稍后重试");
+          if (isRoomVersionExpiredError(caughtError)) {
+            clearLocalRoomSession();
+            setRoomExpired(true);
+            setRoom(null);
+            setError("");
+          } else {
+            setError(caughtError instanceof Error ? caughtError.message : "加载房间失败，请稍后重试");
+          }
         }
       } finally {
         if (isMounted) {
@@ -1971,6 +1980,21 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       isMounted = false;
     };
   }, [roomCode]);
+
+  useEffect(() => {
+    function handleExpiredRoom(event: Event) {
+      const detail = (event as CustomEvent<{ topic?: string }>).detail;
+      if (room?.id && detail?.topic !== `room:${room.id}`) return;
+      clearLocalRoomSession();
+      setRoomExpired(true);
+      setRoom(null);
+      setError("");
+      setIsLoading(false);
+    }
+
+    window.addEventListener(ROOM_VERSION_EXPIRED_EVENT, handleExpiredRoom);
+    return () => window.removeEventListener(ROOM_VERSION_EXPIRED_EVENT, handleExpiredRoom);
+  }, [room?.id]);
 
   useEffect(() => {
     if (!room?.id || !playerId) {
@@ -2568,7 +2592,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
   return (
     <AppShell>
-      {room?.status !== "PLAYING" ? (
+      {!roomExpired && room?.status !== "PLAYING" ? (
         <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
             <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">房间 {roomCode}</h1>
@@ -2619,7 +2643,17 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         />
       ) : null}
 
-      {isLoading ? (
+      {roomExpired ? (
+        <div className="mx-auto max-w-2xl">
+          <Panel title="房间版本已过期">
+            <p className="text-sm leading-6 text-[var(--muted)]">{ROOM_VERSION_EXPIRED_MESSAGE}</p>
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">昵称已经保留，返回首页后可以直接创建或加入新房间。</p>
+            <Button className="mt-5" type="button" onClick={() => router.push("/")}>
+              返回首页创建新房间
+            </Button>
+          </Panel>
+        </div>
+      ) : isLoading ? (
         <Panel title="加载房间">
           <p className="text-sm leading-6 text-[var(--muted)]">正在读取房间和玩家列表…</p>
         </Panel>

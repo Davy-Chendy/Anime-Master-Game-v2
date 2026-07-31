@@ -68,7 +68,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0015") {
+function applyMigrations(db: DatabaseSync, through = "0016") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -151,11 +151,12 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     assert.equal(room.teamGuessVoteSeconds, 50);
     assert.equal(room.teamAssignmentMode, "MANUAL");
 
-    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_assignment_mode FROM rooms WHERE id=?")
+    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
       .get(room.id);
     assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
     assert.equal(stored.lobby_team_guess_vote_seconds, 50);
     assert.equal(stored.lobby_team_assignment_mode, "MANUAL");
+    assert.equal(stored.runtime_generation, 3);
   });
 });
 

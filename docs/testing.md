@@ -28,6 +28,7 @@ npm run build
 | DO checkpoint、Hibernation、Attachment、Alarm、恢复 | `npm run test:authority-vnext`、`npm run test:authority-budget` |
 | D1 最终投影、历史结算、roster handoff | `npm run test:authority-vnext`、`npm run test:game-result-archive`、`npm run test:authority-budget` |
 | D1 migration 或 DO schema migration | 对应升级测试、重复初始化测试、失败不推进版本测试，以及 `worker:typecheck` |
+| 房间 runtime generation、旧房间退役、DO namespace 分流 | `npm run test:room-runtime-cutover`、`npm run test:authority-outbox`、`npm run test:authority-local-runtime` |
 | Worker 本地运行时、重连、并发、D1 热路径或额度模型 | 上述相关测试，再运行 `npm run test:authority-local-runtime` |
 
 一项改动命中多行时取并集，不要只选择最短的一行。

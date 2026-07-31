@@ -3,6 +3,13 @@ import assert from "node:assert/strict";
 const players = Number.parseInt(process.argv[2] ?? "50", 10);
 const questions = Number.parseInt(process.argv[3] ?? "30", 10);
 const checkpointEvery = 20;
+const roomRuntimeV3 = {
+  sqliteTables: 5,
+  applicationRowsOnFirstUse: 2,
+  legacyTables: 0,
+  d1GenerationIndexRowsPerRoomWrite: 0,
+  websocketGenerationReadsAt50People10Rooms: 50 * 10,
+};
 
 if (!Number.isInteger(players) || players < 1 || players > 50) throw new Error("players must be 1..50");
 if (!Number.isInteger(questions) || questions < 1 || questions > 30) throw new Error("questions must be 1..30");
@@ -86,6 +93,13 @@ const avoidedNormalizedResultRows = players + players + answers;
 assert.equal(answers, players * questions);
 assert.equal(judgements, players * questions);
 if (players === 50 && questions === 30) {
+  assert.deepEqual(roomRuntimeV3, {
+    sqliteTables: 5,
+    applicationRowsOnFirstUse: 2,
+    legacyTables: 0,
+    d1GenerationIndexRowsPerRoomWrite: 0,
+    websocketGenerationReadsAt50People10Rooms: 500,
+  });
   assert.ok(vnextRows >= 150 && vnextRows <= 300, `vNext write target missed: ${vnextRows}`);
   assert.ok(d1EstimatedRows.upper <= 500, `D1 final projection target missed: ${d1EstimatedRows.upper}`);
   assert.deepEqual(teamBlockSelectionBudget, {
@@ -146,6 +160,10 @@ console.log(JSON.stringify({
       extraRollingCheckpointRows: teamExampleExtraRollingRows,
       d1RowsDuringGame: 0,
     },
+  },
+  roomRuntimeV3: {
+    ...roomRuntimeV3,
+    note: "First-use logical rows are schema-version + runtime-meta; SQLite catalog rows must be measured in production billing rather than guessed.",
   },
   d1FinalProjection: {
     aggregateArchiveRows: d1ArchiveRows,

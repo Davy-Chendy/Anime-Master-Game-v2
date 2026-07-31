@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, resetAuthorityOutboxForTests, syncAuthoritySequence } from "../src/lib/authorityOutbox";
+import { clearAuthorityOutboxTopic, commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, resetAuthorityOutboxForTests, syncAuthoritySequence } from "../src/lib/authorityOutbox";
 
 test.beforeEach(async () => {
   await resetAuthorityOutboxForTests();
@@ -65,4 +65,11 @@ test("durable new-game handshake discards only superseded game mutations", async
   await discardSupersededAuthorityOutbox("room:r1", "g2");
   const remaining = await listAuthorityOutbox("room:r1");
   assert.deepEqual(remaining.map((item) => item.actionId), [current.actionId]);
+});
+
+test("expired-room cleanup removes every queued mutation for that topic", async () => {
+  await enqueueAuthorityMutation(mutation("p1", "g1"));
+  await enqueueAuthorityMutation(mutation("p2", "g2"));
+  await clearAuthorityOutboxTopic("room:r1");
+  assert.deepEqual(await listAuthorityOutbox("room:r1"), []);
 });

@@ -42,6 +42,14 @@ R2、Images、Pages 是月额度，不应强行换算成“每日重置”。Pag
 
 WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接请求。出站广播虽然不计 DO 请求，但仍消耗 CPU、duration 和网络处理，不能无限扩大 payload 或广播次数。
 
+## Room runtime generation 3 硬切
+
+维护硬切后，`rooms.runtime_generation` 只有新建房间显式写入 `3`；历史房间保持 `NULL` 并在 Worker 入口返回 `ROOM_VERSION_EXPIRED`。普通旧房间访问只产生 Worker 请求和一次 D1 定位读取，不再进入旧 DO namespace，因此不会触发 legacy schema、水合、normalized projection 或业务 Alarm。旧 namespace 只保留退役壳，已有 Alarm 最多执行一次取消操作且不得抛错重试。
+
+新 `ROOM_OBJECTS_V3` namespace 的首次初始化只创建 `room_runtime_schema`、`room_runtime_meta` 和三张 `authority_vnext_*` 表。应用数据只新增 schema version 与 runtime meta 两行；SQLite catalog 的实际计费行数依赖平台实现，必须在生产部署后用 Analytics 复核，不能把本地 SQL 语句数当成 rows written。结构预算和回归测试要求为：五张表、零张 legacy 表、重复初始化零新增应用行。
+
+`runtime_generation` 不建索引，因此房间创建不会增加额外索引写入。每次 WebSocket 握手会通过房间主键读取一次 generation；按 50 人 × 10 个房间估算为 500 行 D1 读取，占 5,000,000 日额度的 0.01%。HTTP 路由必须复用同一次房间定位结果，禁止为了 generation 重复查询。
+
 ## 每天 60 局容量推演
 
 每天 10 个房间、每房间 6 局，共 60 局。只按当前极端单局基线估算：
@@ -122,6 +130,7 @@ WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接
 - `npm run test:authority-budget`：快速检查 50×30 的 DO/D1 写入预算。
 - `npm run test:authority-vnext`：检查热路径零 D1 写入、checkpoint 合并、Alarm 和 projection。
 - `npm run test:authority-local-runtime`：使用 workerd、真实 WebSocket 和本地 D1 检查并发、重连、恢复及最终写入。
+- `npm run test:room-runtime-cutover`：检查 D1 generation migration、V3 极简 schema、迁移失败不推进和旧 DO Alarm 退役。
 - 具体选测规则见 [`testing.md`](testing.md)。
 
 ## 官方来源

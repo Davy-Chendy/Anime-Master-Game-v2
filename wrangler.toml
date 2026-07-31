@@ -7,9 +7,17 @@ compatibility_flags = ["nodejs_compat"]
 name = "ROOM_OBJECTS"
 class_name = "RoomDurableObject"
 
+[[durable_objects.bindings]]
+name = "ROOM_OBJECTS_V3"
+class_name = "RoomDurableObjectV3"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDurableObject"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RoomDurableObjectV3"]
 
 [[d1_databases]]
 binding = "DB"
@@ -28,7 +36,7 @@ binding = "IMAGES"
 crons = ["0 0 * * *"]
 
 [vars]
-ALLOWED_ORIGIN = "https://anipeek.animaster.dpdns.org"
+ALLOWED_ORIGIN = "https://anipeek.animaster.dpdns.org,http://localhost:3000"
 R2_IMAGE_PREFIX = "question-images"
 R2_PUBLIC_BASE_URL = "https://assets.animaster.dpdns.org"
 R2_EXISTING_IMAGE_LIMIT = "50"

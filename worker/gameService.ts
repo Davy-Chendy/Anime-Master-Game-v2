@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRoomCode } from "../src/lib/id";
+import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
@@ -1754,6 +1755,7 @@ export async function createRoom(playerId: string, nickname: string) {
         lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
         lobby_team_assignment_mode: "MANUAL",
         lobby_team_assignments: "{}",
+        runtime_generation: CURRENT_ROOM_RUNTIME_GENERATION,
       })
       .select()
       .single<DbRoom>();

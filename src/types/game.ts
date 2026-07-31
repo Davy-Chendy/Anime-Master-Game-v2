@@ -96,6 +96,7 @@ export type DbRoom = {
   lobby_team_guess_vote_seconds?: number | null;
   lobby_team_assignment_mode?: TeamAssignmentMode | null;
   lobby_team_assignments?: unknown;
+  runtime_generation?: number | null;
   created_at: string;
   updated_at: string;
 };

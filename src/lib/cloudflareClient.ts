@@ -2,7 +2,8 @@
 
 import type { GameResultSnapshot, RoundSnapshot } from "@/types/game";
 import type { RealtimeDelta } from "@/types/game";
-import { commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, syncAuthoritySequence, type AuthorityOutboxItem } from "@/lib/authorityOutbox";
+import { clearAuthorityOutboxTopic, commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, syncAuthoritySequence, type AuthorityOutboxItem } from "@/lib/authorityOutbox";
+import { ROOM_VERSION_EXPIRED_ERROR_CODE, ROOM_VERSION_EXPIRED_EVENT } from "@/lib/roomRuntime";
 
 type ChangeMessage = {
   type: "change";
@@ -31,6 +32,7 @@ type ActionResultMessage = {
 type ActionAcceptedMessage = { type: "action_accepted"; clientActionId?: string };
 type ActionReceivedMessage = { type: "action_received"; clientActionId?: string; actionId?: string };
 type CheckpointCommittedMessage = { type: "checkpoint_committed"; gameId?: string; committedSeqByActor?: Record<string, number> };
+type RoomExpiredMessage = { type: "room_expired"; code: typeof ROOM_VERSION_EXPIRED_ERROR_CODE; message: string };
 type AuthoritySequenceHint = { gameId: string; actorId: string; committedSeq: number };
 
 type TopicState = {
@@ -50,7 +52,23 @@ type TopicState = {
   sequenceSync: Promise<void>;
   readyPromise: Promise<void>;
   resolveReady?: () => void;
+  terminalErrorCode: string | null;
 };
+
+export class GameRpcError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "GameRpcError";
+  }
+}
+
+export function isRoomVersionExpiredError(error: unknown) {
+  return error instanceof GameRpcError && error.code === ROOM_VERSION_EXPIRED_ERROR_CODE;
+}
 
 class WsActionError extends Error {
   constructor(
@@ -225,6 +243,7 @@ function getTopicState(topic: string) {
       currentGameId: null,
       sequenceSync: Promise.resolve(),
       readyPromise: Promise.resolve(),
+      terminalErrorCode: null,
     };
     topicStates.set(topic, state);
   }
@@ -362,7 +381,7 @@ function installRecoveryListeners() {
 }
 
 function scheduleReconnect(topic: string, state: TopicState) {
-  if (state.listeners.size === 0 || state.reconnectTimer !== null) {
+  if (state.terminalErrorCode || state.listeners.size === 0 || state.reconnectTimer !== null) {
     return;
   }
 
@@ -376,6 +395,10 @@ function scheduleReconnect(topic: string, state: TopicState) {
 
 function ensureSocket(topic: string) {
   const state = getTopicState(topic);
+
+  if (state.terminalErrorCode === ROOM_VERSION_EXPIRED_ERROR_CODE) {
+    throw new GameRpcError("房间版本已过期，请创建新房间。", ROOM_VERSION_EXPIRED_ERROR_CODE, 410);
+  }
 
   if (state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) {
     return state.socket;
@@ -402,12 +425,27 @@ function ensureSocket(topic: string) {
   };
 
   socket.onmessage = (event) => {
-    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | ActionReceivedMessage | CheckpointCommittedMessage | { type?: string; authorityVersion?: 1 | 2; gameId?: string; committedSeqByActor?: Record<string, number> };
+    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | ActionReceivedMessage | CheckpointCommittedMessage | RoomExpiredMessage | { type?: string; authorityVersion?: 1 | 2; gameId?: string; committedSeqByActor?: Record<string, number> };
 
     try {
       message = JSON.parse(String(event.data)) as ChangeMessage | ActionResultMessage | { type?: string };
     } catch (error) {
       console.error("Realtime message parse failed.", error);
+      return;
+    }
+
+    if (message.type === "room_expired") {
+      const expired = message as RoomExpiredMessage;
+      state.terminalErrorCode = ROOM_VERSION_EXPIRED_ERROR_CODE;
+      state.resolveReady?.();
+      state.resolveReady = undefined;
+      for (const pending of state.pending.values()) {
+        window.clearTimeout(pending.timer);
+        pending.reject(new GameRpcError(expired.message, expired.code, 410));
+      }
+      state.pending.clear();
+      void clearAuthorityOutboxTopic(topic).catch((error) => console.error("Expired room Outbox cleanup failed.", error));
+      window.dispatchEvent(new CustomEvent(ROOM_VERSION_EXPIRED_EVENT, { detail: { topic, message: expired.message } }));
       return;
     }
 
@@ -506,7 +544,7 @@ function ensureSocket(topic: string) {
     state.socket = null;
     state.reconnectAttempts += 1;
     cleanupTopicStateIfIdle(topic, state);
-    scheduleReconnect(topic, state);
+    if (!state.terminalErrorCode) scheduleReconnect(topic, state);
   };
 
   return socket;
@@ -552,13 +590,13 @@ async function httpRpc<T>(name: string, args: unknown[]) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, args }),
   });
-  const payload = (await response.json()) as { data?: T; error?: string; authoritySequence?: AuthoritySequenceHint };
+  const payload = (await response.json()) as { data?: T; error?: string; code?: string; authoritySequence?: AuthoritySequenceHint };
   const hint = payload.authoritySequence;
   if (hint && hint.gameId && hint.actorId && Number.isInteger(hint.committedSeq) && hint.committedSeq >= 0) {
     await syncAuthoritySequence(hint.gameId, hint.actorId, hint.committedSeq);
   }
   if (!response.ok || payload.error) {
-    throw new Error(payload.error ?? "请求游戏服务失败，请稍后重试。");
+    throw new GameRpcError(payload.error ?? "请求游戏服务失败，请稍后重试。", payload.code, response.status);
   }
   return payload.data as T;
 }

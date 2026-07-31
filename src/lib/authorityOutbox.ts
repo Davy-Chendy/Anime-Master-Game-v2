@@ -135,6 +135,15 @@ export async function discardSupersededAuthorityOutbox(topic: string, currentGam
   await transactionDone(transaction);
 }
 
+export async function clearAuthorityOutboxTopic(topic: string) {
+  const database = await openDatabase();
+  const transaction = database.transaction(OUTBOX_STORE, "readwrite");
+  const store = transaction.objectStore(OUTBOX_STORE);
+  const items = await requestResult(store.index("topic").getAll(topic)) as AuthorityOutboxItem[];
+  for (const item of items) store.delete(item.actionId);
+  await transactionDone(transaction);
+}
+
 export async function resetAuthorityOutboxForTests() {
   const database = databasePromise ? await databasePromise : null;
   database?.close();
