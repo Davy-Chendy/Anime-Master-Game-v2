@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
-import worker, { type Env } from "../worker/index";
+import worker, { expandCleanupQuestionSetImageRows, type Env } from "../worker/index";
+import { encodeQuestionSetManifest } from "../worker/questionSetManifest";
 import {
   isR2ImageUploadTooLarge,
   R2_IMAGE_UPLOAD_MAX_BYTES,
@@ -51,6 +55,32 @@ function createR2TestEnv() {
     R2_PUBLIC_BASE_URL: "https://assets.example.com",
   } as Env;
   return { calls, env };
+}
+
+function createCleanupTestEnv() {
+  const sqlite = new DatabaseSync(":memory:");
+  const migrationsDirectory = resolve(import.meta.dirname, "..", "d1", "migrations");
+  for (const name of readdirSync(migrationsDirectory).filter((file) => /^\d{4}_.+\.sql$/.test(file)).sort()) {
+    sqlite.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
+  }
+  const deletedKeys: string[] = [];
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        let bindings: unknown[] = [];
+        return {
+          bind(...values: unknown[]) { bindings = values; return this; },
+          async all<T>() { return { results: sqlite.prepare(sql).all(...bindings) as T[] }; },
+        };
+      },
+    },
+    IMAGE_BUCKET: {
+      async delete(key: string) { deletedKeys.push(key); },
+    },
+    R2_IMAGE_PREFIX: "question-images",
+    R2_PUBLIC_BASE_URL: "https://assets.example.com",
+  } as unknown as Env;
+  return { deletedKeys, env, sqlite };
 }
 
 test("10 MB final-image policy accepts the boundary and rejects one extra byte", () => {
@@ -103,4 +133,62 @@ test("the image picker lists only its requested page and does not scan for total
   const payload = await response.json() as Record<string, unknown>;
   assert.equal("storageBytes" in payload, false);
   assert.equal("storageLimitBytes" in payload, false);
+});
+
+test("cleanup expands both legacy and manifest image references and fails safely on corruption", () => {
+  const manifestJson = encodeQuestionSetManifest([{
+    id: "manifest-q1",
+    questionSetId: "manifest-set",
+    imageUrl: "https://assets.example.com/question-images/manifest.webp",
+    orderIndex: 0,
+    labelText: null,
+    createdAt: "2026-07-31T00:00:00.000Z",
+  }]);
+  const expanded = expandCleanupQuestionSetImageRows([
+    { question_set_id: "legacy-set", image_url: "https://assets.example.com/question-images/legacy.webp" },
+    { question_set_id: "manifest-set", image_url: null, manifest_version: 1, manifest_json: manifestJson },
+    { question_set_id: "manifest-set", image_url: null, manifest_version: 1, manifest_json: manifestJson },
+  ]);
+  assert.deepEqual(expanded.map((row) => [row.question_set_id, row.image_url]), [
+    ["legacy-set", "https://assets.example.com/question-images/legacy.webp"],
+    ["manifest-set", "https://assets.example.com/question-images/manifest.webp"],
+  ]);
+  assert.throws(
+    () => expandCleanupQuestionSetImageRows([{
+      question_set_id: "broken-set",
+      image_url: null,
+      manifest_version: 1,
+      manifest_json: "{",
+    }]),
+    /manifest JSON 已损坏/,
+  );
+});
+
+test("cleanup never deletes a manifest image while another active room still references its private set", async () => {
+  const { deletedKeys, env, sqlite } = createCleanupTestEnv();
+  const manifestJson = encodeQuestionSetManifest([{
+    id: "shared-q1",
+    questionSetId: "shared-set",
+    imageUrl: "https://assets.example.com/question-images/shared.webp",
+    orderIndex: 0,
+    labelText: null,
+    createdAt: "2026-07-01T00:00:00.000Z",
+  }]);
+  sqlite.prepare(`INSERT INTO question_sets(
+    id,title,created_by_player_id,is_public,image_count,manifest_version,manifest_json,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?,?,?)`).run(
+    "shared-set", "Shared", "host", 0, 1, 1, manifestJson,
+    "2026-07-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z",
+  );
+  sqlite.prepare("INSERT INTO rooms(id,room_code,host_player_id,prepared_question_set_id,updated_at) VALUES(?,?,?,?,?)")
+    .run("expired-room", "EXP001", "host", "shared-set", "2026-07-01T00:00:00.000Z");
+  sqlite.prepare("INSERT INTO rooms(id,room_code,host_player_id,prepared_question_set_id,updated_at) VALUES(?,?,?,?,?)")
+    .run("active-room", "ACT001", "host", "shared-set", "2026-07-31T00:00:00.000Z");
+
+  await worker.scheduled({} as ScheduledController, env);
+
+  assert.deepEqual(deletedKeys, []);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='expired-room'").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='active-room'").get().count, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='shared-set'").get().count, 1);
 });

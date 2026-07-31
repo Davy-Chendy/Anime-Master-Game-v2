@@ -16,6 +16,7 @@ import {
   RoomVersionExpiredError,
 } from "./roomRuntimeV3";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
+import { getManifestImageUrls } from "./questionSetManifest";
 import {
   isR2ImageUploadTooLarge,
   R2_IMAGE_UPLOAD_MAX_BYTES,
@@ -2281,12 +2282,16 @@ type CleanupQuestionSetImageRow = {
   room_id?: string | null;
   question_set_id: string;
   image_url?: string | null;
+  manifest_version?: number | null;
+  manifest_json?: string | null;
 };
 
 type R2ImageReferenceRow = {
   question_set_id: string;
   is_public: number | boolean;
-  image_url: string;
+  image_url?: string | null;
+  manifest_version?: number | null;
+  manifest_json?: string | null;
 };
 
 type IdRow = {
@@ -2404,6 +2409,25 @@ async function getExpiredRooms(env: Env, cutoffIso: string) {
   );
 }
 
+export function expandCleanupQuestionSetImageRows(rows: CleanupQuestionSetImageRow[]) {
+  const expanded: CleanupQuestionSetImageRow[] = [];
+  const expandedManifestIds = new Set<string>();
+  for (const row of rows) {
+    if (row.image_url) expanded.push({ ...row, manifest_version: null, manifest_json: null });
+    if (row.manifest_version == null || expandedManifestIds.has(row.question_set_id)) continue;
+    expandedManifestIds.add(row.question_set_id);
+    const imageUrls = getManifestImageUrls({
+      id: row.question_set_id,
+      manifest_version: row.manifest_version,
+      manifest_json: row.manifest_json ?? null,
+    });
+    for (const imageUrl of imageUrls ?? []) {
+      expanded.push({ room_id: row.room_id, question_set_id: row.question_set_id, image_url: imageUrl });
+    }
+  }
+  return expanded;
+}
+
 async function getUnpublishedQuestionSetImageRowsForRooms(env: Env, roomIds: string[]) {
   const rows: CleanupQuestionSetImageRow[] = [];
   for (const roomIdChunk of chunkArray(roomIds, ROOM_CLEANUP_SQL_CHUNK_SIZE)) {
@@ -2415,13 +2439,15 @@ async function getUnpublishedQuestionSetImageRowsForRooms(env: Env, roomIds: str
     rows.push(
       ...(await queryRows<CleanupQuestionSetImageRow>(
         env,
-        `select distinct r.id as room_id, qs.id as question_set_id, q.image_url as image_url
+        `select distinct r.id as room_id, qs.id as question_set_id, q.image_url as image_url,
+                qs.manifest_version as manifest_version, qs.manifest_json as manifest_json
          from rooms r
          join question_sets qs on qs.id = r.prepared_question_set_id
          left join questions q on q.question_set_id = qs.id
          where r.id in (${roomPlaceholders}) and qs.is_public = 0
          union
-         select distinct gs.room_id as room_id, qs.id as question_set_id, q.image_url as image_url
+         select distinct gs.room_id as room_id, qs.id as question_set_id, q.image_url as image_url,
+                qs.manifest_version as manifest_version, qs.manifest_json as manifest_json
          from game_sessions gs
          join question_sets qs on qs.id = gs.question_set_id
          left join questions q on q.question_set_id = qs.id
@@ -2432,7 +2458,7 @@ async function getUnpublishedQuestionSetImageRowsForRooms(env: Env, roomIds: str
     );
   }
 
-  return rows;
+  return expandCleanupQuestionSetImageRows(rows);
 }
 
 async function getOldOrphanUnpublishedQuestionSetIds(env: Env, cutoffIso: string) {
@@ -2448,7 +2474,7 @@ async function getOldOrphanUnpublishedQuestionSetIds(env: Env, cutoffIso: string
        and not exists (
          select 1 from rooms r where r.prepared_question_set_id = qs.id
        )
-     order by qs.updated_at asc
+     order by qs.updated_at asc, qs.id asc
      limit ?`,
     cutoffIso,
     ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN,
@@ -2466,7 +2492,8 @@ async function getQuestionSetImageRows(env: Env, questionSetIds: string[]) {
     rows.push(
       ...(await queryRows<CleanupQuestionSetImageRow>(
         env,
-        `select qs.id as question_set_id, q.image_url as image_url
+        `select qs.id as question_set_id, q.image_url as image_url,
+                qs.manifest_version as manifest_version, qs.manifest_json as manifest_json
          from question_sets qs
          left join questions q on q.question_set_id = qs.id
          where qs.id in (${placeholders(questionSetIdChunk.length)}) and qs.is_public = 0`,
@@ -2475,7 +2502,30 @@ async function getQuestionSetImageRows(env: Env, questionSetIds: string[]) {
     );
   }
 
-  return rows;
+  return expandCleanupQuestionSetImageRows(rows);
+}
+
+async function getUnreferencedUnpublishedQuestionSetIds(env: Env, questionSetIds: string[]) {
+  const unreferencedIds: string[] = [];
+  for (const questionSetIdChunk of chunkArray(questionSetIds, ROOM_CLEANUP_SQL_CHUNK_SIZE)) {
+    if (questionSetIdChunk.length === 0) continue;
+    const rows = await queryRows<IdRow>(
+      env,
+      `select qs.id
+       from question_sets qs
+       where qs.is_public = 0
+         and qs.id in (${placeholders(questionSetIdChunk.length)})
+         and not exists (
+           select 1 from game_sessions gs where gs.question_set_id = qs.id
+         )
+         and not exists (
+           select 1 from rooms r where r.prepared_question_set_id = qs.id
+         )`,
+      ...questionSetIdChunk,
+    );
+    unreferencedIds.push(...rows.map((row) => row.id));
+  }
+  return unreferencedIds;
 }
 
 async function deleteExpiredRooms(env: Env, roomIds: string[], cutoffIso: string) {
@@ -2505,15 +2555,36 @@ async function getR2ImageReferences(env: Env) {
     return [];
   }
 
-  const whereClause = patterns.map(() => "q.image_url like ?").join(" or ");
-  return queryRows<R2ImageReferenceRow>(
+  const legacyWhereClause = patterns.map(() => "q.image_url like ?").join(" or ");
+  const manifestWhereClause = patterns.map(() => "qs.manifest_json like ?").join(" or ");
+  const rows = await queryRows<R2ImageReferenceRow>(
     env,
-    `select q.question_set_id, qs.is_public, q.image_url
+    `select q.question_set_id, qs.is_public, q.image_url,
+            null as manifest_version, null as manifest_json
      from questions q
      join question_sets qs on qs.id = q.question_set_id
-     where ${whereClause}`,
+     where ${legacyWhereClause}
+     union all
+     select qs.id as question_set_id, qs.is_public, null as image_url,
+            qs.manifest_version, qs.manifest_json
+     from question_sets qs
+     where qs.manifest_version = 1 and (${manifestWhereClause})`,
+    ...patterns,
     ...patterns,
   );
+  const references: Array<R2ImageReferenceRow & { image_url: string }> = [];
+  for (const row of rows) {
+    if (row.image_url) references.push({ ...row, image_url: row.image_url });
+    if (row.manifest_version == null) continue;
+    for (const imageUrl of getManifestImageUrls({
+      id: row.question_set_id,
+      manifest_version: row.manifest_version,
+      manifest_json: row.manifest_json ?? null,
+    }) ?? []) {
+      references.push({ question_set_id: row.question_set_id, is_public: row.is_public, image_url: imageUrl });
+    }
+  }
+  return references;
 }
 
 async function deleteUnreferencedQuestionSets(env: Env, questionSetIds: string[]) {
@@ -2557,7 +2628,10 @@ async function cleanupExpiredRooms(env: Env, now = Date.now()) {
   const rowsForDeletedRooms = roomCandidateRows.filter((row) => row.room_id && deletedRoomIdSet.has(row.room_id));
   const orphanQuestionSetIds = await getOldOrphanUnpublishedQuestionSetIds(env, cutoffIso);
   const orphanRows = await getQuestionSetImageRows(env, orphanQuestionSetIds);
-  const cleanupRows = [...rowsForDeletedRooms, ...orphanRows];
+  const candidateRows = [...rowsForDeletedRooms, ...orphanRows];
+  const candidateIds = Array.from(new Set(candidateRows.map((row) => row.question_set_id)));
+  const unreferencedQuestionSetIds = new Set(await getUnreferencedUnpublishedQuestionSetIds(env, candidateIds));
+  const cleanupRows = candidateRows.filter((row) => unreferencedQuestionSetIds.has(row.question_set_id));
   const candidateQuestionSetIds = new Set(cleanupRows.map((row) => row.question_set_id));
   const candidateKeys = new Set<string>();
   const questionSetKeys = new Map<string, Set<string>>();
@@ -3023,7 +3097,14 @@ export class RoomDurableObjectV3 {
         const room = asRoom(result.room);
         if (!hidden || !gameSession || !room || !Array.isArray(hidden.players) || !Array.isArray(hidden.questions) || !isRecord(hidden.questionSet)) throw new Error("authority vNext 开局 bootstrap 不完整。");
         const players = hidden.players as VNextStartBootstrap["players"];
-        this.authorityVNext.activateStart({ room: { ...room, players }, players, questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"], questions: hidden.questions as VNextStartBootstrap["questions"], gameSession });
+        this.authorityVNext.activateStart({
+          room: { ...room, players },
+          players,
+          questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"],
+          questions: hidden.questions as VNextStartBootstrap["questions"],
+          questionSetManifestVersion: hidden.questionSetManifestVersion === 1 ? 1 : null,
+          gameSession,
+        });
         await this.reconcileVNextAlarm();
         this.broadcastVNextCutover();
         this.sendVNextDelta(body.name, { scope: "room", type: "room_updated", room: { ...room, players } });
@@ -3503,6 +3584,7 @@ export class RoomDurableObjectV3 {
       players,
       questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"],
       questions: hidden.questions as VNextStartBootstrap["questions"],
+      questionSetManifestVersion: hidden.questionSetManifestVersion === 1 ? 1 : null,
       gameSession,
     });
     this.clearAllSnapshotCaches();
@@ -3841,6 +3923,7 @@ export class RoomDurableObjectV3 {
           players,
           questionSet: hidden.questionSet as VNextStartBootstrap["questionSet"],
           questions: hidden.questions as VNextStartBootstrap["questions"],
+          questionSetManifestVersion: hidden.questionSetManifestVersion === 1 ? 1 : null,
           gameSession,
         });
         this.clearAllSnapshotCaches();

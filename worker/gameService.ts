@@ -7,6 +7,11 @@ import {
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
 } from "../src/types/game";
 import { createD1QueryClient, type GameDatabase, type GameDatabaseMutationTracker } from "./d1QueryCompat";
+import {
+  decodeQuestionSetManifest,
+  encodeQuestionSetManifest,
+  QUESTION_SET_MANIFEST_VERSION,
+} from "./questionSetManifest";
 import type {
   Answer,
   BuzzerAnswer,
@@ -2463,10 +2468,28 @@ export async function createUploadedQuestionSet(params: {
   }
 
   const createdByNickname = await getPlayerNickname(params.presenterPlayerId, params.roomId);
+  const questionSetId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const questions: DbQuestion[] = questionItems.map((item, index) => {
+    const labelText = item.labelText;
+    return {
+      id: crypto.randomUUID(),
+      question_set_id: questionSetId,
+      image_url: item.imageUrl,
+      order_index: index,
+      label_text: labelText,
+      label_source: labelText ? "manual" : null,
+      label_source_answer_id: null,
+      label_updated_by_player_id: labelText ? params.presenterPlayerId : null,
+      label_updated_at: labelText ? createdAt : null,
+      created_at: createdAt,
+    };
+  });
 
   const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
     .insert({
+      id: questionSetId,
       title,
       description: params.description?.trim() || null,
       created_by_player_id: params.presenterPlayerId,
@@ -2475,7 +2498,12 @@ export async function createUploadedQuestionSet(params: {
       creation_method: params.creationMethod ?? "player_manual",
       is_public: false,
       image_count: imageUrls.length,
-      image_urls_text: imageUrlsToText(imageUrls),
+      image_urls_text: null,
+      manifest_version: QUESTION_SET_MANIFEST_VERSION,
+      manifest_revision: 0,
+      manifest_json: encodeQuestionSetManifest(questions.map(toQuestion)),
+      created_at: createdAt,
+      updated_at: createdAt,
     })
     .select()
     .single<DbQuestionSet>();
@@ -2483,33 +2511,7 @@ export async function createUploadedQuestionSet(params: {
   if (questionSetError) {
     throw new Error(questionSetError.message);
   }
-
-  const { data: questions, error: questionsError } = await d1
-    .from("questions")
-    .insert(
-      imageUrls.map((imageUrl, index) => {
-        const labelText = questionItems[index].labelText;
-
-        return {
-          question_set_id: questionSet.id,
-          image_url: imageUrl,
-          order_index: index,
-          label_text: labelText,
-          label_source: labelText ? "manual" : null,
-          label_updated_by_player_id: labelText ? params.presenterPlayerId : null,
-          label_updated_at: labelText ? new Date().toISOString() : null,
-        };
-      }),
-    )
-    .select()
-    .order("order_index", { ascending: true })
-    .returns<DbQuestion[]>();
-
-  if (questionsError) {
-    throw new Error(questionsError.message);
-  }
-
-  return toQuestionSet(questionSet, questions ?? []);
+  return toQuestionSet(questionSet, questions);
 }
 
 export async function assertCanCreateUploadedQuestionSet(params: { roomId: string; presenterPlayerId: string }) {
@@ -2572,7 +2574,7 @@ export async function getQuestionSetById(questionSetId: string) {
     return null;
   }
 
-  const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+  const questions = await getDbQuestionsForQuestionSet(questionSet);
   return toQuestionSet(questionSet, questions);
 }
 
@@ -2716,7 +2718,7 @@ export async function getCommunityQuestionSetDetail(questionSetId: string) {
     return null;
   }
 
-  const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+  const questions = await getDbQuestionsForQuestionSet(questionSet);
   return toQuestionSet(questionSet, questions);
 }
 
@@ -2934,11 +2936,13 @@ export async function startGameWithQuestionSet(params: {
     ) {
       const currentPlayers = await getDbPlayersByRoomId(room.id);
       if (params.authorityVersion === 2) {
-        const [{ data: currentQuestionSet, error: currentQuestionSetError }, currentQuestions] = await Promise.all([
-          d1.from("question_sets").select("*").eq("id", params.questionSetId).maybeSingle<DbQuestionSet>(),
-          getDbQuestionsByQuestionSetId(params.questionSetId),
-        ]);
+        const { data: currentQuestionSet, error: currentQuestionSetError } = await d1
+          .from("question_sets")
+          .select("*")
+          .eq("id", params.questionSetId)
+          .maybeSingle<DbQuestionSet>();
         if (currentQuestionSetError || !currentQuestionSet) throw new Error(currentQuestionSetError?.message ?? "题库不存在。");
+        const currentQuestions = await getDbQuestionsForQuestionSet(currentQuestionSet);
         return {
           gameSession: currentGameSession,
           room: toRoom(room, currentPlayers),
@@ -2946,6 +2950,7 @@ export async function startGameWithQuestionSet(params: {
             players: currentPlayers.map(toPlayer),
             questionSet: toQuestionSet(currentQuestionSet, currentQuestions),
             questions: currentQuestions.map(toQuestion),
+            questionSetManifestVersion: currentQuestionSet.manifest_version ?? null,
           },
         };
       }
@@ -3221,7 +3226,7 @@ export async function startGameWithQuestionSet(params: {
     throw new Error("开始游戏失败：房间状态已变化，请刷新后重试。");
   }
 
-  const vnextQuestions = params.authorityVersion === 2 ? await getDbQuestionsByQuestionSetId(params.questionSetId) : [];
+  const vnextQuestions = params.authorityVersion === 2 ? await getDbQuestionsForQuestionSet(questionSet) : [];
   return {
     gameSession: hydratedGameSession,
     room: toRoom(updatedRoom),
@@ -3231,6 +3236,7 @@ export async function startGameWithQuestionSet(params: {
             players: (players ?? []).map(toPlayer),
             questionSet: toQuestionSet(questionSet, vnextQuestions),
             questions: vnextQuestions.map(toQuestion),
+            questionSetManifestVersion: questionSet.manifest_version ?? null,
           },
         }
       : {}),
@@ -3344,7 +3350,7 @@ export async function getGameSessionById(gameSessionId: string) {
   return data ? await hydrateGameSessionEligibility(toGameSession(data)) : null;
 }
 
-async function getDbQuestionsByQuestionSetId(questionSetId: string) {
+async function getLegacyDbQuestionsByQuestionSetId(questionSetId: string) {
   assertD1Env();
 
   const { data, error } = await d1
@@ -3359,6 +3365,23 @@ async function getDbQuestionsByQuestionSetId(questionSetId: string) {
   }
 
   return data ?? [];
+}
+
+async function getDbQuestionsForQuestionSet(questionSet: DbQuestionSet) {
+  return decodeQuestionSetManifest(questionSet) ?? await getLegacyDbQuestionsByQuestionSetId(questionSet.id);
+}
+
+async function getDbQuestionsByQuestionSetId(questionSetId: string) {
+  assertD1Env();
+  const { data: questionSet, error } = await d1
+    .from("question_sets")
+    .select("*")
+    .eq("id", questionSetId)
+    .maybeSingle<DbQuestionSet>();
+
+  if (error) throw new Error(error.message);
+  if (!questionSet) return [];
+  return await getDbQuestionsForQuestionSet(questionSet);
 }
 
 export async function getQuestionsByQuestionSetId(questionSetId: string) {
@@ -3877,7 +3900,7 @@ export async function publishQuestionSetToCommunity(params: {
     throw new Error("发布失败：题库不存在，或你不是题库创建者。");
   }
 
-  const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+  const questions = await getDbQuestionsForQuestionSet(questionSet);
   return toQuestionSet(questionSet, questions);
 }
 
@@ -3955,7 +3978,7 @@ export async function rateCommunityQuestionSet(params: {
     throw new Error(updateError.message);
   }
 
-  const questions = await getDbQuestionsByQuestionSetId(updatedQuestionSet.id);
+  const questions = await getDbQuestionsForQuestionSet(updatedQuestionSet);
   return toQuestionSet(updatedQuestionSet, questions);
 }
 
@@ -6572,18 +6595,23 @@ export async function updateQuestionLabel(params: {
     throw new Error("当前还没有进入完整图片复盘阶段，不能填写正确答案。");
   }
 
-  const { data: question, error: questionError } = await d1
-    .from("questions")
+  const { data: questionSet, error: questionSetError } = await d1
+    .from("question_sets")
     .select("*")
-    .eq("id", params.questionId)
-    .eq("question_set_id", currentGameSession.question_set_id)
-    .eq("order_index", currentGameSession.current_question_index)
-    .maybeSingle<DbQuestion>();
+    .eq("id", currentGameSession.question_set_id)
+    .maybeSingle<DbQuestionSet>();
 
-  if (questionError) {
-    throw new Error(questionError.message);
+  if (questionSetError) {
+    throw new Error(questionSetError.message);
   }
 
+  if (!questionSet) {
+    throw new Error("当前题库不存在，不能填写正确答案。");
+  }
+
+  const question = (await getDbQuestionsForQuestionSet(questionSet)).find(
+    (item) => item.id === params.questionId && item.order_index === currentGameSession.current_question_index,
+  );
   if (!question) {
     throw new Error("当前题目不存在，不能填写正确答案。");
   }
@@ -6634,6 +6662,53 @@ export async function updateQuestionLabel(params: {
     }
   }
 
+  const labelUpdatedAt = new Date().toISOString();
+  if (questionSet.manifest_version != null) {
+    let currentQuestionSet = questionSet;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const currentQuestions = decodeQuestionSetManifest(currentQuestionSet);
+      const currentQuestion = currentQuestions?.find(
+        (item) => item.id === question.id && item.order_index === currentGameSession.current_question_index,
+      );
+      if (!currentQuestion) throw new Error("当前题目不存在，不能填写正确答案。");
+      if (currentQuestion.label_text?.trim()) throw new Error("正确答案已被其他操作更新，请刷新后重试。");
+
+      const nextQuestion = {
+        ...toQuestion(currentQuestion),
+        labelText,
+        labelSource: params.source,
+        labelSourceAnswerId: sourceAnswerId,
+        labelUpdatedByPlayerId: params.presenterPlayerId,
+        labelUpdatedAt,
+      };
+      const nextQuestions = currentQuestions.map((item) => item.id === currentQuestion.id ? nextQuestion : toQuestion(item));
+      const revision = currentQuestionSet.manifest_revision ?? 0;
+      const { data: updatedQuestionSet, error: manifestUpdateError } = await d1
+        .from("question_sets")
+        .update({
+          manifest_json: encodeQuestionSetManifest(nextQuestions),
+          manifest_revision: revision + 1,
+        })
+        .eq("id", currentQuestionSet.id)
+        .eq("manifest_version", QUESTION_SET_MANIFEST_VERSION)
+        .eq("manifest_revision", revision)
+        .select()
+        .maybeSingle<DbQuestionSet>();
+      if (manifestUpdateError) throw new Error(manifestUpdateError.message);
+      if (updatedQuestionSet) return nextQuestion;
+
+      const { data: reloaded, error: reloadError } = await d1
+        .from("question_sets")
+        .select("*")
+        .eq("id", currentQuestionSet.id)
+        .maybeSingle<DbQuestionSet>();
+      if (reloadError) throw new Error(reloadError.message);
+      if (!reloaded) throw new Error("当前题库不存在，不能填写正确答案。");
+      currentQuestionSet = reloaded;
+    }
+    throw new Error("正确答案已被其他操作更新，请刷新后重试。");
+  }
+
   const { data: updatedQuestion, error: updateError } = await d1
     .from("questions")
     .update({
@@ -6641,7 +6716,7 @@ export async function updateQuestionLabel(params: {
       label_source: params.source,
       label_source_answer_id: sourceAnswerId,
       label_updated_by_player_id: params.presenterPlayerId,
-      label_updated_at: new Date().toISOString(),
+      label_updated_at: labelUpdatedAt,
     })
     .eq("id", question.id)
     .is("label_text", null)

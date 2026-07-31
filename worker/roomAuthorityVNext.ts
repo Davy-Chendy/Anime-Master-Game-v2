@@ -18,11 +18,17 @@ import type {
   TeamBattleState,
   TeamBattleTeam,
 } from "../src/types/game";
+import type { DbQuestionSet } from "../src/types/game";
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
 } from "../src/types/game";
+import {
+  decodeQuestionSetManifest,
+  encodeDbQuestionSetManifest,
+  QUESTION_SET_MANIFEST_VERSION,
+} from "./questionSetManifest";
 
 const VNEXT_AUTHORITY_VERSION = 2 as const;
 const VNEXT_STATE_SCHEMA_VERSION = 1 as const;
@@ -105,6 +111,7 @@ export type VNextStartBootstrap = {
   gameParticipants?: Player[];
   questionSet: QuestionSet;
   questions: Question[];
+  questionSetManifestVersion?: number | null;
   gameSession: GameSession;
 };
 
@@ -127,6 +134,8 @@ export type VNextAggregate = {
   players: Player[];
   questionSet?: QuestionSet;
   questions: Question[];
+  questionSetManifestVersion?: number | null;
+  dirtyQuestionLabelIds?: string[];
   gameSession?: GameSession;
   answers: Answer[];
   buzzerAnswers: BuzzerAnswer[];
@@ -205,6 +214,8 @@ type LegacyProjectionGame = {
   players: Player[];
   participants?: Player[];
   questions: Question[];
+  questionSetManifestVersion?: number | null;
+  dirtyQuestionLabelIds?: string[];
   gameSession?: GameSession;
   scores: PlayerScore[];
   questionResults: QuestionResult[];
@@ -217,6 +228,8 @@ type ArchiveProjectionGameV2 = {
   room?: Room;
   players: Player[];
   questions: Question[];
+  questionSetManifestVersion?: number | null;
+  dirtyQuestionLabelIds?: string[];
   gameSession?: GameSession;
   archive: GameResultArchive;
 };
@@ -448,6 +461,8 @@ export class RoomAuthorityVNext {
       players: [],
       gameParticipants: [],
       questions: [],
+      questionSetManifestVersion: null,
+      dirtyQuestionLabelIds: [],
       answers: [],
       buzzerAnswers: [],
       questionResults: [],
@@ -487,8 +502,13 @@ export class RoomAuthorityVNext {
       room: { ...bootstrap.room, players },
       players,
       gameParticipants: participatingPlayers.map((player) => ({ ...player, role: "PLAYER" })),
-      questionSet: bootstrap.questionSet,
+      questionSet: {
+        ...bootstrap.questionSet,
+        questions: clone(bootstrap.questionSet.questions ?? bootstrap.questions),
+      },
       questions: bootstrap.questions.slice().sort((a, b) => a.orderIndex - b.orderIndex),
+      questionSetManifestVersion: bootstrap.questionSetManifestVersion ?? null,
+      dirtyQuestionLabelIds: [],
       gameSession,
       deadline: normalizedTeam.deadline ?? teamDeadlineFromSession(gameSession) ?? current.deadline,
       scores,
@@ -1388,6 +1408,7 @@ export class RoomAuthorityVNext {
       if (!sourceAnswerExists) throw new TerminalMutationError(sourceAnswerId ? "引用的答案不存在，不能作为正确答案。" : "请选择一个要引用的答案。");
     }
     Object.assign(question, { labelText, labelSource: source, labelSourceAnswerId: sourceAnswerId, labelUpdatedByPlayerId: action.actorId, labelUpdatedAt: nowIso(action.serverReceivedAtMs) });
+    aggregate.dirtyQuestionLabelIds = Array.from(new Set([...(aggregate.dirtyQuestionLabelIds ?? []), question.id]));
     const delta: RealtimeDelta = { scope: "game", type: "question_label_updated", question: clone(question) };
     return { data: clone(question), provisional: true, publicDeltas: [delta], presenterDeltas: [], playerDeltas: [] };
   }
@@ -1768,6 +1789,72 @@ export class RoomAuthorityVNext {
     }
   }
 
+  private getDirtyProjectionQuestions(game: ProjectionGame) {
+    const dirtyIds = game.dirtyQuestionLabelIds === undefined
+      ? new Set(game.questions.filter((question) => question.labelText?.trim()).map((question) => question.id))
+      : new Set(game.dirtyQuestionLabelIds);
+    return game.questions.filter((question) => dirtyIds.has(question.id) && question.labelText?.trim());
+  }
+
+  private async persistManifestQuestionLabels(game: ProjectionGame, dirtyQuestions: Question[]) {
+    const questionSetId = game.gameSession?.questionSetId;
+    if (!questionSetId) throw new Error("question manifest schema validation failed: projection is missing questionSetId");
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const row = await this.d1
+        .prepare("SELECT id,manifest_version,manifest_revision,manifest_json FROM question_sets WHERE id=?")
+        .bind(questionSetId)
+        .first<Pick<DbQuestionSet, "id" | "manifest_version" | "manifest_revision" | "manifest_json">>();
+      this.metrics.d1Reads += 1;
+      if (!row || row.manifest_version !== QUESTION_SET_MANIFEST_VERSION) {
+        throw new Error("question manifest schema validation failed: manifest row is missing or incompatible");
+      }
+
+      const currentQuestions = decodeQuestionSetManifest(row);
+      if (!currentQuestions) throw new Error("question manifest schema validation failed: manifest payload is missing");
+      const currentById = new Map(currentQuestions.map((question) => [question.id, question]));
+      let changed = false;
+      for (const desired of dirtyQuestions) {
+        const current = currentById.get(desired.id);
+        if (!current) throw new Error("question manifest schema validation failed: dirty question is missing");
+        const currentLabel = current.label_text?.trim();
+        if (currentLabel) {
+          if (currentLabel !== desired.labelText?.trim()) {
+            console.warn(JSON.stringify({
+              event: "question_manifest_label_conflict",
+              questionSetId,
+              questionId: desired.id,
+              storedLabelUpdatedAt: current.label_updated_at ?? null,
+              projectedLabelUpdatedAt: desired.labelUpdatedAt ?? null,
+            }));
+          }
+          continue;
+        }
+        current.label_text = desired.labelText?.trim() || null;
+        current.label_source = desired.labelSource ?? null;
+        current.label_source_answer_id = desired.labelSourceAnswerId ?? null;
+        current.label_updated_by_player_id = desired.labelUpdatedByPlayerId ?? null;
+        current.label_updated_at = desired.labelUpdatedAt ?? null;
+        changed = true;
+      }
+      if (!changed) return;
+
+      const revision = row.manifest_revision ?? 0;
+      const updated = await this.d1
+        .prepare(`UPDATE question_sets
+          SET manifest_json=?,manifest_revision=manifest_revision+1
+          WHERE id=? AND manifest_version=? AND manifest_revision=?
+          RETURNING id`)
+        .bind(encodeDbQuestionSetManifest(currentQuestions), questionSetId, QUESTION_SET_MANIFEST_VERSION, revision)
+        .first<{ id: string }>();
+      if (updated) {
+        this.metrics.d1Writes += 1;
+        return;
+      }
+    }
+    throw new Error("question manifest revision conflict exceeded retry limit");
+  }
+
   private async flushFinalProjectionOnce() {
     const row = this.state.storage.sql.exec<{ payload_json: string; attempts: number }>("SELECT payload_json,attempts FROM authority_vnext_projection_outbox WHERE id=1").toArray()[0];
     if (!row) return true;
@@ -1779,7 +1866,21 @@ export class RoomAuthorityVNext {
         this.state.storage.sql.exec("DELETE FROM authority_vnext_projection_outbox WHERE id=1");
         return true;
       }
-        for (const question of game.questions) statements.push(this.d1.prepare("UPDATE questions SET label_text=?,label_source=?,label_source_answer_id=?,label_updated_by_player_id=?,label_updated_at=? WHERE id=?").bind(question.labelText ?? null, question.labelSource ?? null, question.labelSourceAnswerId ?? null, question.labelUpdatedByPlayerId ?? null, question.labelUpdatedAt ?? null, question.id));
+        const dirtyQuestions = this.getDirtyProjectionQuestions(game);
+        if (dirtyQuestions.length > 0 && game.questionSetManifestVersion === QUESTION_SET_MANIFEST_VERSION) {
+          await this.persistManifestQuestionLabels(game, dirtyQuestions);
+        } else {
+          for (const question of dirtyQuestions) {
+            statements.push(this.d1.prepare("UPDATE questions SET label_text=?,label_source=?,label_source_answer_id=?,label_updated_by_player_id=?,label_updated_at=? WHERE id=? AND (label_text IS NULL OR trim(label_text)='')").bind(
+              question.labelText ?? null,
+              question.labelSource ?? null,
+              question.labelSourceAnswerId ?? null,
+              question.labelUpdatedByPlayerId ?? null,
+              question.labelUpdatedAt ?? null,
+              question.id,
+            ));
+          }
+        }
         if (game.dissolved) {
           statements.push(this.d1.prepare("DELETE FROM rooms WHERE id=?").bind(game.roomId));
         } else {
@@ -1915,6 +2016,8 @@ export class RoomAuthorityVNext {
       room: aggregate.room,
       players: aggregate.players,
       questions: aggregate.questions,
+      questionSetManifestVersion: aggregate.questionSetManifestVersion ?? null,
+      dirtyQuestionLabelIds: aggregate.dirtyQuestionLabelIds ?? [],
       gameSession: aggregate.gameSession,
       ...(!aggregate.resultArchiveSuppressed
         ? { archive: this.createGameResultArchive(aggregate) }
@@ -1951,6 +2054,12 @@ export class RoomAuthorityVNext {
     const parsed = JSON.parse(row.state_json) as VNextAggregate;
     if (parsed.authorityVersion !== 2 || parsed.schemaVersion !== 1) throw new Error("authority vNext active_game 版本不兼容。");
     parsed.publicStateVersion ??= 0;
+    if (!Array.isArray(parsed.dirtyQuestionLabelIds)) {
+      parsed.dirtyQuestionLabelIds = parsed.questions
+        .filter((question) => question.labelText?.trim())
+        .map((question) => question.id);
+    }
+    parsed.questionSetManifestVersion ??= null;
     return parsed;
   }
 

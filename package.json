@@ -7,7 +7,7 @@
     "build": "tsc --noEmit --incremental false && vite build",
     "start": "vite preview",
     "lint": "tsc --noEmit --incremental false",
-    "worker:dev": "wrangler dev",
+    "worker:dev": "wrangler dev --local --port 8787 --var R2_PUBLIC_BASE_URL:http://localhost:8787/api/r2-images",
     "worker:deploy": "wrangler deploy",
     "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
     "test:authority-budget": "node scripts/authority-write-budget.mjs",

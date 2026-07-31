@@ -401,6 +401,9 @@ export type DbQuestionSet = {
   rating_avg: number;
   rating_count: number;
   play_count: number;
+  manifest_version?: number | null;
+  manifest_revision?: number;
+  manifest_json?: string | null;
   created_at: string;
   updated_at?: string | null;
 };

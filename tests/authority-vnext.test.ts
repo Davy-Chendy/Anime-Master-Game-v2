@@ -5,9 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 
 import { RoomGameAuthority } from "../worker/roomGameAuthority";
 import { ATTACHMENT_BUDGET_BYTES, RoomAuthorityVNext, type VNextMutationEnvelope, type VNextSocketAttachment } from "../worker/roomAuthorityVNext";
+import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/questionSetManifest";
 import { removePlayerFromTeamBattleState } from "../worker/gameService";
 import { getBuzzerAnswerStabilityDelayMs, getRemainingSeconds, isBuzzerAnswerReadyForJudging, isGameSessionPositionStale, shouldAcceptServerClock } from "../src/components/ImageRevealGame";
-import type { GameSession, Player, Question, QuestionSet, Room } from "../src/types/game";
+import type { DbQuestionSet, GameSession, Player, Question, QuestionSet, Room } from "../src/types/game";
 
 class Cursor<T extends Record<string, unknown>> {
   constructor(private readonly rows: T[]) {}
@@ -91,11 +92,13 @@ class SqliteProjectionStatement {
   constructor(readonly db: DatabaseSync, readonly sql: string) {}
   bind(...bindings: unknown[]) { this.bindings = bindings; return this; }
   run() { this.db.prepare(this.sql).run(...this.bindings); }
+  first<T>() { return (this.db.prepare(this.sql).get(...this.bindings) as T | undefined) ?? null; }
 }
 
 class SqliteProjectionD1 {
   readonly db = new DatabaseSync(":memory:");
   batchCalls = 0;
+  failNextBatch = false;
 
   constructor() {
     this.db.exec(`
@@ -106,6 +109,7 @@ class SqliteProjectionD1 {
       CREATE INDEX players_room_id_idx ON players(room_id);
       CREATE INDEX players_room_role_idx ON players(room_id,role);
       CREATE TABLE questions(id TEXT PRIMARY KEY,label_text TEXT,label_source TEXT,label_source_answer_id TEXT,label_updated_by_player_id TEXT,label_updated_at TEXT);
+      CREATE TABLE question_sets(id TEXT PRIMARY KEY,manifest_version INTEGER,manifest_revision INTEGER NOT NULL DEFAULT 0,manifest_json TEXT);
       CREATE TABLE game_sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,current_question_index INTEGER NOT NULL,current_reveal_round INTEGER NOT NULL,revealed_blocks TEXT NOT NULL,team_battle_state TEXT,round_started_at TEXT,ended_at TEXT,completed_normally_at TEXT);
       CREATE TABLE completed_question_set_plays(game_session_id TEXT PRIMARY KEY,question_set_id TEXT NOT NULL,completed_at TEXT NOT NULL);
       CREATE TABLE game_result_archives(game_session_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,question_set_id TEXT NOT NULL,archive_version INTEGER NOT NULL,completed_at TEXT NOT NULL,result_json TEXT NOT NULL);
@@ -120,6 +124,10 @@ class SqliteProjectionD1 {
 
   async batch(statements: D1PreparedStatement[]) {
     this.batchCalls += 1;
+    if (this.failNextBatch) {
+      this.failNextBatch = false;
+      throw new Error("injected projection batch failure");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const statement of statements as unknown as SqliteProjectionStatement[]) statement.run();
@@ -1224,6 +1232,193 @@ test("game result snapshot and final projection retain labels saved before quest
   await authority.flushFinalProjection();
   const labelUpdates = statements.filter((statement) => /UPDATE questions SET label_text/.test(statement.sql));
   assert.deepEqual(labelUpdates.map((statement) => [statement.bindings[0], statement.bindings[5]]), [["第一题答案", "q1"], ["第二题答案", "q2"]]);
+});
+
+test("manifest projection skips clean games and merges a concurrent label into one revisioned row", async () => {
+  const clean = createSqliteProjectionAuthority(1, 1);
+  clean.authority.getAggregate()!.questionSetManifestVersion = 1;
+  clean.d1.db.prepare("INSERT INTO question_sets(id,manifest_version,manifest_revision,manifest_json) VALUES(?,?,?,?)").run(
+    "set1",
+    1,
+    0,
+    encodeQuestionSetManifest(clean.authority.getAggregate()!.questions),
+  );
+  enterReview(clean.authority);
+  const cleanEnd = clean.authority.handleMutation(socketFor(clean.state, "host"), envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  await clean.authority.forceCheckpoint(cleanEnd.forceCheckpoint ?? "game-end", true);
+  await clean.authority.flushFinalProjection();
+  assert.equal(clean.d1.db.prepare("SELECT manifest_revision FROM question_sets WHERE id='set1'").get().manifest_revision, 0);
+
+  const concurrent = createSqliteProjectionAuthority(1, 2);
+  const aggregate = concurrent.authority.getAggregate()!;
+  aggregate.questionSetManifestVersion = 1;
+  concurrent.d1.db.prepare("INSERT INTO question_sets(id,manifest_version,manifest_revision,manifest_json) VALUES(?,?,?,?)").run(
+    "set1",
+    1,
+    0,
+    encodeQuestionSetManifest(aggregate.questions),
+  );
+  const host = socketFor(concurrent.state, "host");
+  enterReview(concurrent.authority);
+  concurrent.authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", {
+    presenterPlayerId: "host",
+    questionId: "q1",
+    labelText: "房间一答案",
+    source: "manual",
+  }), Date.now());
+  assert.deepEqual(aggregate.dirtyQuestionLabelIds, ["q1"]);
+  const ended = concurrent.authority.handleMutation(host, envelope("host", 2, "endCurrentGameEarly", {
+    presenterPlayerId: "host",
+    gameSessionId: "g1",
+  }), Date.now() + 1);
+  await concurrent.authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+  const pendingProjection = concurrent.state.storage.sql.db.prepare("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").get();
+  const pendingGame = JSON.parse(String(pendingProjection.payload_json)).games[0];
+  assert.equal(pendingGame.questionSetManifestVersion, 1);
+  assert.deepEqual(pendingGame.dirtyQuestionLabelIds, ["q1"]);
+
+  const externalQuestions = structuredClone(aggregate.questionSet!.questions!);
+  externalQuestions[1] = {
+    ...externalQuestions[1],
+    labelText: "房间二答案",
+    labelSource: "manual",
+    labelUpdatedByPlayerId: "other-host",
+    labelUpdatedAt: new Date().toISOString(),
+  };
+  concurrent.d1.db.prepare("UPDATE question_sets SET manifest_json=?,manifest_revision=1 WHERE id='set1'")
+    .run(encodeQuestionSetManifest(externalQuestions));
+
+  await concurrent.authority.flushFinalProjection();
+  const stored = concurrent.d1.db.prepare("SELECT id,manifest_version,manifest_revision,manifest_json FROM question_sets WHERE id='set1'").get() as Pick<DbQuestionSet, "id" | "manifest_version" | "manifest_revision" | "manifest_json">;
+  const questions = decodeQuestionSetManifest(stored)!;
+  assert.equal(stored.manifest_revision, 2);
+  assert.deepEqual(questions.map((question) => question.label_text), ["房间一答案", "房间二答案"]);
+  assert.deepEqual(concurrent.d1.db.prepare("SELECT label_text FROM questions ORDER BY id").all().map((row) => row.label_text), [null, null]);
+});
+
+test("manifest projection is idempotent when its later D1 batch fails and the outbox retries", async () => {
+  const created = createSqliteProjectionAuthority(1, 2);
+  const aggregate = created.authority.getAggregate()!;
+  aggregate.questionSetManifestVersion = 1;
+  created.d1.db.prepare("INSERT INTO question_sets(id,manifest_version,manifest_revision,manifest_json) VALUES(?,?,?,?)").run(
+    "set1",
+    1,
+    0,
+    encodeQuestionSetManifest(aggregate.questions),
+  );
+  const host = socketFor(created.state, "host");
+  enterReview(created.authority);
+  created.authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", {
+    presenterPlayerId: "host",
+    questionId: "q1",
+    labelText: "只写一次",
+    source: "manual",
+  }), Date.now());
+  const advanced = created.authority.handleMutation(host, envelope("host", 2, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now() + 1);
+  await created.authority.forceCheckpoint(advanced.forceCheckpoint ?? "phase-boundary", true);
+  enterReview(created.authority);
+  created.authority.handleMutation(host, {
+    ...envelope("host", 3, "updateQuestionLabel", {
+      presenterPlayerId: "host",
+      questionId: "q2",
+      labelText: "也只写一次",
+      source: "manual",
+    }),
+    questionIndex: 1,
+  }, Date.now() + 2);
+  const ended = created.authority.handleMutation(host, {
+    ...envelope("host", 4, "endCurrentGameEarly", { presenterPlayerId: "host", gameSessionId: "g1" }),
+    questionIndex: 1,
+  }, Date.now() + 3);
+  await created.authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  created.d1.failNextBatch = true;
+  assert.equal(await created.authority.flushFinalProjection(), false);
+  assert.equal(created.d1.db.prepare("SELECT manifest_revision FROM question_sets WHERE id='set1'").get().manifest_revision, 1);
+  assert.equal(created.authority.hasPendingFinalProjection(), true);
+
+  assert.equal(await created.authority.flushFinalProjection(), true);
+  const stored = created.d1.db.prepare("SELECT id,manifest_version,manifest_revision,manifest_json FROM question_sets WHERE id='set1'").get() as Pick<DbQuestionSet, "id" | "manifest_version" | "manifest_revision" | "manifest_json">;
+  assert.equal(stored.manifest_revision, 1, "retry must not rewrite an already-merged manifest");
+  assert.deepEqual(decodeQuestionSetManifest(stored)?.map((question) => question.label_text), ["只写一次", "也只写一次"]);
+  assert.equal(created.authority.hasPendingFinalProjection(), false);
+});
+
+test("manifest projection keeps the first stored label when another room conflicts on the same question", async () => {
+  const created = createSqliteProjectionAuthority(1, 1);
+  const aggregate = created.authority.getAggregate()!;
+  aggregate.questionSetManifestVersion = 1;
+  created.d1.db.prepare("INSERT INTO question_sets(id,manifest_version,manifest_revision,manifest_json) VALUES(?,?,?,?)").run(
+    "set1", 1, 0, encodeQuestionSetManifest(aggregate.questions),
+  );
+  const host = socketFor(created.state, "host");
+  enterReview(created.authority);
+  created.authority.handleMutation(host, envelope("host", 1, "updateQuestionLabel", {
+    presenterPlayerId: "host",
+    questionId: "q1",
+    labelText: "较晚答案",
+    source: "manual",
+  }), Date.now());
+  const ended = created.authority.handleMutation(host, envelope("host", 2, "endCurrentGameEarly", {
+    presenterPlayerId: "host",
+    gameSessionId: "g1",
+  }), Date.now() + 1);
+  await created.authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  const firstStored = aggregate.questionSet!.questions!.map((question) => ({
+    ...question,
+    labelText: "先写答案",
+    labelSource: "manual" as const,
+    labelUpdatedByPlayerId: "other-host",
+    labelUpdatedAt: "2026-07-31T00:00:00.000Z",
+  }));
+  created.d1.db.prepare("UPDATE question_sets SET manifest_json=?,manifest_revision=1 WHERE id='set1'")
+    .run(encodeQuestionSetManifest(firstStored));
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (message?: unknown) => { warnings.push(String(message)); };
+  try {
+    assert.equal(await created.authority.flushFinalProjection(), true);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  const stored = created.d1.db.prepare("SELECT id,manifest_version,manifest_revision,manifest_json FROM question_sets WHERE id='set1'").get() as Pick<DbQuestionSet, "id" | "manifest_version" | "manifest_revision" | "manifest_json">;
+  assert.equal(stored.manifest_revision, 1);
+  assert.equal(decodeQuestionSetManifest(stored)?.[0]?.label_text, "先写答案");
+  assert.ok(warnings.some((message) => message.includes('"event":"question_manifest_label_conflict"')));
+});
+
+test("legacy active aggregates conservatively recover labeled manifest questions when the dirty list is absent", async () => {
+  const created = createSqliteProjectionAuthority(1, 1);
+  const aggregate = created.authority.getAggregate()!;
+  aggregate.questionSetManifestVersion = 1;
+  enterReview(created.authority);
+  created.authority.handleMutation(socketFor(created.state, "host"), envelope("host", 1, "updateQuestionLabel", {
+    presenterPlayerId: "host",
+    questionId: "q1",
+    labelText: "恢复答案",
+    source: "manual",
+  }), Date.now());
+  // Older builds shallow-copied this array, so the nominal initial snapshot
+  // could already contain the same label and cannot be used as a diff base.
+  aggregate.questionSet!.questions![0]!.labelText = "恢复答案";
+  await created.authority.forceCheckpoint("phase-boundary");
+
+  const row = created.state.storage.sql.db.prepare("SELECT state_json FROM authority_vnext_active_game WHERE id=1").get() as { state_json: string };
+  const persisted = JSON.parse(row.state_json) as Record<string, unknown>;
+  delete persisted.dirtyQuestionLabelIds;
+  created.state.storage.sql.db.prepare("UPDATE authority_vnext_active_game SET state_json=? WHERE id=1").run(JSON.stringify(persisted));
+
+  const restored = new RoomAuthorityVNext(created.state as unknown as DurableObjectState, created.d1 as unknown as D1Database);
+  await restored.restoreFromStorage();
+  assert.deepEqual(restored.getAggregate()?.dirtyQuestionLabelIds, ["q1"]);
 });
 
 test("ended host leave projects host transfer and the final player dissolves the room", async () => {
@@ -2569,6 +2764,11 @@ test("WebSocket projection boundaries flush the D1 aggregate outbox", () => {
   assert.match(worker, /outcome\.forceCheckpoint === "game-end" \|\| outcome\.forceCheckpoint === "projection"[\s\S]{0,160}flushFinalProjection/);
   assert.match(worker, /aggregate\?\.room\?\.status !== "LOBBY" \|\| this\.authorityVNext\.hasPendingRoomHandoff\(\)/);
   assert.match(worker, /aggregate\.room\?\.status !== "LOBBY" \|\| this\.authorityVNext\.hasPendingRoomHandoff\(\)/);
+  assert.equal(
+    worker.match(/questionSetManifestVersion: hidden\.questionSetManifestVersion === 1 \? 1 : null/g)?.length,
+    3,
+    "HTTP, recovery, and WebSocket starts must all preserve manifest storage routing",
+  );
 });
 
 test("WebSocket proxy preserves player identity for targeted vNext deltas", () => {

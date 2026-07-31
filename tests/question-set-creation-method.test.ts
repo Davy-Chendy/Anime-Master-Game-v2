@@ -5,12 +5,14 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { GameDatabase, GamePreparedStatement } from "../worker/d1QueryCompat";
+import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/questionSetManifest";
 import {
   completeTeamBattleBlockSelection,
   createRoom,
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
   getCommunityQuestionSets,
+  getQuestionSetById,
   joinRoom,
   publishQuestionSetToCommunity,
   runWithGameDatabase,
@@ -68,12 +70,86 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0016") {
+function applyMigrations(db: DatabaseSync, through = "0017") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
   }
 }
+
+test("question-set manifest codec rejects corruption instead of silently falling back", () => {
+  const encoded = encodeQuestionSetManifest([{
+    id: "manifest-q1",
+    questionSetId: "manifest-set",
+    imageUrl: "https://example.com/manifest.webp",
+    orderIndex: 0,
+    labelText: null,
+    createdAt: "2026-07-31T00:00:00.000Z",
+  }]);
+  assert.deepEqual(
+    decodeQuestionSetManifest({ id: "manifest-set", manifest_version: 1, manifest_json: encoded })?.map((question) => question.question_set_id),
+    ["manifest-set"],
+  );
+  assert.equal(decodeQuestionSetManifest({ id: "legacy-set", manifest_version: null, manifest_json: null }), null);
+  assert.throws(
+    () => decodeQuestionSetManifest({ id: "broken-set", manifest_version: 1, manifest_json: "{" }),
+    /manifest JSON 已损坏/,
+  );
+  assert.throws(
+    () => decodeQuestionSetManifest({ id: "future-set", manifest_version: 2, manifest_json: encoded }),
+    /不支持的 manifest 版本/,
+  );
+  const duplicateManifest = JSON.parse(encoded) as { schema: 1; questions: Array<Record<string, unknown>> };
+  duplicateManifest.questions.push({ ...duplicateManifest.questions[0], order_index: 1 });
+  assert.throws(
+    () => decodeQuestionSetManifest({
+      id: "duplicate-set",
+      manifest_version: 1,
+      manifest_json: JSON.stringify(duplicateManifest),
+    }),
+    /重复题目 ID/,
+  );
+});
+
+test("D1 0017 adds manifest storage and targeted partial indexes without rewriting legacy sets", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0016");
+  db.prepare("INSERT INTO question_sets(id,title,created_by_player_id,is_public,image_count,updated_at) VALUES(?,?,?,?,?,?)")
+    .run("legacy-private", "Legacy", "host", 0, 1, "2026-01-01T00:00:00.000Z");
+  db.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
+    .run("legacy-q", "legacy-private", "https://example.com/legacy.webp", 0);
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,prepared_question_set_id) VALUES(?,?,?,?)")
+    .run("legacy-room", "LEG017", "host", "legacy-private");
+
+  const migration = readFileSync(join(migrationsDirectory, "0017_question_set_manifest.sql"), "utf8");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(migration.split(";").slice(0, 2).join(";") + ";");
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='manifest_version'").get().count, 0);
+
+  db.exec(migration);
+  const legacy = db.prepare("SELECT manifest_version,manifest_revision,manifest_json FROM question_sets WHERE id='legacy-private'").get();
+  assert.equal(legacy.manifest_version, null);
+  assert.equal(legacy.manifest_revision, 0);
+  assert.equal(legacy.manifest_json, null);
+
+  const publicIndexSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='question_sets_public_created_idx'").get().sql;
+  assert.match(String(publicIndexSql), /WHERE is_public = 1/i);
+  const cleanupPlan = db.prepare(`EXPLAIN QUERY PLAN
+    select qs.id from question_sets qs
+    where qs.is_public=0 and qs.updated_at<?
+      and not exists(select 1 from game_sessions gs where gs.question_set_id=qs.id)
+      and not exists(select 1 from rooms r where r.prepared_question_set_id=qs.id)
+    order by qs.updated_at,qs.id limit ?`).all("2027-01-01T00:00:00.000Z", 100)
+    .map((row) => String(row.detail)).join("\n");
+  assert.match(cleanupPlan, /question_sets_private_cleanup_idx/);
+  assert.match(cleanupPlan, /game_sessions_question_set_id_idx/);
+  assert.match(cleanupPlan, /rooms_prepared_question_set_id_idx/);
+});
 
 test("D1 0013 upgrades rooms to TEAM_BATTLE vote durations transactionally", () => {
   const db = new DatabaseSync(":memory:");
@@ -215,6 +291,13 @@ test("new question sets default by creation path, publishing can confirm the met
 
     assert.equal(manual.creationMethod, "player_manual");
     assert.equal(assisted.creationMethod, "creation_tool_assisted");
+    assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM questions WHERE question_set_id IN (?,?)").get(manual.id, assisted.id).count, 0);
+    const storedManual = db.sqlite.prepare("SELECT manifest_version,manifest_revision,manifest_json,image_urls_text FROM question_sets WHERE id=?").get(manual.id);
+    assert.equal(storedManual.manifest_version, 1);
+    assert.equal(storedManual.manifest_revision, 0);
+    assert.equal(storedManual.image_urls_text, null);
+    assert.match(String(storedManual.manifest_json), /manual\.webp/);
+    assert.deepEqual((await getQuestionSetById(manual.id))?.questions?.map((question) => question.imageUrl), ["https://example.com/manual.webp"]);
 
     await publishQuestionSetToCommunity({
       questionSetId: manual.id,

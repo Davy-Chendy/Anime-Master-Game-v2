@@ -80,14 +80,24 @@ const teamTurnResultBudget = {
 // when the expected D1 roster is already current; genuinely changed members
 // still pay for their table row and affected index rows.
 const d1ArchiveRows = 1;
-const d1QuestionRows = questions;
+const d1LegacyQuestionLabelRows = questions;
+const d1ManifestQuestionLabelRows = { clean: 0, dirtyAtMost: 1 };
 const d1RoomSessionAndCompletionRows = 3;
 const d1UnchangedRosterRows = 0;
 const d1NonRosterIndexOverheadConservative = { lower: 1, upper: 35 };
 const d1EstimatedRows = {
-  lower: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.lower,
-  upper: d1ArchiveRows + d1QuestionRows + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.upper,
+  lower: d1ArchiveRows + d1ManifestQuestionLabelRows.clean + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.lower,
+  upper: d1ArchiveRows + d1ManifestQuestionLabelRows.dirtyAtMost + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.upper,
 };
+// 2026-07-30 production attribution: question-set rows averaged 146/16
+// rowsWritten per INSERT and 204 normalized question rows cost 796 rowsWritten.
+// A new private manifest row maintains the table row, PK, creator index, and
+// private-cleanup partial index, so its pre-deployment estimate is four rows.
+const normalizedQuestionSetCreationRows = (146 / 16) + ((796 / 204) * questions);
+const manifestQuestionSetCreationRows = 4;
+const questionSetCreationRowsSaved = normalizedQuestionSetCreationRows - manifestQuestionSetCreationRows;
+const labelProjectionRowsSavedAtMost = d1LegacyQuestionLabelRows - d1ManifestQuestionLabelRows.dirtyAtMost;
+const manifestSavingsAt60Games = (questionSetCreationRowsSaved + labelProjectionRowsSavedAtMost) * 60;
 const avoidedNormalizedResultRows = players + players + answers;
 
 assert.equal(answers, players * questions);
@@ -102,6 +112,7 @@ if (players === 50 && questions === 30) {
   });
   assert.ok(vnextRows >= 150 && vnextRows <= 300, `vNext write target missed: ${vnextRows}`);
   assert.ok(d1EstimatedRows.upper <= 500, `D1 final projection target missed: ${d1EstimatedRows.upper}`);
+  assert.ok(manifestSavingsAt60Games >= 8_900, `manifest daily write saving target missed: ${manifestSavingsAt60Games}`);
   assert.deepEqual(teamBlockSelectionBudget, {
     perGameMutations: 30,
     perGameCheckpointRows: 30,
@@ -167,13 +178,23 @@ console.log(JSON.stringify({
   },
   d1FinalProjection: {
     aggregateArchiveRows: d1ArchiveRows,
-    questionLabelRowsAtMost: d1QuestionRows,
+    legacyQuestionLabelRowsAtMost: d1LegacyQuestionLabelRows,
+    manifestQuestionLabelRows: d1ManifestQuestionLabelRows,
     roomSessionAndCompletionRows: d1RoomSessionAndCompletionRows,
     unchangedRosterRows: d1UnchangedRosterRows,
     changedMemberRowsIncludingIndexesEach: { insertOrDelete: "about 4-5", replace: "about 8-10" },
     nonRosterIndexOverheadConservative: d1NonRosterIndexOverheadConservative,
     typicalEstimatedRowsWrittenWithUnchangedRoster: d1EstimatedRows,
     normalizedParticipantScoreAndQuestionResultRowsAvoidedAtMost: avoidedNormalizedResultRows,
-    note: "Only real roster changes are billed; SQL statement count is not treated as rows_written.",
+    note: "Only real roster changes are billed; SQL statement count is not treated as rows_written. Manifest labels are one CAS row at most, not one row per question.",
+  },
+  questionSetManifest: {
+    productionBaseline: "2026-07-30",
+    normalizedQuestionSetCreationRows,
+    manifestQuestionSetCreationRows,
+    questionSetCreationRowsSaved,
+    labelProjectionRowsSavedAtMost,
+    estimatedRowsSavedAt60Games: manifestSavingsAt60Games,
+    note: "The normalized estimate uses measured production coefficients (146/16 + 796/204 per question); the four-row manifest estimate must be replaced with post-deployment Analytics.",
   },
 }, null, 2));
