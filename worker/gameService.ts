@@ -6732,6 +6732,7 @@ export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
       current_presenter_player_id: null,
       current_game_id: null,
       prepared_question_set_id: null,
+      lobby_team_assignments: "{}",
       game_status: "LOBBY",
     })
     .eq("id", roomId)

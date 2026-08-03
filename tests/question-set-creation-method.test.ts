@@ -18,6 +18,7 @@ import {
   getQuestionSetById,
   joinRoom,
   publishQuestionSetToCommunity,
+  returnRoomToLobby,
   runWithGameDatabase,
   selectPresenterForRound,
   startGameWithQuestionSet,
@@ -590,5 +591,29 @@ test("manual team setup removes presenter and spectator assignments and remains 
     );
     room = await updatePlayerRole("room-manual-lifecycle", "p2", "p2", "PLAYER", "blue");
     assert.deepEqual(room.teamAssignments, { host: "red", p2: "blue" });
+  });
+});
+
+test("returning a completed room to the lobby clears all per-game identities", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  db.sqlite.prepare(`INSERT INTO rooms(
+    id,room_code,host_player_id,game_status,current_presenter_player_id,current_game_id,prepared_question_set_id,lobby_team_assignments
+  ) VALUES(?,?,?,?,?,?,?,?)`).run(
+    "room-reset-after-game", "RESET1", "host", "GAME_RESULT", "presenter", "game-1", "stale-set", '{"host":"red","player":"blue"}',
+  );
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["presenter", "Presenter", 0], ["player", "Player", 0]] as const) {
+    db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+      .run(id, "room-reset-after-game", nickname, isHost, "PLAYER");
+  }
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-reset-after-game");
+
+  await runWithGameDatabase(db, async () => {
+    const room = await returnRoomToLobby("room-reset-after-game", "host");
+    assert.equal(room.status, "LOBBY");
+    assert.equal(room.currentPresenterPlayerId, null);
+    assert.equal(room.currentGameId, null);
+    assert.equal(room.preparedQuestionSetId, null);
+    assert.deepEqual(room.teamAssignments, {});
   });
 });

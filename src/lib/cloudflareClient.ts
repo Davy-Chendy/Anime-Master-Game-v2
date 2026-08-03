@@ -294,6 +294,16 @@ function notifyChangeListeners(state: TopicState, message: ChangeMessage) {
   }
 }
 
+function isCompletedLobbyHandoff(message: ChangeMessage) {
+  const deltas = message.deltas ?? (message.delta ? [message.delta] : []);
+  return deltas.some((delta) =>
+    delta.scope === "room" &&
+    delta.type === "room_updated" &&
+    delta.room.status === "LOBBY" &&
+    !delta.room.currentGameId
+  );
+}
+
 function setTopicPlayerId(topic: string, playerId: string | null | undefined) {
   if (!playerId) return;
   const state = getTopicState(topic);
@@ -454,6 +464,10 @@ function ensureSocket(topic: string) {
       state.currentGameId = message.gameId ?? null;
       const syncTasks: Promise<void>[] = [];
       if (message.gameId) syncTasks.push(discardSupersededAuthorityOutbox(topic, message.gameId));
+      else {
+        state.sentOutboxActionIds.clear();
+        syncTasks.push(clearAuthorityOutboxTopic(topic));
+      }
       if (message.gameId && state.playerId && message.committedSeqByActor) syncTasks.push(syncAuthoritySequence(message.gameId, state.playerId, message.committedSeqByActor[state.playerId] ?? 0));
       state.sequenceSync = Promise.all(syncTasks).then(() => undefined).catch((error) => { console.error("Realtime sequence sync failed.", error); });
       void state.sequenceSync
@@ -523,6 +537,13 @@ function ensureSocket(topic: string) {
         const tasks: Promise<void>[] = [discardSupersededAuthorityOutbox(topic, change.gameId)];
         if (state.playerId) tasks.push(syncAuthoritySequence(change.gameId, state.playerId, change.committedSeqByActor?.[state.playerId] ?? 0));
         state.sequenceSync = Promise.all(tasks).then(() => undefined).catch((error) => { console.error("Realtime cutover sequence sync failed.", error); });
+      }
+      if (isCompletedLobbyHandoff(change)) {
+        state.currentGameId = null;
+        state.sentOutboxActionIds.clear();
+        state.sequenceSync = state.sequenceSync
+          .then(() => clearAuthorityOutboxTopic(topic))
+          .catch((error) => { console.error("Completed lobby Outbox cleanup failed.", error); });
       }
       notifyChangeListeners(state, change);
     }
@@ -618,7 +639,7 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
   if (state.authorityVersion === 2 && gameId && state.currentGameId && gameId !== state.currentGameId) {
     throw new WsActionError("server", "该操作属于已结束的游戏，请刷新后重试。");
   }
-  const outboxItem = state.authorityVersion !== 1 && MUTATION_NAMES.has(name) && gameId && actorId
+  const outboxItem = state.authorityVersion !== 1 && MUTATION_NAMES.has(name) && gameId && state.currentGameId === gameId && actorId
     && mutationPayload ? await enqueueAuthorityMutation({ topic, actorId, gameId, questionIndex: gameSessionQuestionIndexes.get(gameId) ?? 0, name, payload: mutationPayload, args })
     : null;
   const clientActionId = outboxItem?.actionId ?? crypto.randomUUID();

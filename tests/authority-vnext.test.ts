@@ -105,7 +105,7 @@ class SqliteProjectionD1 {
   constructor() {
     this.db.exec(`
       PRAGMA foreign_keys=ON;
-      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_game_id TEXT,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
+      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_presenter_player_id TEXT,current_game_id TEXT,prepared_question_set_id TEXT,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
       CREATE TABLE players(id TEXT PRIMARY KEY,room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,nickname TEXT NOT NULL,is_host INTEGER NOT NULL,joined_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,role TEXT NOT NULL);
       CREATE UNIQUE INDEX players_room_nickname_unique ON players(room_id,lower(nickname));
       CREATE INDEX players_room_id_idx ON players(room_id);
@@ -150,10 +150,10 @@ function createSqliteProjectionAuthority(playerCount: number, questionCount = 1)
   for (const player of aggregate.players) player.lastSeenAt = fixedLastSeenAt;
   aggregate.room!.players = aggregate.players;
   d1.db.prepare(`INSERT INTO rooms(
-    id,room_code,host_player_id,game_status,current_game_id,updated_at,runtime_generation,
-    room_state_version,room_state_revision,room_state_json
-  ) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(
-    "r1", "ROOM01", "host", "PLAYING", "g1", fixedLastSeenAt,
+    id,room_code,host_player_id,game_status,current_presenter_player_id,current_game_id,prepared_question_set_id,updated_at,
+    lobby_team_assignments,runtime_generation,room_state_version,room_state_revision,room_state_json
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    "r1", "ROOM01", "host", "PLAYING", "host", "g1", "stale-set", fixedLastSeenAt, '{"p0":"red"}',
     CURRENT_ROOM_RUNTIME_GENERATION, 1, 0, encodeRoomState("r1", "host", aggregate.players),
   );
   for (const player of aggregate.players) {
@@ -1167,6 +1167,8 @@ test("ended room mutations ignore a stale question index", () => {
   const host = socketFor(state, "host");
   const player = socketFor(state, "p0");
   const now = Date.now();
+  authority.getAggregate()!.room!.teamAssignments = { p0: "red" };
+  assert.equal(authority.isRunningGame("g1"), true);
   enterReview(authority);
   const advanced = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
     presenterPlayerId: "host",
@@ -1179,6 +1181,8 @@ test("ended room mutations ignore a stale question index", () => {
     questionIndex: 1,
   }, now + 1);
   assert.equal(ended.error, undefined);
+  assert.equal(authority.hasGameState("g1"), true);
+  assert.equal(authority.isRunningGame("g1"), false);
 
   const left = authority.handleMutation(player, envelope("p0", 1, "leaveRoom", { roomId: "r1", playerId: "p0" }), now + 2);
   assert.equal(left.error, undefined);
@@ -1187,6 +1191,21 @@ test("ended room mutations ignore a stale question index", () => {
   const returned = authority.handleMutation(host, envelope("host", 3, "returnRoomToLobby", { roomId: "r1", hostPlayerId: "host" }), now + 3);
   assert.equal(returned.error, undefined);
   assert.equal(authority.getAggregate()?.room?.status, "LOBBY");
+  assert.equal(authority.getAggregate()?.room?.currentPresenterPlayerId, null);
+  assert.equal(authority.getAggregate()?.room?.preparedQuestionSetId, null);
+  assert.deepEqual(authority.getAggregate()?.room?.teamAssignments, {});
+});
+
+test("WebSocket active-only room mutations fall through after the vNext game ends", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../src/lib/cloudflareClient.ts", import.meta.url), "utf8");
+  assert.match(
+    worker,
+    /ROOM_AUTHORITY_ACTIVE_ONLY_NAMES\.has\(payload\.name\) && !this\.authorityVNext\.isRunningGame\(gameId\)/,
+  );
+  assert.match(worker, /connectedAggregate\.cutoverState === "active"[\s\S]{0,180}hasPendingRoomHandoff/);
+  assert.match(client, /state\.currentGameId === gameId && actorId/);
+  assert.match(client, /isCompletedLobbyHandoff\(change\)[\s\S]{0,220}clearAuthorityOutboxTopic\(topic\)/);
 });
 
 test("game result snapshot and final projection retain labels saved before question changes", async () => {
@@ -2487,8 +2506,8 @@ test("final projection uses a dissolved tombstone and one aggregate room-state w
   assert.equal(statements.some((statement) => /(?:DELETE FROM|INSERT INTO) players/.test(statement.sql)), false);
   const roomUpdate = statements.find((statement) => /room_state_json/.test(statement.sql));
   assert.ok(roomUpdate);
-  assert.equal(roomUpdate.bindings[5], 1);
-  assert.equal((JSON.parse(String(roomUpdate.bindings[6])) as { players: unknown[] }).players.length, 2);
+  assert.equal(roomUpdate.bindings[7], 1);
+  assert.equal((JSON.parse(String(roomUpdate.bindings[8])) as { players: unknown[] }).players.length, 2);
 
   statements.length = 0;
   const second = createAuthority(1, d1);
@@ -2651,6 +2670,9 @@ test("v3 aggregate projection writes one room row and zero player rows for 50 un
   const room = d1.db.prepare("SELECT * FROM rooms WHERE id='r1'").get() as never;
   assert.equal(decodeRoomState(room).length, 50);
   assert.equal(Number((room as { room_state_revision: number }).room_state_revision), 1);
+  assert.equal((room as { current_presenter_player_id: string | null }).current_presenter_player_id, null);
+  assert.equal((room as { prepared_question_set_id: string | null }).prepared_question_set_id, null);
+  assert.equal((room as { lobby_team_assignments: string }).lobby_team_assignments, "{}");
 
   state.storage.sql.db.prepare("INSERT INTO authority_vnext_projection_outbox(id,payload_json,attempts,updated_at) VALUES(1,?,0,?)").run(outbox.payload_json, Date.now());
   assert.equal(await authority.flushFinalProjection(), true);

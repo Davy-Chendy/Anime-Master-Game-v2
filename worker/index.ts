@@ -2967,7 +2967,18 @@ export class RoomDurableObjectV3 {
         logAuxiliaryFailure("websocket_attachment_initialize_failed", error, { topic, playerId: playerId ?? null });
       }
       const connectedAggregate = this.authorityVNext.getAggregate();
-      server.send(JSON.stringify({ type: "connected", topic, authorityVersion: connectedAggregate ? 2 : 1, gameId: connectedAggregate?.gameId, committedSeqByActor: connectedAggregate?.committedSeqByActor }));
+      const connectedGameId = connectedAggregate && (
+        connectedAggregate.cutoverState === "active" ||
+        (connectedAggregate.room != null && connectedAggregate.room.status !== "LOBBY") ||
+        this.authorityVNext.hasPendingRoomHandoff()
+      ) ? connectedAggregate.gameId : undefined;
+      server.send(JSON.stringify({
+        type: "connected",
+        topic,
+        authorityVersion: connectedAggregate ? 2 : 1,
+        gameId: connectedGameId,
+        committedSeqByActor: connectedGameId ? connectedAggregate?.committedSeqByActor : undefined,
+      }));
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -3425,7 +3436,7 @@ export class RoomDurableObjectV3 {
       return cachedRoundSnapshot;
     }
 
-    if (this.authorityVNext.isActiveGame(gameSessionId)) {
+    if (this.authorityVNext.hasGameState(gameSessionId)) {
       await this.restoreVNextAuthority();
       return this.authorityVNext.query("getRoundSnapshot", [gameSessionId]) as RoundSnapshot;
     }
@@ -3511,7 +3522,7 @@ export class RoomDurableObjectV3 {
       return cachedSnapshot;
     }
 
-    if (this.authorityVNext.isActiveGame(gameSessionId)) {
+    if (this.authorityVNext.hasGameState(gameSessionId)) {
       await this.restoreVNextAuthority();
       return this.authorityVNext.query("getGameBootstrapSnapshot", [gameSessionId]) as GameBootstrapSnapshot;
     }
@@ -3597,7 +3608,7 @@ export class RoomDurableObjectV3 {
       return cachedSnapshot;
     }
 
-    if (this.authorityVNext.isActiveGame(gameSessionId)) {
+    if (this.authorityVNext.hasGameState(gameSessionId)) {
       await this.restoreVNextAuthority();
       return this.authorityVNext.query("getGameResultSnapshot", [gameSessionId]) as GameResultSnapshot;
     }
@@ -3657,12 +3668,16 @@ export class RoomDurableObjectV3 {
     const activeAggregate = this.authorityVNext.getAggregate();
     const gameId = payload.mutation?.gameId ?? queryGameId ?? (typeof argRecord?.gameSessionId === "string" ? argRecord.gameSessionId : null)
       ?? (VNEXT_POSITIONAL_ROOM_MUTATIONS.has(payload.name) || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(payload.name) ? activeAggregate?.gameId ?? null : null);
-    if (payload.mutation && this.authorityVNext.isActiveGame() && !this.authorityVNext.isActiveGame(payload.mutation.gameId)) {
+    if (payload.mutation && this.authorityVNext.hasGameState() && !this.authorityVNext.hasGameState(payload.mutation.gameId)) {
       await this.restoreVNextAuthority();
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, error: "该操作属于已结束的游戏，请刷新后重试。" }));
       return true;
     }
-    if (!gameId || !this.authorityVNext.isActiveGame(gameId)) return false;
+    if (
+      !gameId ||
+      !this.authorityVNext.hasGameState(gameId) ||
+      (ROOM_AUTHORITY_ACTIVE_ONLY_NAMES.has(payload.name) && !this.authorityVNext.isRunningGame(gameId))
+    ) return false;
     await this.restoreVNextAuthority();
     const mutationDeadlinePolicy = getMutationDeadlinePolicy(payload.name);
     if (mutationDeadlinePolicy == null) {
