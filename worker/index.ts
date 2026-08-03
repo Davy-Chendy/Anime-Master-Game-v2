@@ -2744,6 +2744,26 @@ export class RoomDurableObjectV3 {
     state.blockConcurrencyWhile(async () => this.runtime.initializeSchema());
   }
 
+  private expireRetiredSocket(socket: WebSocket) {
+    try {
+      socket.send(JSON.stringify({
+        type: "room_expired",
+        code: ROOM_VERSION_EXPIRED_ERROR_CODE,
+        message: ROOM_VERSION_EXPIRED_MESSAGE,
+      }));
+    } catch { /* The socket may already be errored or closed. */ }
+    try { socket.close(4001, ROOM_VERSION_EXPIRED_ERROR_CODE); } catch { /* Best-effort retirement. */ }
+  }
+
+  private async retireOldGeneration() {
+    try {
+      await this.state.storage.deleteAlarm();
+    } catch (error) {
+      logAuxiliaryFailure("room_runtime_old_generation_alarm_cleanup_failed", error);
+    }
+    for (const socket of this.state.getWebSockets()) this.expireRetiredSocket(socket);
+  }
+
   private getAuthorityRoomId(topic = this.authorityTopic) {
     return getRoomIdFromTopic(topic);
   }
@@ -2903,6 +2923,21 @@ export class RoomDurableObjectV3 {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    if (this.runtime.isRetiredGeneration()) {
+      await this.retireOldGeneration();
+      if (request.headers.get("upgrade") === "websocket") {
+        const pair = new WebSocketPair();
+        const [client, server] = Object.values(pair);
+        this.state.acceptWebSocket(server);
+        this.expireRetiredSocket(server);
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      return Response.json(
+        { error: ROOM_VERSION_EXPIRED_MESSAGE, code: ROOM_VERSION_EXPIRED_ERROR_CODE },
+        { status: 410 },
+      );
+    }
 
     if (url.pathname === "/api/rpc" && request.method === "POST") {
       return request.headers.has(LOCAL_ROOM_OBJECT_TOPIC_HEADER)
@@ -3198,6 +3233,10 @@ export class RoomDurableObjectV3 {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.runtime.isRetiredGeneration()) {
+      this.expireRetiredSocket(socket);
+      return;
+    }
     const receivedAtMs = Math.max(Date.now(), this.lastActionReceivedAtMs + 1);
     this.lastActionReceivedAtMs = receivedAtMs;
     this.sendActionAccepted(socket, message);
@@ -3214,6 +3253,10 @@ export class RoomDurableObjectV3 {
   }
 
   async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
+    if (this.runtime.isRetiredGeneration()) {
+      try { socket.close(code, reason); } catch { /* The peer may already be closed. */ }
+      return;
+    }
     if (this.authorityVNext.hasStoredState()) {
       const receipt = await this.authorityVNext.handleSocketClose(socket);
       if (receipt) this.broadcastVNextDurableAck(receipt);
@@ -3222,6 +3265,10 @@ export class RoomDurableObjectV3 {
   }
 
   async webSocketError(socket: WebSocket): Promise<void> {
+    if (this.runtime.isRetiredGeneration()) {
+      this.expireRetiredSocket(socket);
+      return;
+    }
     if (this.authorityVNext.hasStoredState()) {
       const receipt = await this.authorityVNext.handleSocketClose(socket);
       if (receipt) this.broadcastVNextDurableAck(receipt);
@@ -4026,6 +4073,10 @@ export class RoomDurableObjectV3 {
   }
 
   private async handleAlarm(alarmInfo?: { retryCount: number; isRetry: boolean }) {
+    if (this.runtime.isRetiredGeneration()) {
+      await this.retireOldGeneration();
+      return;
+    }
     if (this.authorityVNext.hasStoredState()) {
       try {
         await this.restoreVNextAuthority({ reconcileAlarm: false });

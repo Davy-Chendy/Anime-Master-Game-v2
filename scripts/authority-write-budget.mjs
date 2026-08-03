@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 const players = Number.parseInt(process.argv[2] ?? "50", 10);
 const questions = Number.parseInt(process.argv[3] ?? "30", 10);
 const checkpointEvery = 20;
-const roomRuntimeV3 = {
+const roomRuntimeV4 = {
   sqliteTables: 5,
   applicationRowsOnFirstUse: 2,
   legacyTables: 0,
@@ -76,14 +76,15 @@ const teamTurnResultBudget = {
 };
 
 // D1 billing is based on rows read/written, not SQL statement count. The new
-// result archive is one aggregate row. Roster reconciliation writes nothing
-// when the expected D1 roster is already current; genuinely changed members
-// still pay for their table row and affected index rows.
+// result archive is one aggregate row. Runtime generation 4 stores the roster
+// in the existing room row, so final room lifecycle + roster projection is one
+// UPDATE and never reconciles normalized player/index rows.
 const d1ArchiveRows = 1;
 const d1LegacyQuestionLabelRows = questions;
 const d1ManifestQuestionLabelRows = { clean: 0, dirtyAtMost: 1 };
 const d1RoomSessionAndCompletionRows = 3;
-const d1UnchangedRosterRows = 0;
+const d1NormalizedPlayerRows = 0;
+const d1AggregateRoomDataRows = 1;
 const d1NonRosterIndexOverheadConservative = { lower: 1, upper: 35 };
 const d1EstimatedRows = {
   lower: d1ArchiveRows + d1ManifestQuestionLabelRows.clean + d1RoomSessionAndCompletionRows + d1NonRosterIndexOverheadConservative.lower,
@@ -99,11 +100,20 @@ const questionSetCreationRowsSaved = normalizedQuestionSetCreationRows - manifes
 const labelProjectionRowsSavedAtMost = d1LegacyQuestionLabelRows - d1ManifestQuestionLabelRows.dirtyAtMost;
 const manifestSavingsAt60Games = (questionSetCreationRowsSaved + labelProjectionRowsSavedAtMost) * 60;
 const avoidedNormalizedResultRows = players + players + answers;
+const productionPlayerRoomBaseline = {
+  date: "2026-07-30",
+  playerWrites: 969,
+  roomWrites: 325,
+  playerAndRoomWrites: 1294,
+  finalRosterDifferenceReads: 4512,
+};
+const aggregatePlayerWriteTarget = { lower: 150, upper: 220 };
+const postManifestDailyWriteTarget = { lower: 1330, upper: 1600 };
 
 assert.equal(answers, players * questions);
 assert.equal(judgements, players * questions);
 if (players === 50 && questions === 30) {
-  assert.deepEqual(roomRuntimeV3, {
+  assert.deepEqual(roomRuntimeV4, {
     sqliteTables: 5,
     applicationRowsOnFirstUse: 2,
     legacyTables: 0,
@@ -113,6 +123,7 @@ if (players === 50 && questions === 30) {
   assert.ok(vnextRows >= 150 && vnextRows <= 300, `vNext write target missed: ${vnextRows}`);
   assert.ok(d1EstimatedRows.upper <= 500, `D1 final projection target missed: ${d1EstimatedRows.upper}`);
   assert.ok(manifestSavingsAt60Games >= 8_900, `manifest daily write saving target missed: ${manifestSavingsAt60Games}`);
+  assert.ok(aggregatePlayerWriteTarget.upper < productionPlayerRoomBaseline.playerWrites / 4);
   assert.deepEqual(teamBlockSelectionBudget, {
     perGameMutations: 30,
     perGameCheckpointRows: 30,
@@ -172,8 +183,8 @@ console.log(JSON.stringify({
       d1RowsDuringGame: 0,
     },
   },
-  roomRuntimeV3: {
-    ...roomRuntimeV3,
+  roomRuntimeV4: {
+    ...roomRuntimeV4,
     note: "First-use logical rows are schema-version + runtime-meta; SQLite catalog rows must be measured in production billing rather than guessed.",
   },
   d1FinalProjection: {
@@ -181,12 +192,19 @@ console.log(JSON.stringify({
     legacyQuestionLabelRowsAtMost: d1LegacyQuestionLabelRows,
     manifestQuestionLabelRows: d1ManifestQuestionLabelRows,
     roomSessionAndCompletionRows: d1RoomSessionAndCompletionRows,
-    unchangedRosterRows: d1UnchangedRosterRows,
-    changedMemberRowsIncludingIndexesEach: { insertOrDelete: "about 4-5", replace: "about 8-10" },
+    aggregateRoomDataRows: d1AggregateRoomDataRows,
+    normalizedPlayerRows: d1NormalizedPlayerRows,
+    finalRosterDifferenceReads: 0,
     nonRosterIndexOverheadConservative: d1NonRosterIndexOverheadConservative,
     typicalEstimatedRowsWrittenWithUnchangedRoster: d1EstimatedRows,
     normalizedParticipantScoreAndQuestionResultRowsAvoidedAtMost: avoidedNormalizedResultRows,
-    note: "Only real roster changes are billed; SQL statement count is not treated as rows_written. Manifest labels are one CAS row at most, not one row per question.",
+    note: "Room lifecycle and the full bounded roster share one room UPDATE. SQL statement count is not treated as rows_written; Analytics remains authoritative.",
+  },
+  roomStateV4: {
+    productionBaseline: productionPlayerRoomBaseline,
+    playerDerivedWriteTarget: aggregatePlayerWriteTarget,
+    postManifestDailyWriteTarget,
+    avoidedFinalRosterDifferenceReads: productionPlayerRoomBaseline.finalRosterDifferenceReads,
   },
   questionSetManifest: {
     productionBaseline: "2026-07-30",

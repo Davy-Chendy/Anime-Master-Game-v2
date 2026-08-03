@@ -530,6 +530,18 @@ async function main() {
       roster_updates: 0,
       roster_deletes: 0,
     }, "vNext final projection wrote unchanged roster or normalized result rows");
+    const [aggregateRoomRows] = await queryLocalD1(persistTo, `SELECT
+      COUNT(*) AS room_rows,
+      SUM(CASE WHEN runtime_generation=4 AND room_state_version=1 AND json_valid(room_state_json) AND game_status='GAME_RESULT' THEN 1 ELSE 0 END) AS valid_aggregate_rows,
+      MIN(room_state_revision) AS min_revision,
+      MIN(json_array_length(json_extract(room_state_json,'$.players'))) AS min_roster_size,
+      MAX(json_array_length(json_extract(room_state_json,'$.players'))) AS max_roster_size
+      FROM rooms WHERE runtime_generation=4`);
+    assert.equal(aggregateRoomRows.room_rows, ROOM_COUNT);
+    assert.equal(aggregateRoomRows.valid_aggregate_rows, ROOM_COUNT);
+    assert.ok(aggregateRoomRows.min_revision >= 1, "final projection did not update aggregate room state");
+    assert.equal(aggregateRoomRows.min_roster_size, 1 + REGULAR_PLAYERS + SPECTATORS_PER_ROOM);
+    assert.equal(aggregateRoomRows.max_roster_size, 1 + EXTREME_PLAYERS + SPECTATORS_PER_ROOM);
     const archiveRows = await queryLocalD1(persistTo, "SELECT game_session_id,result_json FROM game_result_archives ORDER BY game_session_id");
     assert.equal(archiveRows.length, ROOM_COUNT);
     for (const row of archiveRows) {
@@ -583,6 +595,7 @@ async function main() {
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
       hotD1RowsDuringGame: metrics.hotD1RowsDuringGame,
       finalD1Rows: metrics.finalD1Rows,
+      aggregateRoomRows,
       maxArchiveBytes: metrics.maxArchiveBytes,
       internalErrorLogMatches: (worker.logs.match(/服务发生内部错误|internal error/gi) ?? []).length,
     };

@@ -5,7 +5,10 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { GameDatabase, GamePreparedStatement } from "../worker/d1QueryCompat";
+import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
+import type { DbPlayer } from "../src/types/game";
 import { getArchivedGameResultSnapshot, getGameResultSnapshot, runWithGameDatabase } from "../worker/gameService";
+import { encodeRoomState } from "../worker/roomStateManifest";
 
 const root = resolve(import.meta.dirname, "..");
 const migrationsDirectory = join(root, "d1", "migrations");
@@ -54,7 +57,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0012") {
+function applyMigrations(db: DatabaseSync, through = "0018") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -67,6 +70,10 @@ function seedCompletedGame(db: DatabaseSync, gameId = "game-1") {
   db.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)").run("host", "room-1", "Host", 1, "PLAYER");
   db.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)").run("p1", "room-1", "Player 1", 0, "PLAYER");
   db.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)").run("spectator", "room-1", "Viewer", 0, "SPECTATOR");
+  const players = db.prepare("SELECT * FROM players WHERE room_id='room-1' ORDER BY joined_at,id").all() as DbPlayer[];
+  db.prepare(`UPDATE rooms SET runtime_generation=?,room_state_version=1,room_state_json=? WHERE id='room-1'`)
+    .run(CURRENT_ROOM_RUNTIME_GENERATION, encodeRoomState("room-1", "host", players));
+  db.prepare("DELETE FROM players WHERE room_id='room-1'").run();
   db.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)").run("set-1", "Set", "host", 2);
   db.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index,label_text) VALUES(?,?,?,?,?)").run("q1", "set-1", "https://example.com/1.webp", 0, "answer one");
   db.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index,label_text) VALUES(?,?,?,?,?)").run("q2", "set-1", "https://example.com/2.webp", 1, "answer two");
@@ -114,7 +121,7 @@ test("new aggregate archive restores leaderboard and sparse per-question scores"
 
 test("legacy normalized result remains readable when no aggregate archive exists", async () => {
   const db = new DatabaseAdapter();
-  applyMigrations(db.sqlite, "0011");
+  applyMigrations(db.sqlite);
   seedCompletedGame(db.sqlite);
   db.sqlite.prepare("INSERT INTO game_participants(game_session_id,player_id,nickname,role,joined_at) VALUES(?,?,?,?,?)")
     .run("game-1", "p1", "Player 1", "PLAYER", "2026-07-28T00:00:00.000Z");

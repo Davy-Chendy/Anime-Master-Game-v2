@@ -4,7 +4,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
-import { RoomDurableObject } from "../worker/index";
+import { RoomDurableObject, RoomDurableObjectV3, type Env } from "../worker/index";
 import { RoomRuntimeV3Storage } from "../worker/roomRuntimeV3";
 
 class Cursor<T extends Record<string, unknown>> {
@@ -50,7 +50,7 @@ class StorageAdapter {
   async deleteAlarm() { this.deletedAlarmCount += 1; }
 }
 
-test("D1 migration leaves old rooms unmarked and supports explicit generation 3 rooms", () => {
+test("D1 migration leaves old rooms unmarked and supports explicit current-generation rooms", () => {
   const db = new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("../d1/migrations/0001_initial.sql", import.meta.url), "utf8"));
   db.prepare("INSERT INTO rooms(id,room_code,host_player_id) VALUES(?,?,?)").run("old", "OLD001", "host-old");
@@ -64,7 +64,7 @@ test("D1 migration leaves old rooms unmarked and supports explicit generation 3 
   );
 });
 
-test("V3 schema is minimal, idempotent, and never creates legacy projection tables", () => {
+test("room authority schema is minimal, idempotent, and never creates legacy projection tables", () => {
   const storage = new StorageAdapter();
   const runtime = new RoomRuntimeV3Storage(storage as unknown as DurableObjectStorage);
   runtime.initializeSchema();
@@ -83,7 +83,7 @@ test("V3 schema is minimal, idempotent, and never creates legacy projection tabl
   for (const legacy of ["rooms", "players", "answers", "mutation_journal", "projection_outbox"]) {
     assert.equal(tables.includes(legacy), false, `legacy table should not exist: ${legacy}`);
   }
-  assert.equal(storage.db.prepare("SELECT runtime_generation FROM room_runtime_meta").get().runtime_generation, 3);
+  assert.equal(storage.db.prepare("SELECT runtime_generation FROM room_runtime_meta").get().runtime_generation, CURRENT_ROOM_RUNTIME_GENERATION);
   assert.equal(runtime.bumpVersion("room-1").stateVersion, 1);
   assert.throws(() => runtime.ensureRoom("room-2"), /identity mismatch/);
 });
@@ -108,4 +108,36 @@ test("retired Room DO cancels its Alarm without creating SQLite tables", async (
   await new RoomDurableObject(state).alarm();
   assert.equal(storage.deletedAlarmCount, 1);
   assert.equal(storage.db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='table'").get().count, 0);
+});
+
+test("generation 3 V3 object rejects HTTP and expires stale sockets before business restore", async () => {
+  const storage = new StorageAdapter();
+  const runtime = new RoomRuntimeV3Storage(storage as unknown as DurableObjectStorage);
+  runtime.initializeSchema();
+  runtime.ensureRoom("room-old");
+  storage.db.prepare("UPDATE room_runtime_meta SET runtime_generation=3 WHERE id=1").run();
+  const sent: string[] = [];
+  let closeCode = 0;
+  const socket = {
+    send(value: string) { sent.push(value); },
+    close(code: number) { closeCode = code; },
+  } as unknown as WebSocket;
+  const state = {
+    storage,
+    id: { toString: () => "room-old" },
+    blockConcurrencyWhile(callback: () => Promise<void>) { void callback(); },
+    getWebSockets: () => [socket],
+  } as unknown as DurableObjectState;
+  const env = { DB: { prepare() { throw new Error("retired object must not read D1 business state"); } } } as unknown as Env;
+  const object = new RoomDurableObjectV3(state, env);
+
+  const response = await object.fetch(new Request("https://room-object/api/rpc", { method: "POST" }));
+  assert.equal(response.status, 410);
+  assert.equal((await response.json() as { code: string }).code, "ROOM_VERSION_EXPIRED");
+  assert.equal(storage.deletedAlarmCount, 1);
+  assert.equal(closeCode, 4001);
+  assert.match(sent[0] ?? "", /room_expired/);
+
+  await object.webSocketMessage(socket, "{}");
+  assert.equal(closeCode, 4001);
 });

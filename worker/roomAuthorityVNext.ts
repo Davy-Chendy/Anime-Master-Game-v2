@@ -29,6 +29,8 @@ import {
   encodeDbQuestionSetManifest,
   QUESTION_SET_MANIFEST_VERSION,
 } from "./questionSetManifest";
+import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
+import { encodeRoomState, ROOM_STATE_MANIFEST_VERSION } from "./roomStateManifest";
 
 const VNEXT_AUTHORITY_VERSION = 2 as const;
 const VNEXT_STATE_SCHEMA_VERSION = 1 as const;
@@ -1884,41 +1886,43 @@ export class RoomAuthorityVNext {
         if (game.dissolved) {
           statements.push(this.d1.prepare("DELETE FROM rooms WHERE id=?").bind(game.roomId));
         } else {
-          if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_game_id=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,updated_at=? WHERE id=?").bind(
-            game.room.hostPlayerId,
-            game.room.status,
-            game.room.currentGameId ?? null,
-            game.room.teamAssignmentMode ?? "AUTO",
-            JSON.stringify(game.room.teamAssignments ?? {}),
-            nowIso(),
-            game.room.id,
-          ));
-          const players = game.players.map((player) => ({ ...player, joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt, lastSeenAt: player.lastSeenAt ?? nowIso() }));
-          const playersJson = JSON.stringify(players);
           if (game.projectionVersion === 3) {
-            statements.push(this.d1.prepare(`WITH desired AS (
-              SELECT json_extract(value,'$.id') AS id,json_extract(value,'$.roomId') AS room_id,
-                json_extract(value,'$.nickname') AS nickname,json_extract(value,'$.isHost') AS is_host,
-                json_extract(value,'$.lastSeenAt') AS last_seen_at,json_extract(value,'$.role') AS role
-              FROM json_each(?)
-            )
-            DELETE FROM players WHERE room_id=? AND (
-              NOT EXISTS (SELECT 1 FROM desired WHERE desired.id=players.id)
-              OR EXISTS (SELECT 1 FROM desired WHERE desired.id=players.id AND (
-                players.room_id IS NOT desired.room_id OR players.nickname IS NOT desired.nickname
-                OR players.is_host IS NOT desired.is_host OR players.last_seen_at IS NOT desired.last_seen_at
-                OR players.role IS NOT desired.role
-              ))
-            )`).bind(playersJson, game.roomId));
+            if (!game.room?.id) throw new Error("room state projection is missing room data");
+            statements.push(this.d1.prepare(`UPDATE rooms SET
+              host_player_id=?,game_status=?,current_game_id=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,
+              room_state_version=?,room_state_revision=room_state_revision+1,room_state_json=?,updated_at=?
+              WHERE id=? AND runtime_generation=?`).bind(
+              game.room.hostPlayerId,
+              game.room.status,
+              game.room.currentGameId ?? null,
+              game.room.teamAssignmentMode ?? "AUTO",
+              JSON.stringify(game.room.teamAssignments ?? {}),
+              ROOM_STATE_MANIFEST_VERSION,
+              encodeRoomState(game.roomId, game.room.hostPlayerId, game.players),
+              nowIso(),
+              game.room.id,
+              CURRENT_ROOM_RUNTIME_GENERATION,
+            ));
           } else {
+            const legacyPlayers = game.players.map((player) => ({
+              ...player,
+              joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt,
+              lastSeenAt: player.lastSeenAt ?? nowIso(),
+            }));
+            if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_game_id=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,updated_at=? WHERE id=?").bind(
+              game.room.hostPlayerId,
+              game.room.status,
+              game.room.currentGameId ?? null,
+              game.room.teamAssignmentMode ?? "AUTO",
+              JSON.stringify(game.room.teamAssignments ?? {}),
+              nowIso(),
+              game.room.id,
+            ));
             statements.push(this.d1.prepare("DELETE FROM players WHERE room_id=?").bind(game.roomId));
-          }
-          if (game.players.length) {
-            statements.push(this.d1.prepare(`INSERT INTO players(id,room_id,nickname,is_host,joined_at,last_seen_at,role)
+            if (game.players.length) statements.push(this.d1.prepare(`INSERT INTO players(id,room_id,nickname,is_host,joined_at,last_seen_at,role)
               SELECT json_extract(value,'$.id'),json_extract(value,'$.roomId'),json_extract(value,'$.nickname'),json_extract(value,'$.isHost'),json_extract(value,'$.joinedAt'),json_extract(value,'$.lastSeenAt'),json_extract(value,'$.role') FROM json_each(?) WHERE true
               ON CONFLICT(id) DO UPDATE SET room_id=excluded.room_id,nickname=excluded.nickname,is_host=excluded.is_host,last_seen_at=excluded.last_seen_at,role=excluded.role
-              ${game.projectionVersion === 3 ? `WHERE players.room_id IS NOT excluded.room_id OR players.nickname IS NOT excluded.nickname
-                OR players.is_host IS NOT excluded.is_host OR players.last_seen_at IS NOT excluded.last_seen_at OR players.role IS NOT excluded.role` : ""}`).bind(playersJson));
+              `).bind(JSON.stringify(legacyPlayers)));
           }
           if (game.gameSession) {
             statements.push(this.d1.prepare("UPDATE game_sessions SET status=?,current_question_index=?,current_reveal_round=?,revealed_blocks=?,team_battle_state=?,round_started_at=?,ended_at=?,completed_normally_at=? WHERE id=?").bind(game.gameSession.status, game.gameSession.currentQuestionIndex, game.gameSession.currentRevealRound, JSON.stringify(game.gameSession.revealedBlocks), game.gameSession.teamBattleState == null ? null : JSON.stringify(game.gameSession.teamBattleState), game.gameSession.roundStartedAt ?? null, game.gameSession.endedAt ?? null, game.gameSession.completedNormallyAt ?? null, game.gameSession.id));

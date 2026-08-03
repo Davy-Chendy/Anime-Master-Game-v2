@@ -27,24 +27,28 @@ R2、Images、Pages 是月额度，不应强行换算成“每日重置”。Pag
 
 ## 当前极端单局基线
 
-基线场景为 50 名玩家、30 题、约 3,090 个 mutation。数字来自 `test:authority-vnext`、`test:authority-budget` 和本地 workerd 压力测试，不是 Cloudflare SLA。
+基线场景为同房间共 50 人（1 名房主/出题人 + 49 名答题玩家）、30 题、约 3,030 个 mutation。数字来自 `test:authority-vnext`、`test:authority-budget` 和本地 workerd 压力测试，不是 Cloudflare SLA。
 
 | 指标 | 当前结果或目标 |
 | --- | ---: |
 | 游戏进行中 D1 写入 | 0 |
-| DO SQLite changed rows | 实测约 272；目标 150～300 |
-| D1 最终投影 | roster 未变化时约 35～69 行；硬上限 500 行 |
-| rolling checkpoint | 约 241 次，普通答案和判定不单独写 SQL |
+| DO SQLite changed rows | 实测约 242；目标 150～300 |
+| D1 最终投影 | 4 条聚合语句；计费行预估约 5～40，硬上限 500 行 |
+| checkpoint | 实测约 211 次，其中 rolling action-count 约 120 次 |
 | 最大 active game | 约 324KB |
 | 最大单 Attachment | 实测约 336B，硬预算 12,288B |
 | 50 人 Attachment 总恢复体积 | 实测约 7KB，工程目标不超过约 100KB |
-| 入站 mutation 的 DO 请求折算 | 约 `3090 / 20 = 155` 个请求，另加连接、RPC 和 Alarm |
+| 入站 mutation 的 DO 请求折算 | 约 `3030 / 20 = 152` 个请求，另加连接、RPC 和 Alarm |
 
 WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接请求。出站广播虽然不计 DO 请求，但仍消耗 CPU、duration 和网络处理，不能无限扩大 payload 或广播次数。
 
-## Room runtime generation 3 硬切
+## Room runtime generation 4 与单行房间状态硬切
 
-维护硬切后，`rooms.runtime_generation` 只有新建房间显式写入 `3`；历史房间保持 `NULL` 并在 Worker 入口返回 `ROOM_VERSION_EXPIRED`。普通旧房间访问只产生 Worker 请求和一次 D1 定位读取，不再进入旧 DO namespace，因此不会触发 legacy schema、水合、normalized projection 或业务 Alarm。旧 namespace 只保留退役壳，已有 Alarm 最多执行一次取消操作且不得抛错重试。
+维护硬切后，`rooms.runtime_generation` 只有新建房间显式写入 `4`；历史 generation 3/NULL 房间在 Worker 入口返回 `ROOM_VERSION_EXPIRED`。旧 DO 若已有连接或 Alarm，会在任何恢复/业务处理前删除 Alarm、发送既有 `room_expired` 协议并关闭 socket；不会继续投影旧状态或形成 Alarm 重试环。
+
+Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、最多 50 人且最多 64KiB 的 JSON 存入现有 `rooms` 行；房主、生命周期和大厅设置继续使用同一行的标量列。创建房间只插入一行 `rooms`；加入、退出、踢人、身份和手动分队以 revision CAS 更新同一行；完全相同的重连、设置或选队直接返回，不产生 D1 UPDATE。游戏结束时，房间生命周期和完整 roster 也合并为一次 `rooms` UPDATE，不再执行 normalized player DELETE/UPSERT 或差异读取。
+
+依据 2026-07-30 的完整生产窗口，player UPSERT 548 行、最终 roster UPSERT 391 行、player 删除/差异 30 行，合计 969 rowsWritten；房间设置/最终投影另有 325 行，二者共 1,294 行，占当日 3,795 行的 34.1%。最终 roster 差异读取另消耗 4,512 rowsRead。Generation 4 的部署后验收目标为：player 派生写入降至 150～220 行，4,512 行最终差异读取接近归零；和题集 manifest 同时代回同等业务量后，D1 日写入目标约 1,330～1,600 行。该范围来自已有生产归因与本地路径计数，索引 rowsWritten 仍必须以上线后的 Analytics 完整窗口复核。
 
 新 `ROOM_OBJECTS_V3` namespace 的首次初始化只创建 `room_runtime_schema`、`room_runtime_meta` 和三张 `authority_vnext_*` 表。应用数据只新增 schema version 与 runtime meta 两行；SQLite catalog 的实际计费行数依赖平台实现，必须在生产部署后用 Analytics 复核，不能把本地 SQL 语句数当成 rows written。结构预算和回归测试要求为：五张表、零张 legacy 表、重复初始化零新增应用行。
 
@@ -56,10 +60,10 @@ WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接
 
 | 指标 | 60 局估算 | Free 日额度占比 |
 | --- | ---: | ---: |
-| DO SQLite changed rows | 16,320 | 16.32% |
-| D1 最终投影，典型 | 2,100～4,140 | 2.10%～4.14% |
+| DO SQLite changed rows | 14,520 | 14.52% |
+| D1 最终投影，典型 | 300～2,400 | 0.30%～2.40% |
 | D1 最终投影，全部触及硬上限 | 30,000 | 30% |
-| mutation 的 DO 请求折算 | 约 9,270 | 9.27%，未含连接、RPC、Alarm 和重连 |
+| mutation 的 DO 请求折算 | 约 9,090 | 9.09%，未含连接、RPC、Alarm 和重连 |
 
 该表不是承诺容量。生产还会有创建/加入房间、恢复、题库查询、后台清理、异常重试和其他项目共享用量，因此不能把 100% 额度当作可用预算。正常设计应保留至少 50% 的账号级余量，异常路径还必须有熔断。
 
@@ -147,7 +151,7 @@ WebSocket 建连会同时经过 Worker 和 Room DO；重连会重复产生连接
 - `npm run test:authority-budget`：快速检查 50×30 的 DO/D1 写入预算。
 - `npm run test:authority-vnext`：检查热路径零 D1 写入、checkpoint 合并、Alarm 和 projection。
 - `npm run test:authority-local-runtime`：使用 workerd、真实 WebSocket 和本地 D1 检查并发、重连、恢复及最终写入。
-- `npm run test:room-runtime-cutover`：检查 D1 generation migration、V3 极简 schema、迁移失败不推进和旧 DO Alarm 退役。
+- `npm run test:room-runtime-cutover`：检查 D1 generation/room-state migration、极简 DO schema、迁移失败不推进和旧 DO Alarm 退役。
 - 具体选测规则见 [`testing.md`](testing.md)。
 
 ## 官方来源

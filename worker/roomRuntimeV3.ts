@@ -103,6 +103,15 @@ export class RoomRuntimeV3Storage {
     this.roomId = roomId;
   }
 
+  isRetiredGeneration() {
+    const current = this.storage.sql
+      .exec<{ runtime_generation: number }>(
+        "SELECT runtime_generation FROM room_runtime_meta WHERE id=1",
+      )
+      .toArray()[0];
+    return current != null && current.runtime_generation !== CURRENT_ROOM_RUNTIME_GENERATION;
+  }
+
   bumpVersion(roomId: string): AuthorityVersion {
     this.ensureRoom(roomId);
     this.storage.sql.exec(

@@ -5,7 +5,10 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { GameDatabase, GamePreparedStatement } from "../worker/d1QueryCompat";
+import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
+import type { DbPlayer } from "../src/types/game";
 import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/questionSetManifest";
+import { decodeRoomState, encodeRoomState } from "../worker/roomStateManifest";
 import {
   completeTeamBattleBlockSelection,
   createRoom,
@@ -70,11 +73,24 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0017") {
+function applyMigrations(db: DatabaseSync, through = "0018") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
   }
+}
+
+function upgradeRoomFixtureToAggregate(db: DatabaseSync, roomId: string) {
+  const room = db.prepare("SELECT id,host_player_id FROM rooms WHERE id=?").get(roomId) as {
+    id: string;
+    host_player_id: string;
+  };
+  const players = db.prepare("SELECT * FROM players WHERE room_id=? ORDER BY joined_at,id").all(roomId) as DbPlayer[];
+  const stateJson = encodeRoomState(room.id, room.host_player_id, players);
+  db.prepare(`UPDATE rooms
+    SET runtime_generation=?,room_state_version=1,room_state_revision=0,room_state_json=?
+    WHERE id=?`).run(CURRENT_ROOM_RUNTIME_GENERATION, stateJson, roomId);
+  db.prepare("DELETE FROM players WHERE room_id=?").run(roomId);
 }
 
 test("question-set manifest codec rejects corruption instead of silently falling back", () => {
@@ -149,6 +165,62 @@ test("D1 0017 adds manifest storage and targeted partial indexes without rewriti
   assert.match(cleanupPlan, /question_sets_private_cleanup_idx/);
   assert.match(cleanupPlan, /game_sessions_question_set_id_idx/);
   assert.match(cleanupPlan, /rooms_prepared_question_set_id_idx/);
+});
+
+test("D1 0018 adds aggregate room state transactionally without rewriting old rooms", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0017");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,runtime_generation) VALUES(?,?,?,?)")
+    .run("legacy-room-state", "STATE1", "host", 3);
+
+  const migration = readFileSync(join(migrationsDirectory, "0018_room_state_manifest.sql"), "utf8");
+  const firstStatement = migration.split(";").map((statement) => statement.trim()).filter(Boolean)[0];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`${firstStatement};`);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='room_state_version'").get().count, 0);
+
+  db.exec(migration);
+  const legacy = db.prepare(`SELECT runtime_generation,room_state_version,room_state_revision,room_state_json
+    FROM rooms WHERE id='legacy-room-state'`).get();
+  assert.equal(legacy.runtime_generation, 3);
+  assert.equal(legacy.room_state_version, null);
+  assert.equal(legacy.room_state_revision, 0);
+  assert.equal(legacy.room_state_json, null);
+  assert.throws(() => db.prepare("UPDATE rooms SET room_state_version=2 WHERE id='legacy-room-state'").run(), /CHECK constraint failed/);
+  assert.throws(() => db.prepare("UPDATE rooms SET room_state_revision=-1 WHERE id='legacy-room-state'").run(), /CHECK constraint failed/);
+});
+
+test("room-state manifest is room-scoped and rejects corruption", () => {
+  const joined = "2026-08-01T00:00:00.000Z";
+  const json = encodeRoomState("room-a", "shared", [{
+    id: "shared", room_id: "room-a", nickname: "Host A", is_host: true,
+    role: "PLAYER", joined_at: joined, last_seen_at: joined,
+  }]);
+  assert.deepEqual(decodeRoomState({
+    id: "room-a", host_player_id: "shared", room_state_version: 1, room_state_json: json,
+  }).map((player) => player.id), ["shared"]);
+  assert.doesNotThrow(() => encodeRoomState("room-b", "shared", [{
+    id: "shared", room_id: "room-b", nickname: "Host B", is_host: true,
+    role: "PLAYER", joined_at: joined, last_seen_at: joined,
+  }]));
+  assert.throws(() => decodeRoomState({
+    id: "room-a", host_player_id: "shared", room_state_version: 1, room_state_json: "{",
+  }), /JSON 已损坏/);
+  assert.throws(() => encodeRoomState("room-a", "missing", [{
+    id: "shared", room_id: "room-a", nickname: "Host", is_host: true,
+    role: "PLAYER", joined_at: joined, last_seen_at: joined,
+  }]), /房主不在玩家列表/);
+  const fiftyOne = Array.from({ length: 51 }, (_, index) => ({
+    id: `p${index}`, room_id: "room-a", nickname: `P${index}`, is_host: index === 0,
+    role: "PLAYER" as const, joined_at: joined, last_seen_at: joined,
+  }));
+  assert.throws(() => encodeRoomState("room-a", "p0", fiftyOne), /玩家数量无效/);
+  assert.throws(() => encodeRoomState("room-a", "p0", [fiftyOne[0], { ...fiftyOne[1], nickname: " p0 " }]), /重复玩家昵称/);
 });
 
 test("D1 0013 upgrades rooms to TEAM_BATTLE vote durations transactionally", () => {
@@ -232,7 +304,27 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
     assert.equal(stored.lobby_team_guess_vote_seconds, 50);
     assert.equal(stored.lobby_team_assignment_mode, "MANUAL");
-    assert.equal(stored.runtime_generation, 3);
+    assert.equal(stored.runtime_generation, CURRENT_ROOM_RUNTIME_GENERATION);
+    const aggregate = db.sqlite.prepare("SELECT * FROM rooms WHERE id=?").get(room.id);
+    assert.equal(aggregate.room_state_version, 1);
+    assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM players WHERE room_id=?").get(room.id).count, 0);
+
+    const changesBeforeNoOps = Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes);
+    const rejoined = await joinRoom(room.code, "host-defaults", "Host");
+    assert.equal(rejoined.error, null);
+    await updateRoomGameSettings({
+      roomId: room.id,
+      hostPlayerId: "host-defaults",
+      gameMode: "ROUND_REVEAL",
+      maxRevealRounds: 3,
+      roundSeconds: 45,
+      roundScores: [5, 3, 1],
+      teamRevealVoteSeconds: 25,
+      teamGuessVoteSeconds: 50,
+      teamAssignmentMode: "MANUAL",
+    });
+    assert.equal(Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes), changesBeforeNoOps);
+    assert.equal(db.sqlite.prepare("SELECT room_state_revision FROM rooms WHERE id=?").get(room.id).room_state_revision, 0);
   });
 });
 
@@ -244,6 +336,7 @@ test("manual team joins enter the lobby unassigned before play and require an at
   ) VALUES(?,?,?,?,?,?)`).run("room-join-stage", "JOIN01", "host", "LOBBY", "TEAM_BATTLE", "MANUAL");
   db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
     .run("host", "room-join-stage", "Host", 1, "PLAYER");
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-join-stage");
 
   await runWithGameDatabase(db, async () => {
     let joined = await joinRoom("JOIN01", "p1", "P1");
@@ -264,6 +357,8 @@ test("manual team joins enter the lobby unassigned before play and require an at
     assert.equal(joined.room, null);
     assert.equal(joined.errorCode, "TEAM_SELECTION_REQUIRED");
     assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM players WHERE id='p3'").get().count, 0);
+    const stored = db.sqlite.prepare("SELECT * FROM rooms WHERE id='room-join-stage'").get() as never;
+    assert.equal(decodeRoomState(stored).some((player) => player.id === "p3"), false);
   });
 });
 
@@ -274,6 +369,7 @@ test("new question sets default by creation path, publishing can confirm the met
     .run("room-1", "ROOM01", "host", "QUESTION_SETUP", "host");
   db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
     .run("host", "room-1", "Host", 1, "PLAYER");
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-1");
 
   await runWithGameDatabase(db, async () => {
     const manual = await createUploadedQuestionSet({
@@ -330,6 +426,7 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
     db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
       .run(id, "room-team", nickname, isHost, "PLAYER");
   }
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-team");
   db.sqlite.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
     .run("set-team", "Team Set", "host", 1);
   db.sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
@@ -383,6 +480,7 @@ test("manual team setup blocks incomplete rosters, allows uneven teams, and swit
     db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
       .run(id, "room-manual-team", nickname, isHost, id === "watch" ? "SPECTATOR" : "PLAYER");
   }
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-manual-team");
   db.sqlite.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
     .run("set-manual-team", "Manual Team Set", "host", 1);
   db.sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
@@ -461,6 +559,7 @@ test("manual team setup removes presenter and spectator assignments and remains 
     db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
       .run(id, "room-manual-lifecycle", nickname, isHost, "PLAYER");
   }
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-manual-lifecycle");
 
   await runWithGameDatabase(db, async () => {
     await updateRoomGameSettings({

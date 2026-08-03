@@ -6,7 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 import { RoomGameAuthority } from "../worker/roomGameAuthority";
 import { ATTACHMENT_BUDGET_BYTES, RoomAuthorityVNext, type VNextMutationEnvelope, type VNextSocketAttachment } from "../worker/roomAuthorityVNext";
 import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/questionSetManifest";
+import { decodeRoomState, encodeRoomState } from "../worker/roomStateManifest";
 import { removePlayerFromTeamBattleState } from "../worker/gameService";
+import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
 import { getBuzzerAnswerStabilityDelayMs, getRemainingSeconds, isBuzzerAnswerReadyForJudging, isGameSessionPositionStale, shouldAcceptServerClock } from "../src/components/ImageRevealGame";
 import type { DbQuestionSet, GameSession, Player, Question, QuestionSet, Room } from "../src/types/game";
 
@@ -103,7 +105,7 @@ class SqliteProjectionD1 {
   constructor() {
     this.db.exec(`
       PRAGMA foreign_keys=ON;
-      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_game_id TEXT,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}');
+      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_game_id TEXT,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
       CREATE TABLE players(id TEXT PRIMARY KEY,room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,nickname TEXT NOT NULL,is_host INTEGER NOT NULL,joined_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,role TEXT NOT NULL);
       CREATE UNIQUE INDEX players_room_nickname_unique ON players(room_id,lower(nickname));
       CREATE INDEX players_room_id_idx ON players(room_id);
@@ -147,7 +149,13 @@ function createSqliteProjectionAuthority(playerCount: number, questionCount = 1)
   const fixedLastSeenAt = "2026-07-28T00:00:00.000Z";
   for (const player of aggregate.players) player.lastSeenAt = fixedLastSeenAt;
   aggregate.room!.players = aggregate.players;
-  d1.db.prepare("INSERT INTO rooms(id,room_code,host_player_id,game_status,current_game_id,updated_at) VALUES(?,?,?,?,?,?)").run("r1", "ROOM01", "host", "PLAYING", "g1", fixedLastSeenAt);
+  d1.db.prepare(`INSERT INTO rooms(
+    id,room_code,host_player_id,game_status,current_game_id,updated_at,runtime_generation,
+    room_state_version,room_state_revision,room_state_json
+  ) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(
+    "r1", "ROOM01", "host", "PLAYING", "g1", fixedLastSeenAt,
+    CURRENT_ROOM_RUNTIME_GENERATION, 1, 0, encodeRoomState("r1", "host", aggregate.players),
+  );
   for (const player of aggregate.players) {
     d1.db.prepare("INSERT INTO players VALUES(?,?,?,?,?,?,?)").run(
       player.id,
@@ -1442,7 +1450,7 @@ test("ended host leave projects host transfer and the final player dissolves the
   assert.equal(authority.getAggregate()?.room?.hostPlayerId, "p0");
   await authority.forceCheckpoint(hostLeft.forceCheckpoint!);
   await authority.flushFinalProjection();
-  const roomUpdate = statements.find((statement) => /UPDATE rooms SET host_player_id/.test(statement.sql));
+  const roomUpdate = statements.find((statement) => /UPDATE rooms SET[\s\S]*host_player_id/.test(statement.sql));
   assert.equal(roomUpdate?.bindings[0], "p0");
 
   statements.length = 0;
@@ -2465,7 +2473,7 @@ test("archive failure cannot commit an advanced active_game", async () => {
   assert.equal(restored.getAggregate()?.gameSession?.status, "PLAYING");
 });
 
-test("final projection uses a dissolved tombstone and versioned roster projection", async () => {
+test("final projection uses a dissolved tombstone and one aggregate room-state write", async () => {
   const statements: Array<{ sql: string; bindings: unknown[] }> = [];
   const d1 = {
     prepare(sql: string) { return { bind(...bindings: unknown[]) { const statement = { sql, bindings }; statements.push(statement); return statement; } }; },
@@ -2476,11 +2484,11 @@ test("final projection uses a dissolved tombstone and versioned roster projectio
   first.authority.handleMutation(host, envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now());
   await first.authority.forceCheckpoint("projection");
   await first.authority.flushFinalProjection();
-  assert.ok(statements.some((statement) => /DELETE FROM players WHERE room_id/.test(statement.sql)));
-  const playerInsert = statements.filter((statement) => /INSERT INTO players/.test(statement.sql));
-  assert.equal(playerInsert.length, 1);
-  assert.match(playerInsert[0].sql, /json_each/);
-  assert.equal(JSON.parse(String(playerInsert[0].bindings[0])).length, 2);
+  assert.equal(statements.some((statement) => /(?:DELETE FROM|INSERT INTO) players/.test(statement.sql)), false);
+  const roomUpdate = statements.find((statement) => /room_state_json/.test(statement.sql));
+  assert.ok(roomUpdate);
+  assert.equal(roomUpdate.bindings[5], 1);
+  assert.equal((JSON.parse(String(roomUpdate.bindings[6])) as { players: unknown[] }).players.length, 2);
 
   statements.length = 0;
   const second = createAuthority(1, d1);
@@ -2628,7 +2636,7 @@ test("legacy projection outbox without a projection version still writes normali
   assert.equal(statements.some((statement) => /INSERT INTO game_result_archives/.test(statement.sql)), false);
 });
 
-test("v3 roster reconciliation writes zero player rows when all 50 members are unchanged", async () => {
+test("v3 aggregate projection writes one room row and zero player rows for 50 unchanged members", async () => {
   const { state, authority, d1 } = createSqliteProjectionAuthority(49);
   const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now());
   await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
@@ -2640,6 +2648,9 @@ test("v3 roster reconciliation writes zero player rows when all 50 members are u
   assert.equal(await authority.flushFinalProjection(), true);
   assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit").get().count, 0);
   assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM players WHERE room_id='r1'").get().count, 50);
+  const room = d1.db.prepare("SELECT * FROM rooms WHERE id='r1'").get() as never;
+  assert.equal(decodeRoomState(room).length, 50);
+  assert.equal(Number((room as { room_state_revision: number }).room_state_revision), 1);
 
   state.storage.sql.db.prepare("INSERT INTO authority_vnext_projection_outbox(id,payload_json,attempts,updated_at) VALUES(1,?,0,?)").run(outbox.payload_json, Date.now());
   assert.equal(await authority.flushFinalProjection(), true);
@@ -2663,7 +2674,7 @@ test("v2 aggregate projection outbox keeps its legacy full roster replacement se
   );
 });
 
-test("v3 roster reconciliation writes only changed members and safely supports nickname swaps", async () => {
+test("v3 aggregate projection stores nickname swaps without touching normalized players", async () => {
   const { state, authority, d1 } = createSqliteProjectionAuthority(2);
   const p0 = socketFor(state, "p0");
   const p1 = socketFor(state, "p1");
@@ -2673,18 +2684,14 @@ test("v3 roster reconciliation writes only changed members and safely supports n
   await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
 
   assert.equal(await authority.flushFinalProjection(), true);
-  assert.deepEqual(
-    d1.db.prepare("SELECT id,nickname FROM players WHERE id IN ('p0','p1') ORDER BY id").all().map((row) => ({ ...row })),
-    [{ id: "p0", nickname: "P1" }, { id: "p1", nickname: "P0" }],
-  );
-  assert.deepEqual(
-    d1.db.prepare("SELECT kind,COUNT(*) count FROM player_write_audit GROUP BY kind ORDER BY kind").all().map((row) => ({ ...row })),
-    [{ kind: "delete", count: 2 }, { kind: "insert", count: 2 }],
-  );
-  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit WHERE player_id='host'").get().count, 0);
+  const projected = decodeRoomState(d1.db.prepare("SELECT * FROM rooms WHERE id='r1'").get() as never);
+  assert.deepEqual(projected.filter((player) => player.id !== "host").map(({ id, nickname }) => ({ id, nickname })), [
+    { id: "p0", nickname: "P1" }, { id: "p1", nickname: "P0" },
+  ]);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit").get().count, 0);
 });
 
-test("v3 roster reconciliation preserves leave, host transfer, and role changes", async () => {
+test("v3 aggregate projection preserves leave, host transfer, and role changes", async () => {
   const { state, authority, d1 } = createSqliteProjectionAuthority(2);
   authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "leaveRoom", { playerId: "host" }), Date.now());
   authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), Date.now() + 1);
@@ -2692,17 +2699,12 @@ test("v3 roster reconciliation preserves leave, host transfer, and role changes"
   await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
 
   assert.equal(await authority.flushFinalProjection(), true);
-  assert.deepEqual(
-    d1.db.prepare("SELECT id,is_host,role FROM players ORDER BY id").all().map((row) => ({ ...row })),
-    [
-      { id: "p0", is_host: 1, role: "PLAYER" },
-      { id: "p1", is_host: 0, role: "SPECTATOR" },
-    ],
-  );
-  assert.deepEqual(
-    d1.db.prepare("SELECT kind,COUNT(*) count FROM player_write_audit GROUP BY kind ORDER BY kind").all().map((row) => ({ ...row })),
-    [{ kind: "delete", count: 3 }, { kind: "insert", count: 2 }],
-  );
+  const projected = decodeRoomState(d1.db.prepare("SELECT * FROM rooms WHERE id='r1'").get() as never);
+  assert.deepEqual(projected.map(({ id, is_host, role }) => ({ id, is_host, role })), [
+    { id: "p0", is_host: true, role: "PLAYER" },
+    { id: "p1", is_host: false, role: "SPECTATOR" },
+  ]);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit").get().count, 0);
 });
 
 test("final participants retain scored players after leaving or becoming spectators", async () => {
@@ -2803,9 +2805,9 @@ test("50 players complete 30 questions within the vNext write budget", async () 
     prepare(sql: string) { return { bind(...bindings: unknown[]) { return { sql, bindings }; } }; },
     async batch(statements: Array<{ sql: string; bindings: unknown[] }>) { projectionBatches.push(statements); return []; },
   } as unknown as D1Database;
-  const { state, authority } = createAuthority(50, projectionD1, 30);
+  const { state, authority } = createAuthority(49, projectionD1, 30);
   const host = socketFor(state, "host");
-  const players = Array.from({ length: 50 }, (_, index) => ({ id: `p${index}`, socket: socketFor(state, `p${index}`) }));
+  const players = Array.from({ length: 49 }, (_, index) => ({ id: `p${index}`, socket: socketFor(state, `p${index}`) }));
   let hostSeq = 0;
   let actionCount = 0;
   let broadcastCount = 0;
@@ -2894,18 +2896,18 @@ test("50 players complete 30 questions within the vNext write budget", async () 
     judgementVisibleHandlerP95Ms: judgementP95,
   };
   console.info(JSON.stringify({ event: "authority_vnext_load_result", ...report }));
-  assert.equal(actionCount, 3090);
+  assert.equal(actionCount, 3030);
   assert.ok(diagnostics.checkpointChangedRows >= 150 && diagnostics.checkpointChangedRows <= 300, JSON.stringify(report));
   assert.equal(d1WritesDuringGame, 0);
-  assert.equal(finalSnapshotResultCount, 1500);
+  assert.equal(finalSnapshotResultCount, 1470);
   assert.ok(finalProjectionStatements.length <= 50, JSON.stringify(report));
   const archiveInsert = finalProjectionStatements.find((statement) => /INSERT INTO game_result_archives/.test(statement.sql));
   assert.ok(archiveInsert);
   const archiveJson = String(archiveInsert.bindings[5]);
   const archive = JSON.parse(archiveJson) as { version: number; leaderboard: unknown[]; questionScores: unknown[] };
   assert.equal(archive.version, 1);
-  assert.equal(archive.leaderboard.length, 50);
-  assert.equal(archive.questionScores.length, 1500);
+  assert.equal(archive.leaderboard.length, 49);
+  assert.equal(archive.questionScores.length, 1470);
   assert.ok(Buffer.byteLength(archiveJson) < 512 * 1024);
   assert.doesNotMatch(archiveJson, /answer-\d+/);
   assert.ok(finalProjectionStatements.some((statement) => /INSERT OR IGNORE INTO completed_question_set_plays/.test(statement.sql)));

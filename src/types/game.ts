@@ -97,6 +97,9 @@ export type DbRoom = {
   lobby_team_assignment_mode?: TeamAssignmentMode | null;
   lobby_team_assignments?: unknown;
   runtime_generation?: number | null;
+  room_state_version?: number | null;
+  room_state_revision?: number | null;
+  room_state_json?: string | null;
   created_at: string;
   updated_at: string;
 };

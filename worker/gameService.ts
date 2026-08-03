@@ -12,6 +12,11 @@ import {
   encodeQuestionSetManifest,
   QUESTION_SET_MANIFEST_VERSION,
 } from "./questionSetManifest";
+import {
+  decodeRoomState,
+  encodeRoomState,
+  ROOM_STATE_MANIFEST_VERSION,
+} from "./roomStateManifest";
 import type {
   Answer,
   BuzzerAnswer,
@@ -133,6 +138,13 @@ function toPlayer(player: DbPlayer): Player {
   };
 }
 
+function getRoomStatePlayers(room: DbRoom) {
+  if (Number(room.runtime_generation) !== CURRENT_ROOM_RUNTIME_GENERATION) {
+    throw new Error("该房间创建于服务器维护前，已经停止使用，请创建新房间。");
+  }
+  return decodeRoomState(room);
+}
+
 function normalizePlayerRole(role: unknown): PlayerRole {
   return role === "SPECTATOR" ? "SPECTATOR" : "PLAYER";
 }
@@ -216,7 +228,7 @@ function normalizeRoundScores(value: unknown, maxRevealRounds: number) {
   });
 }
 
-function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
+function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): Room {
   const maxRevealRounds = normalizeMaxRevealRounds(room.lobby_max_reveal_rounds);
   return {
     id: room.id,
@@ -290,20 +302,10 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
 
 async function getPlayerNickname(playerId: string, roomId?: string) {
   assertD1Env();
-
-  let query = d1.from("players").select("*").eq("id", playerId);
-
-  if (roomId) {
-    query = query.eq("room_id", roomId);
-  }
-
-  const { data, error } = await query.maybeSingle<DbPlayer>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data?.nickname.trim() || null;
+  if (!roomId) return null;
+  const room = await getDbRoomById(roomId);
+  if (!room) return null;
+  return getRoomStatePlayers(room).find((player) => player.id === playerId)?.nickname.trim() || null;
 }
 
 function toGameSession(gameSession: DbGameSession): GameSession {
@@ -597,7 +599,7 @@ async function resetTeamBattleStateForQuestion(
   presenterPlayerId: string,
   questionIndex: number,
 ): Promise<TeamBattleState> {
-  const players = await getDbPlayersByRoomId(roomId);
+  const players = getRoomStatePlayers(room);
   const activeGuessers = players.filter((player) => isGamePlayer(player) && player.id !== presenterPlayerId);
   const activeGuesserById = new Map(activeGuessers.map((player) => [player.id, player]));
   const assigned = new Set<string>();
@@ -1035,18 +1037,7 @@ function toGameResultQuestionScores(results: QuestionResult[]): GameResultQuesti
 }
 
 async function getCurrentRoomGamePlayers(roomId: string) {
-  const { data: players, error: playersError } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", roomId)
-    .order("joined_at", { ascending: true })
-    .returns<DbPlayer[]>();
-
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
-  return (players ?? []).filter(isGamePlayer);
+  return (await getDbPlayersByRoomId(roomId)).filter(isGamePlayer);
 }
 
 async function getCurrentRoomEligiblePlayerIds(roomId: string, presenterPlayerId: string) {
@@ -1144,27 +1135,18 @@ async function getGameParticipantSnapshot(gameSession: GameSession) {
   }
 
   const [
-    { data: roomPlayers, error: roomPlayersError },
+    roomPlayers,
     firstQuestionEligiblePlayerIds,
     scores,
     questionResults,
   ] = await Promise.all([
-    d1
-      .from("players")
-      .select("*")
-      .eq("room_id", gameSession.roomId)
-      .order("joined_at", { ascending: true })
-      .returns<DbPlayer[]>(),
+    getDbPlayersByRoomId(gameSession.roomId),
     getStoredQuestionEligiblePlayerIds(gameSession.id, 0),
     getPlayerScores(gameSession.id),
     getQuestionResultsForGameSession(gameSession.id),
   ]);
 
-  if (roomPlayersError) {
-    throw new Error(roomPlayersError.message);
-  }
-
-  const roomPlayerById = new Map((roomPlayers ?? []).map((player) => [player.id, player]));
+  const roomPlayerById = new Map(roomPlayers.map((player) => [player.id, player]));
   const storedParticipantById = new Map((data ?? []).map((participant) => [participant.player_id, participant]));
   const participantIds = new Set<string>(firstQuestionEligiblePlayerIds);
   for (const participant of data ?? []) {
@@ -1367,16 +1349,7 @@ async function assertPlayerEligibleForCurrentQuestion(gameSession: GameSession, 
 }
 
 async function assertGamePlayerInRoom(roomId: string, playerId: string) {
-  const { data: player, error } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", roomId)
-    .eq("id", playerId)
-    .maybeSingle<DbPlayer>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
+  const player = (await getDbPlayersByRoomId(roomId)).find((item) => item.id === playerId);
 
   if (!player || !isGamePlayer(player)) {
     throw new Error("观战者不能执行玩家操作。");
@@ -1390,7 +1363,7 @@ async function getRoundActionState(gameSession: GameSession) {
     { data: questionResults, error: resultsError },
     { data: currentRoundBuzzerAnswers, error: buzzerAnswersError },
     { data: currentRoundAnswers, error: answersError },
-    { data: roomPlayers, error: roomPlayersError },
+    roomPlayers,
     guesserIds,
   ] = await Promise.all([
     d1
@@ -1413,11 +1386,7 @@ async function getRoundActionState(gameSession: GameSession) {
       .eq("question_index", gameSession.currentQuestionIndex)
       .eq("reveal_round", gameSession.currentRevealRound)
       .returns<DbAnswer[]>(),
-    d1
-      .from("players")
-      .select("*")
-      .eq("room_id", gameSession.roomId)
-      .returns<DbPlayer[]>(),
+    getDbPlayersByRoomId(gameSession.roomId),
     getOrCreateQuestionEligiblePlayerIds({
       gameSessionId: gameSession.id,
       roomId: gameSession.roomId,
@@ -1436,12 +1405,8 @@ async function getRoundActionState(gameSession: GameSession) {
   if (answersError) {
     throw new Error(answersError.message);
   }
-  if (roomPlayersError) {
-    throw new Error(roomPlayersError.message);
-  }
-
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
-  const activeRoomPlayerSet = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
+  const activeRoomPlayerSet = new Set(roomPlayers.filter(isGamePlayer).map((player) => player.id));
   const activeGuesserIds = guesserIds.filter((guesserId) => activeRoomPlayerSet.has(guesserId));
   const guesserIdSet = new Set(activeGuesserIds);
   const activeCurrentRoundBuzzerAnswers = (currentRoundBuzzerAnswers ?? []).filter((answer) => guesserIdSet.has(answer.player_id));
@@ -1749,9 +1714,21 @@ export async function createRoom(playerId: string, nickname: string) {
   let roomCode = createRoomCode();
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
+    const roomId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const hostPlayer: DbPlayer = {
+      id: playerId,
+      room_id: roomId,
+      nickname: nickname.trim(),
+      is_host: true,
+      role: "PLAYER",
+      joined_at: createdAt,
+      last_seen_at: createdAt,
+    };
     const { data: room, error: roomError } = await d1
       .from("rooms")
       .insert({
+        id: roomId,
         room_code: roomCode,
         host_player_id: playerId,
         lobby_round_seconds: DEFAULT_ROUND_SECONDS,
@@ -1761,6 +1738,11 @@ export async function createRoom(playerId: string, nickname: string) {
         lobby_team_assignment_mode: "MANUAL",
         lobby_team_assignments: "{}",
         runtime_generation: CURRENT_ROOM_RUNTIME_GENERATION,
+        room_state_version: ROOM_STATE_MANIFEST_VERSION,
+        room_state_revision: 0,
+        room_state_json: encodeRoomState(roomId, playerId, [hostPlayer]),
+        created_at: createdAt,
+        updated_at: createdAt,
       })
       .select()
       .single<DbRoom>();
@@ -1774,33 +1756,7 @@ export async function createRoom(playerId: string, nickname: string) {
       throw new Error(roomError.message);
     }
 
-    const { error: playerError } = await d1.from("players").upsert(
-      {
-        id: playerId,
-        room_id: room.id,
-        nickname,
-        is_host: true,
-        role: "PLAYER",
-        last_seen_at: new Date().toISOString(),
-      },
-      { onConflict: "id" },
-    );
-
-    if (playerError) {
-      throw new Error(playerError.message);
-    }
-
-    return toRoom(room, [
-      {
-        id: playerId,
-        room_id: room.id,
-        nickname,
-        is_host: true,
-        role: "PLAYER",
-        joined_at: new Date().toISOString(),
-        last_seen_at: new Date().toISOString(),
-      },
-    ]);
+    return toRoom(room, [hostPlayer]);
   }
 
   throw new Error("创建房间失败：连续生成的房间号都已被占用，请重试。");
@@ -1829,8 +1785,7 @@ export async function getRoomWithPlayers(roomCode: string) {
     return null;
   }
 
-  const players = await getDbPlayersByRoomId(room.id);
-  return toRoom(room, players);
+  return toRoom(room);
 }
 
 async function getDbRoomById(roomId: string) {
@@ -1851,13 +1806,45 @@ async function getDbRoomById(roomId: string) {
   return room;
 }
 
+async function updateRoomAggregate(
+  room: DbRoom,
+  players: DbPlayer[],
+  roomUpdates: Partial<DbRoom> = {},
+) {
+  const hostPlayerId = roomUpdates.host_player_id ?? room.host_player_id;
+  const roomStateJson = encodeRoomState(room.id, hostPlayerId, players);
+  const currentRevision = room.room_state_revision ?? 0;
+  const hasRoomChanges = Object.entries(roomUpdates).some(
+    ([key, value]) => room[key as keyof DbRoom] !== value,
+  );
+  if (!hasRoomChanges && roomStateJson === room.room_state_json) return room;
+
+  const { data, error } = await d1
+    .from("rooms")
+    .update({
+      ...roomUpdates,
+      room_state_json: roomStateJson,
+      room_state_revision: currentRevision + 1,
+    })
+    .eq("id", room.id)
+    .eq("runtime_generation", CURRENT_ROOM_RUNTIME_GENERATION)
+    .eq("room_state_version", ROOM_STATE_MANIFEST_VERSION)
+    .eq("room_state_revision", currentRevision)
+    .select()
+    .maybeSingle<DbRoom>();
+
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("房间状态已变化，请按最新状态重试。");
+  return data;
+}
+
 async function getRoomWithPlayersById(roomId: string) {
   const room = await getDbRoomById(roomId);
   if (!room) {
     return null;
   }
 
-  return toRoom(room, await getDbPlayersByRoomId(room.id));
+  return toRoom(room);
 }
 
 export async function getDeadlineStateForRoomId(roomId: string) {
@@ -1888,34 +1875,8 @@ export async function getRoomIdForGameSession(gameSessionId: string) {
 
 async function getDbPlayersByRoomId(roomId: string) {
   assertD1Env();
-
-  const { data, error } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", roomId)
-    .order("joined_at", { ascending: true })
-    .order("id", { ascending: true })
-    .returns<DbPlayer[]>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data ?? [];
-}
-
-async function clearTeamAssignment(room: DbRoom, playerId: string) {
-  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
-  if (!assignments[playerId]) return room;
-  delete assignments[playerId];
-  const { data, error } = await d1
-    .from("rooms")
-    .update({ lobby_team_assignments: JSON.stringify(assignments) })
-    .eq("id", room.id)
-    .select()
-    .maybeSingle<DbRoom>();
-  if (error || !data) throw new Error(error?.message ?? "更新房间分队失败：房间状态已变化。");
-  return data;
+  const room = await getDbRoomById(roomId);
+  return room ? getRoomStatePlayers(room) : [];
 }
 
 export async function getPlayersByRoomId(roomId: string) {
@@ -1933,7 +1894,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     };
   }
 
-  const players = await getDbPlayersByRoomId(room.id);
+  const players = getRoomStatePlayers(room);
   const duplicatedNickname = players.some(
     (player) => player.id !== playerId && player.nickname.trim().toLowerCase() === nickname.trim().toLowerCase(),
   );
@@ -1975,6 +1936,13 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
       error: `玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以选择观战加入。`,
     };
   }
+  if (!existingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
+    return {
+      room: null,
+      errorCode: PLAYER_CAPACITY_FULL_ERROR_CODE,
+      error: `房间已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家和观战者。`,
+    };
+  }
 
   const existingAssignments = normalizeTeamAssignments(room.lobby_team_assignments);
   const needsManualTeam = room.lobby_game_mode === "TEAM_BATTLE"
@@ -1991,50 +1959,39 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   }
 
   const isHost = room.host_player_id === playerId;
-  const { error } = await d1.from("players").upsert(
-    {
-      id: playerId,
-      room_id: room.id,
-      nickname,
-      is_host: isHost,
-      role: nextRole,
-      last_seen_at: new Date().toISOString(),
-    },
-    { onConflict: "id" },
-  );
-
-  if (error) {
-    if (isUniqueViolation(error)) {
-      return {
-        room: null,
-        error: "该玩家已经在其他房间中，请先退出原房间后再加入。",
+  const now = new Date().toISOString();
+  const joinedPlayer: DbPlayer = existingPlayer
+    ? {
+        ...existingPlayer,
+        nickname: nickname.trim(),
+        is_host: isHost,
+        role: nextRole,
+      }
+    : {
+        id: playerId,
+        room_id: room.id,
+        nickname: nickname.trim(),
+        is_host: isHost,
+        role: nextRole,
+        joined_at: now,
+        last_seen_at: now,
       };
-    }
-
-    throw new Error(error.message);
-  }
+  const nextPlayers = existingPlayer
+    ? players.map((player) => player.id === playerId ? joinedPlayer : player)
+    : [...players, joinedPlayer];
 
   const nextAssignments = { ...existingAssignments };
   if (nextRole === "SPECTATOR" || playerId === room.current_presenter_player_id) delete nextAssignments[playerId];
   else if (requestedTeam) nextAssignments[playerId] = requestedTeam;
-  let updatedRoom = room;
-  if (JSON.stringify(nextAssignments) !== JSON.stringify(existingAssignments)) {
-    const { data, error: assignmentError } = await d1
-      .from("rooms")
-      .update({ lobby_team_assignments: JSON.stringify(nextAssignments) })
-      .eq("id", room.id)
-      .select()
-      .maybeSingle<DbRoom>();
-    if (assignmentError || !data) throw new Error(assignmentError?.message ?? "加入队伍失败：房间状态已变化。");
-    updatedRoom = data;
-  }
-
-  const nextPlayers = await getDbPlayersByRoomId(room.id);
-  const joinedPlayer = nextPlayers.find((player) => player.id === playerId);
+  const assignmentsChanged = JSON.stringify(nextAssignments) !== JSON.stringify(existingAssignments);
+  const updatedRoom = await updateRoomAggregate(
+    room,
+    nextPlayers,
+    assignmentsChanged ? { lobby_team_assignments: JSON.stringify(nextAssignments) } : {},
+  );
   if (
     room.game_status === "PLAYING" &&
     room.current_game_id &&
-    joinedPlayer &&
     isGamePlayer(joinedPlayer)
   ) {
     await createGameParticipantSnapshot(room.current_game_id, [joinedPlayer]);
@@ -2069,25 +2026,12 @@ export async function leaveRoom(roomId: string, playerId: string) {
   }
 
   const isLeavingHost = room.host_player_id === playerId;
-  const { error: deleteError } = await d1
-    .from("players")
-    .delete()
-    .eq("room_id", roomId)
-    .eq("id", playerId);
-
-  if (deleteError) {
-    throw new Error(deleteError.message);
-  }
-
-  const remainingPlayers = await getDbPlayersByRoomId(roomId);
-  const roomAfterAssignment = await clearTeamAssignment(room, playerId);
+  const currentPlayers = getRoomStatePlayers(room);
+  const remainingPlayers = currentPlayers.filter((player) => player.id !== playerId);
+  if (remainingPlayers.length === currentPlayers.length) return toRoom(room, currentPlayers);
 
   if (room.game_status === "PLAYING" && room.current_game_id) {
     await removePlayerFromCurrentGame(room.current_game_id, playerId);
-  }
-
-  if (!isLeavingHost && !(isLeavingPresenter && room.game_status === "QUESTION_SETUP")) {
-    return toRoom(roomAfterAssignment, remainingPlayers);
   }
 
   const currentHostStillPresent = remainingPlayers.some((player) => player.id === room.host_player_id);
@@ -2104,41 +2048,20 @@ export async function leaveRoom(roomId: string, playerId: string) {
     return null;
   }
 
-  if (shouldPromoteHost) {
-    const { error: hostPlayerError } = await d1
-      .from("players")
-      .update({ is_host: true })
-      .eq("room_id", roomId)
-      .eq("id", nextHost.id);
-
-    if (hostPlayerError) {
-      throw new Error(hostPlayerError.message);
-    }
-  }
-
-  const roomUpdates: Partial<DbRoom> = { host_player_id: nextHost.id };
+  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  delete assignments[playerId];
+  const roomUpdates: Partial<DbRoom> = {
+    host_player_id: nextHost.id,
+    lobby_team_assignments: JSON.stringify(assignments),
+  };
   if (isLeavingPresenter && room.game_status === "QUESTION_SETUP") {
     roomUpdates.game_status = "LOBBY";
     roomUpdates.current_presenter_player_id = null;
     roomUpdates.prepared_question_set_id = null;
   }
 
-  const { data: updatedRoom, error: hostRoomError } = await d1
-    .from("rooms")
-    .update(roomUpdates)
-    .eq("id", roomId)
-    .select()
-    .maybeSingle<DbRoom>();
-
-  if (hostRoomError) {
-    throw new Error(hostRoomError.message);
-  }
-
-  if (!updatedRoom) {
-    throw new Error("退出房间失败：房间状态已变化，请刷新后重试。");
-  }
-
-  return toRoom(updatedRoom, await getDbPlayersByRoomId(roomId));
+  const updatedRoom = await updateRoomAggregate(room, remainingPlayers, roomUpdates);
+  return toRoom(updatedRoom);
 }
 
 export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, targetPlayerId: string) {
@@ -2170,16 +2093,8 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
     throw new Error("只有房主可以踢出玩家。");
   }
 
-  const { data: targetPlayer, error: targetError } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", roomId)
-    .eq("id", targetPlayerId)
-    .maybeSingle<DbPlayer>();
-
-  if (targetError) {
-    throw new Error(targetError.message);
-  }
+  const currentPlayers = getRoomStatePlayers(room);
+  const targetPlayer = currentPlayers.find((player) => player.id === targetPlayerId) ?? null;
 
   if (!targetPlayer) {
     throw new Error("踢出玩家失败：该玩家已不在房间。");
@@ -2197,47 +2112,27 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
     await assertRemovingPlayerKeepsTeamBattlePlayable(room.current_game_id, targetPlayerId);
   }
 
-  const { error: deleteError } = await d1
-    .from("players")
-    .delete()
-    .eq("room_id", roomId)
-    .eq("id", targetPlayerId);
-
-  if (deleteError) {
-    throw new Error(deleteError.message);
-  }
-
-  let updatedRoom = await clearTeamAssignment(room, targetPlayerId);
+  const nextPlayers = currentPlayers.filter((player) => player.id !== targetPlayerId);
+  const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  delete assignments[targetPlayerId];
+  const roomUpdates: Partial<DbRoom> = {
+    lobby_team_assignments: JSON.stringify(assignments),
+  };
   if (room.game_status === "PLAYING" && room.current_game_id) {
     await removePlayerFromCurrentGame(room.current_game_id, targetPlayerId);
   }
 
   if (room.current_presenter_player_id === targetPlayerId && room.game_status === "QUESTION_SETUP") {
-    const { data: resetRoom, error: resetError } = await d1
-      .from("rooms")
-      .update({
-        current_presenter_player_id: null,
-        current_game_id: null,
-        prepared_question_set_id: null,
-        game_status: "LOBBY",
-      })
-      .eq("id", roomId)
-      .eq("host_player_id", hostPlayerId)
-      .select()
-      .maybeSingle<DbRoom>();
-
-    if (resetError) {
-      throw new Error(resetError.message);
-    }
-
-    if (!resetRoom) {
-      throw new Error("踢出玩家失败：房间状态已变化，请刷新后重试。");
-    }
-
-    updatedRoom = resetRoom;
+    Object.assign(roomUpdates, {
+      current_presenter_player_id: null,
+      current_game_id: null,
+      prepared_question_set_id: null,
+      game_status: "LOBBY",
+    } satisfies Partial<DbRoom>);
   }
 
-  return toRoom(updatedRoom, await getDbPlayersByRoomId(roomId));
+  const updatedRoom = await updateRoomAggregate(room, nextPlayers, roomUpdates);
+  return toRoom(updatedRoom);
 }
 
 export async function dissolveRoom(roomId: string, playerId: string) {
@@ -2283,25 +2178,6 @@ export function dissolveRoomOnPageExit(roomId: string, playerId: string) {
 export async function selectPresenterForRound(roomId: string, hostPlayerId: string, presenterPlayerId: string) {
   assertD1Env();
 
-  const { data: presenter, error: presenterError } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", roomId)
-    .eq("id", presenterPlayerId)
-    .maybeSingle<DbPlayer>();
-
-  if (presenterError) {
-    throw new Error(presenterError.message);
-  }
-
-  if (!presenter) {
-    throw new Error("选择出题人失败：该玩家不在当前房间。");
-  }
-
-  if (!isGamePlayer(presenter)) {
-    throw new Error("选择出题人失败：观战者不能当出题人。");
-  }
-
   const { data: currentRoom, error: currentRoomError } = await d1
     .from("rooms")
     .select("*")
@@ -2311,33 +2187,22 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
     .maybeSingle<DbRoom>();
   if (currentRoomError) throw new Error(currentRoomError.message);
   if (!currentRoom) throw new Error("只有房主可以在大厅阶段选择出题人。");
+  const players = getRoomStatePlayers(currentRoom);
+  const presenter = players.find((player) => player.id === presenterPlayerId);
+  if (!presenter) throw new Error("选择出题人失败：该玩家不在当前房间。");
+  if (!isGamePlayer(presenter)) throw new Error("选择出题人失败：观战者不能当出题人。");
   const nextAssignments = normalizeTeamAssignments(currentRoom.lobby_team_assignments);
   delete nextAssignments[presenterPlayerId];
 
-  const { data: room, error } = await d1
-    .from("rooms")
-    .update({
+  const room = await updateRoomAggregate(currentRoom, players, {
       current_presenter_player_id: presenterPlayerId,
       game_status: "QUESTION_SETUP",
       current_game_id: null,
       prepared_question_set_id: null,
       lobby_team_assignments: JSON.stringify(nextAssignments),
-    })
-    .eq("id", roomId)
-    .eq("host_player_id", hostPlayerId)
-    .eq("game_status", "LOBBY")
-    .select()
-    .maybeSingle<DbRoom>();
+  });
 
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  if (!room) {
-    throw new Error("只有房主可以在大厅阶段选择出题人。");
-  }
-
-  return toRoom(room, await getDbPlayersByRoomId(roomId));
+  return toRoom(room);
 }
 
 export async function selectTeamForPlayer(params: { roomId: string; playerId: string; team: TeamBattleTeam }) {
@@ -2352,20 +2217,16 @@ export async function selectTeamForPlayer(params: { roomId: string; playerId: st
     throw new Error("当前房间未开启手动分队。");
   }
   if (room.current_presenter_player_id === params.playerId) throw new Error("出题人不需要加入队伍。");
-  const players = await getDbPlayersByRoomId(params.roomId);
+  const players = getRoomStatePlayers(room);
   const player = players.find((item) => item.id === params.playerId);
   if (!player || !isGamePlayer(player)) throw new Error("只有玩家身份可以加入队伍。");
   const assignments = normalizeTeamAssignments(room.lobby_team_assignments);
+  if (assignments[params.playerId] === params.team) return toRoom(room, players);
   assignments[params.playerId] = params.team;
-  const { data: updatedRoom, error } = await d1
-    .from("rooms")
-    .update({ lobby_team_assignments: JSON.stringify(assignments) })
-    .eq("id", params.roomId)
-    .eq("game_status", room.game_status)
-    .select()
-    .maybeSingle<DbRoom>();
-  if (error || !updatedRoom) throw new Error(error?.message ?? "更换队伍失败：房间状态已变化。");
-  return toRoom(updatedRoom, players);
+  const updatedRoom = await updateRoomAggregate(room, players, {
+    lobby_team_assignments: JSON.stringify(assignments),
+  });
+  return toRoom(updatedRoom);
 }
 
 export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
@@ -2815,21 +2676,30 @@ export async function updateRoomGameSettings(params: {
     throw new Error("只有房主可以在房间大厅或题库准备阶段修改游戏模式。");
   }
   const teamAssignmentMode = normalizeTeamAssignmentMode(params.teamAssignmentMode ?? currentRoom.lobby_team_assignment_mode);
+  const roomUpdates: Partial<DbRoom> = {
+    lobby_game_mode: params.gameMode,
+    lobby_max_reveal_rounds: maxRevealRounds,
+    lobby_round_seconds: roundSeconds,
+    lobby_round_scores: roundScores,
+    lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
+    lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
+    lobby_team_assignment_mode: teamAssignmentMode,
+    ...(params.gameMode !== "TEAM_BATTLE" || teamAssignmentMode === "AUTO"
+      ? { lobby_team_assignments: "{}" }
+      : {}),
+  };
+  const settingsUnchanged = Object.entries(roomUpdates).every(([key, value]) => {
+    const currentValue = currentRoom[key as keyof DbRoom];
+    if (key === "lobby_round_scores") {
+      return JSON.stringify(normalizeRoundScores(currentValue, maxRevealRounds)) === JSON.stringify(value);
+    }
+    return currentValue === value;
+  });
+  if (settingsUnchanged) return toRoom(currentRoom);
 
   const { data: room, error } = await d1
     .from("rooms")
-    .update({
-      lobby_game_mode: params.gameMode,
-      lobby_max_reveal_rounds: maxRevealRounds,
-      lobby_round_seconds: roundSeconds,
-      lobby_round_scores: roundScores,
-      lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
-      lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
-      lobby_team_assignment_mode: teamAssignmentMode,
-      ...(params.gameMode !== "TEAM_BATTLE" || teamAssignmentMode === "AUTO"
-        ? { lobby_team_assignments: "{}" }
-        : {}),
-    })
+    .update(roomUpdates)
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)
     .eq("game_status", currentRoom.game_status)
@@ -2844,8 +2714,7 @@ export async function updateRoomGameSettings(params: {
     throw new Error("修改游戏模式失败：房间状态已变化，请刷新后重试。");
   }
 
-  const players = await getDbPlayersByRoomId(params.roomId);
-  return toRoom(room, players);
+  return toRoom(room);
 }
 
 async function cleanupFailedGameSession(gameSessionId: string) {
@@ -2867,7 +2736,7 @@ async function getCommittedStartedGameRoom(roomId: string, gameSessionId: string
     return null;
   }
 
-  return toRoom(room, await getDbPlayersByRoomId(room.id));
+  return toRoom(room);
 }
 
 const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
@@ -2915,6 +2784,7 @@ export async function startGameWithQuestionSet(params: {
   if (!room) {
     throw new Error("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
   }
+  const roomPlayers = getRoomStatePlayers(room);
 
   if (room.game_status === "PLAYING" && room.current_game_id) {
     const currentGameSession = params.authorityVersion === 2
@@ -2922,7 +2792,7 @@ export async function startGameWithQuestionSet(params: {
           const { data, error } = await d1.from("game_sessions").select("*").eq("id", room.current_game_id).maybeSingle<DbGameSession>();
           if (error) throw new Error(error.message);
           if (!data) return null;
-          const currentPlayers = await getDbPlayersByRoomId(room.id);
+          const currentPlayers = roomPlayers;
           return {
             ...toGameSession(data),
             eligiblePlayerIds: currentPlayers.filter(isGamePlayer).filter((player) => player.id !== data.presenter_player_id).map((player) => player.id),
@@ -2934,7 +2804,7 @@ export async function startGameWithQuestionSet(params: {
       currentGameSession.presenterPlayerId === params.presenterPlayerId &&
       currentGameSession.questionSetId === params.questionSetId
     ) {
-      const currentPlayers = await getDbPlayersByRoomId(room.id);
+      const currentPlayers = roomPlayers;
       if (params.authorityVersion === 2) {
         const { data: currentQuestionSet, error: currentQuestionSetError } = await d1
           .from("question_sets")
@@ -3003,18 +2873,8 @@ export async function startGameWithQuestionSet(params: {
     DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   );
   const gameMode = isGameMode(params.gameMode) ? params.gameMode : room.lobby_game_mode ?? "ROUND_REVEAL";
-  const { data: players, error: playersError } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", params.roomId)
-    .order("joined_at", { ascending: true })
-    .returns<DbPlayer[]>();
-
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
-  const activeGamePlayers = (players ?? []).filter(isGamePlayer);
+  const players = roomPlayers;
+  const activeGamePlayers = players.filter(isGamePlayer);
   const presenter = activeGamePlayers.find((player) => player.id === params.presenterPlayerId);
   if (!presenter) {
     throw new Error("开始游戏失败：出题人必须是玩家身份。");
@@ -3233,7 +3093,7 @@ export async function startGameWithQuestionSet(params: {
     ...(params.authorityVersion === 2
       ? {
           __authorityVNextBootstrap: {
-            players: (players ?? []).map(toPlayer),
+            players: players.map(toPlayer),
             questionSet: toQuestionSet(questionSet, vnextQuestions),
             questions: vnextQuestions.map(toQuestion),
             questionSetManifestVersion: questionSet.manifest_version ?? null,
@@ -3277,7 +3137,7 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("当前出题人不能切换为观战身份。");
   }
 
-  const players = await getDbPlayersByRoomId(roomId);
+  const players = getRoomStatePlayers(room);
   const targetPlayer = players.find((player) => player.id === targetPlayerId);
 
   if (!targetPlayer) {
@@ -3301,37 +3161,13 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("手动分队已开启，请先选择加入红队或蓝队。");
   }
 
-  const { data: updatedPlayer, error: updateError } = await d1
-    .from("players")
-    .update({
-      role,
-      last_seen_at: new Date().toISOString(),
-    })
-    .eq("room_id", roomId)
-    .eq("id", targetPlayerId)
-    .select()
-    .maybeSingle<DbPlayer>();
-
-  if (updateError) {
-    throw new Error(updateError.message);
-  }
-
-  if (!updatedPlayer) {
-    throw new Error("身份切换失败：你不在当前房间。");
-  }
-
   if (role === "SPECTATOR" || targetPlayerId === room.current_presenter_player_id) delete assignments[targetPlayerId];
   else if (selectedTeam) assignments[targetPlayerId] = selectedTeam;
-  const { data: updatedRoom, error: assignmentError } = await d1
-    .from("rooms")
-    .update({ lobby_team_assignments: JSON.stringify(assignments) })
-    .eq("id", roomId)
-    .select()
-    .maybeSingle<DbRoom>();
-  if (assignmentError || !updatedRoom) throw new Error(assignmentError?.message ?? "身份切换失败：房间状态已变化。");
-
-  const nextPlayers = await getDbPlayersByRoomId(roomId);
-  return toRoom(updatedRoom, nextPlayers);
+  const nextPlayers = players.map((player) => player.id === targetPlayerId ? { ...player, role } : player);
+  const updatedRoom = await updateRoomAggregate(room, nextPlayers, {
+    lobby_team_assignments: JSON.stringify(assignments),
+  });
+  return toRoom(updatedRoom);
 }
 
 export async function getGameSessionById(gameSessionId: string) {
@@ -3618,7 +3454,7 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
     { data: questionAnswers, error: questionAnswersError },
     { data: currentRoundBuzzerAnswers, error: currentRoundBuzzerAnswersError },
     { data: questionBuzzerAnswers, error: questionBuzzerAnswersError },
-    { data: roomPlayers, error: roomPlayersError },
+    roomPlayers,
   ] = await Promise.all([
     d1
       .from("player_scores")
@@ -3662,11 +3498,7 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
       .eq("question_index", questionIndex)
       .order("submitted_at", { ascending: true })
       .returns<DbBuzzerAnswer[]>(),
-    d1
-      .from("players")
-      .select("*")
-      .eq("room_id", gameSession.roomId)
-      .returns<DbPlayer[]>(),
+    getDbPlayersByRoomId(gameSession.roomId),
   ]);
 
   if (scoresError) {
@@ -3687,11 +3519,7 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
   if (questionBuzzerAnswersError) {
     throw new Error(questionBuzzerAnswersError.message);
   }
-  if (roomPlayersError) {
-    throw new Error(roomPlayersError.message);
-  }
-
-  const activeRoomGamePlayerSet = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
+  const activeRoomGamePlayerSet = new Set(roomPlayers.filter(isGamePlayer).map((player) => player.id));
   const activeEligiblePlayerSet = new Set(
     (gameSession.eligiblePlayerIds ?? []).filter((playerId) => activeRoomGamePlayerSet.has(playerId)),
   );
@@ -5044,7 +4872,7 @@ async function loadCurrentAnswerJudgementContext(params: {
   const currentSession = toGameSession(currentGameSession);
   const [
     eligiblePlayerIds,
-    { data: roomPlayers, error: roomPlayersError },
+    roomPlayers,
     { data: roundAnswers, error: roundAnswersError },
     { data: questionResults, error: resultsError },
   ] = await Promise.all([
@@ -5055,7 +4883,7 @@ async function loadCurrentAnswerJudgementContext(params: {
       presenterPlayerId: currentGameSession.presenter_player_id,
       knownEligiblePlayerIds: currentSession.eligiblePlayerIds,
     }),
-    d1.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
+    getDbPlayersByRoomId(currentGameSession.room_id),
     d1
       .from("buzzer_answers")
       .select("*")
@@ -5071,11 +4899,10 @@ async function loadCurrentAnswerJudgementContext(params: {
       .returns<DbQuestionResult[]>(),
   ]);
 
-  if (roomPlayersError) throw new Error(roomPlayersError.message);
   if (roundAnswersError) throw new Error(roundAnswersError.message);
   if (resultsError) throw new Error(resultsError.message);
 
-  const activePlayerIds = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
+  const activePlayerIds = new Set(roomPlayers.filter(isGamePlayer).map((player) => player.id));
   const questionEligiblePlayerIds = new Set(eligiblePlayerIds.filter((playerId) => activePlayerIds.has(playerId)));
   const priorRoundCorrectPlayerIds = new Set(
     (questionResults ?? [])
@@ -5324,12 +5151,8 @@ export async function judgeBuzzerAnswer(params: {
     presenterPlayerId: currentGameSession.presenter_player_id,
     knownEligiblePlayerIds: currentSession.eligiblePlayerIds,
   });
-  const [{ data: roomPlayers, error: roomPlayersError }, { data: pendingAnswers, error: pendingError }] = await Promise.all([
-    d1
-      .from("players")
-      .select("*")
-      .eq("room_id", currentGameSession.room_id)
-      .returns<DbPlayer[]>(),
+  const [roomPlayers, { data: pendingAnswers, error: pendingError }] = await Promise.all([
+    getDbPlayersByRoomId(currentGameSession.room_id),
     d1
       .from("buzzer_answers")
       .select("*")
@@ -5343,14 +5166,11 @@ export async function judgeBuzzerAnswer(params: {
       .returns<DbBuzzerAnswer[]>(),
   ]);
 
-  if (roomPlayersError) {
-    throw new Error(roomPlayersError.message);
-  }
   if (pendingError) {
     throw new Error(pendingError.message);
   }
 
-  const roomPlayerSet = new Set((roomPlayers ?? []).filter(isGamePlayer).map((player) => player.id));
+  const roomPlayerSet = new Set(roomPlayers.filter(isGamePlayer).map((player) => player.id));
   const activeEligiblePlayerSet = new Set(eligiblePlayerIds.filter((playerId) => roomPlayerSet.has(playerId)));
   const firstPendingAnswer = (pendingAnswers ?? []).find((answer) => activeEligiblePlayerSet.has(answer.player_id)) ?? null;
   if (!firstPendingAnswer || firstPendingAnswer.id !== params.buzzerAnswerId) {
@@ -6293,7 +6113,7 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     });
     return {
       gameSession: toGameSession(endedGameSession),
-      room: toRoom(updatedRoom, await getDbPlayersByRoomId(updatedRoom.id)),
+      room: toRoom(updatedRoom),
     };
   }
 
@@ -6327,7 +6147,7 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     });
     return {
       gameSession: toGameSession(endedGameSession),
-      room: toRoom(latestRoom, await getDbPlayersByRoomId(latestRoom.id)),
+      room: toRoom(latestRoom),
     };
   }
 
