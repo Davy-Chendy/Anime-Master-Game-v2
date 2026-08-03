@@ -2381,19 +2381,14 @@ function getR2ObjectKeyFromImageUrl(imageUrl: string, env: Env, options: { allow
   }
 }
 
-function getR2ReferenceLikePatterns(env: Env) {
+function getR2ReferenceNeedle(env: Env) {
   const prefix = getR2ImagePrefix(env);
   if (!prefix) {
-    return [];
+    return null;
   }
 
-  const patterns = new Set<string>([`%/${prefix}/%`]);
-  const configuredBase = env.R2_PUBLIC_BASE_URL?.trim().replace(/\/+$/g, "");
-  if (configuredBase) {
-    patterns.add(`${configuredBase}/${prefix}/%`);
-  }
-
-  return Array.from(patterns);
+  // D1 limits LIKE/GLOB patterns to 50 bytes; use a literal path needle so the public base URL cannot exceed it.
+  return `/${prefix}/`;
 }
 
 async function getExpiredRooms(env: Env, cutoffIso: string) {
@@ -2550,27 +2545,25 @@ async function deleteExpiredRooms(env: Env, roomIds: string[], cutoffIso: string
 }
 
 async function getR2ImageReferences(env: Env) {
-  const patterns = getR2ReferenceLikePatterns(env);
-  if (patterns.length === 0) {
+  const referenceNeedle = getR2ReferenceNeedle(env);
+  if (!referenceNeedle) {
     return [];
   }
 
-  const legacyWhereClause = patterns.map(() => "q.image_url like ?").join(" or ");
-  const manifestWhereClause = patterns.map(() => "qs.manifest_json like ?").join(" or ");
   const rows = await queryRows<R2ImageReferenceRow>(
     env,
     `select q.question_set_id, qs.is_public, q.image_url,
             null as manifest_version, null as manifest_json
      from questions q
      join question_sets qs on qs.id = q.question_set_id
-     where ${legacyWhereClause}
+     where instr(q.image_url, ?) > 0
      union all
      select qs.id as question_set_id, qs.is_public, null as image_url,
             qs.manifest_version, qs.manifest_json
      from question_sets qs
-     where qs.manifest_version = 1 and (${manifestWhereClause})`,
-    ...patterns,
-    ...patterns,
+     where qs.manifest_version = 1 and instr(qs.manifest_json, ?) > 0`,
+    referenceNeedle,
+    referenceNeedle,
   );
   const references: Array<R2ImageReferenceRow & { image_url: string }> = [];
   for (const row of rows) {

@@ -17,6 +17,13 @@ type R2CallCounters = {
   put: number;
 };
 
+type CleanupTestEnvOptions = {
+  enforceD1LikePatternLimit?: boolean;
+  publicBaseUrl?: string;
+};
+
+const D1_LIKE_PATTERN_MAX_BYTES = 50;
+
 function createR2TestEnv() {
   const calls: R2CallCounters = { list: 0, put: 0 };
   const bucket = {
@@ -57,7 +64,7 @@ function createR2TestEnv() {
   return { calls, env };
 }
 
-function createCleanupTestEnv() {
+function createCleanupTestEnv(options: CleanupTestEnvOptions = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const migrationsDirectory = resolve(import.meta.dirname, "..", "d1", "migrations");
   for (const name of readdirSync(migrationsDirectory).filter((file) => /^\d{4}_.+\.sql$/.test(file)).sort()) {
@@ -70,7 +77,18 @@ function createCleanupTestEnv() {
         let bindings: unknown[] = [];
         return {
           bind(...values: unknown[]) { bindings = values; return this; },
-          async all<T>() { return { results: sqlite.prepare(sql).all(...bindings) as T[] }; },
+          async all<T>() {
+            if (options.enforceD1LikePatternLimit && /\blike\s+\?/i.test(sql)) {
+              const oversizedPattern = bindings.find((value) => (
+                typeof value === "string"
+                && new TextEncoder().encode(value).byteLength > D1_LIKE_PATTERN_MAX_BYTES
+              ));
+              if (oversizedPattern) {
+                throw new Error("LIKE or GLOB pattern too complex");
+              }
+            }
+            return { results: sqlite.prepare(sql).all(...bindings) as T[] };
+          },
         };
       },
     },
@@ -78,7 +96,7 @@ function createCleanupTestEnv() {
       async delete(key: string) { deletedKeys.push(key); },
     },
     R2_IMAGE_PREFIX: "question-images",
-    R2_PUBLIC_BASE_URL: "https://assets.example.com",
+    R2_PUBLIC_BASE_URL: options.publicBaseUrl ?? "https://assets.example.com",
   } as unknown as Env;
   return { deletedKeys, env, sqlite };
 }
@@ -164,31 +182,53 @@ test("cleanup expands both legacy and manifest image references and fails safely
   );
 });
 
-test("cleanup never deletes a manifest image while another active room still references its private set", async () => {
-  const { deletedKeys, env, sqlite } = createCleanupTestEnv();
-  const manifestJson = encodeQuestionSetManifest([{
-    id: "shared-q1",
-    questionSetId: "shared-set",
-    imageUrl: "https://assets.example.com/question-images/shared.webp",
+test("cleanup avoids D1 LIKE limits and preserves an image referenced by another active manifest set", async () => {
+  const publicBaseUrl = "https://assets.animaster.dpdns.org";
+  const { deletedKeys, env, sqlite } = createCleanupTestEnv({
+    enforceD1LikePatternLimit: true,
+    publicBaseUrl,
+  });
+  const sharedImageUrl = `${publicBaseUrl}/question-images/shared.webp`;
+  const expiredManifestJson = encodeQuestionSetManifest([{
+    id: "expired-q1",
+    questionSetId: "expired-set",
+    imageUrl: sharedImageUrl,
     orderIndex: 0,
     labelText: null,
     createdAt: "2026-07-01T00:00:00.000Z",
   }]);
-  sqlite.prepare(`INSERT INTO question_sets(
+  const activeManifestJson = encodeQuestionSetManifest([{
+    id: "active-q1",
+    questionSetId: "active-set",
+    imageUrl: sharedImageUrl,
+    orderIndex: 0,
+    labelText: null,
+    createdAt: "2026-07-01T00:00:00.000Z",
+  }]);
+  const insertQuestionSet = sqlite.prepare(`INSERT INTO question_sets(
     id,title,created_by_player_id,is_public,image_count,manifest_version,manifest_json,created_at,updated_at
-  ) VALUES(?,?,?,?,?,?,?,?,?)`).run(
-    "shared-set", "Shared", "host", 0, 1, 1, manifestJson,
+  ) VALUES(?,?,?,?,?,?,?,?,?)`);
+  insertQuestionSet.run(
+    "expired-set", "Expired", "host", 0, 1, 1, expiredManifestJson,
     "2026-07-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z",
   );
+  insertQuestionSet.run(
+    "active-set", "Active", "host", 0, 1, 1, activeManifestJson,
+    "2026-07-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z",
+  );
+  const now = Date.now();
+  const expiredAt = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const activeAt = new Date(now).toISOString();
   sqlite.prepare("INSERT INTO rooms(id,room_code,host_player_id,prepared_question_set_id,updated_at) VALUES(?,?,?,?,?)")
-    .run("expired-room", "EXP001", "host", "shared-set", "2026-07-01T00:00:00.000Z");
+    .run("expired-room", "EXP001", "host", "expired-set", expiredAt);
   sqlite.prepare("INSERT INTO rooms(id,room_code,host_player_id,prepared_question_set_id,updated_at) VALUES(?,?,?,?,?)")
-    .run("active-room", "ACT001", "host", "shared-set", "2026-07-31T00:00:00.000Z");
+    .run("active-room", "ACT001", "host", "active-set", activeAt);
 
   await worker.scheduled({} as ScheduledController, env);
 
   assert.deepEqual(deletedKeys, []);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='expired-room'").get().count, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='active-room'").get().count, 1);
-  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='shared-set'").get().count, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='expired-set'").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='active-set'").get().count, 1);
 });
