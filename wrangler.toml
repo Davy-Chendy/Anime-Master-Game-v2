@@ -33,7 +33,7 @@ bucket_name = "anime-master-game-images"
 binding = "IMAGES"
 
 [triggers]
-crons = ["0 0 * * *"]
+crons = ["0 23 * * *"]
 
 [vars]
 ALLOWED_ORIGIN = "https://anipeek.animaster.dpdns.org,http://localhost:3000"
