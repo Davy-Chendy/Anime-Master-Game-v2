@@ -187,6 +187,9 @@ const ROOM_CLEANUP_IDLE_MS = 48 * 60 * 60 * 1000;
 const ROOM_CLEANUP_MAX_ROOMS_PER_RUN = 50;
 const ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN = 100;
 const ROOM_CLEANUP_SQL_CHUNK_SIZE = 50;
+const R2_ORPHAN_CLEANUP_MIN_AGE_MS = 72 * 60 * 60 * 1000;
+const R2_ORPHAN_CLEANUP_LIST_LIMIT = 1000;
+const R2_ORPHAN_CLEANUP_MAX_DELETE_PER_RUN = 1000;
 const RPC_LOG_ID_MAX_LENGTH = 160;
 const RPC_LOG_NAME_MAX_LENGTH = 120;
 const RPC_LOG_ERROR_MAX_LENGTH = 4000;
@@ -2578,6 +2581,57 @@ async function getR2ImageReferences(env: Env) {
     }
   }
   return references;
+}
+
+export async function cleanupUnreferencedR2Objects(env: Env, now = Date.now()) {
+  const prefix = getR2ImagePrefix(env);
+  if (!prefix) {
+    throw new Error("R2 孤儿清理失败：图片对象前缀为空。");
+  }
+
+  const references = await getR2ImageReferences(env);
+  const referencedKeys = new Set<string>();
+  for (const reference of references) {
+    const key = getR2ObjectKeyFromImageUrl(reference.image_url, env, { allowAnyOriginPrefixPath: true });
+    if (key) referencedKeys.add(key);
+  }
+
+  const cutoffMs = now - R2_ORPHAN_CLEANUP_MIN_AGE_MS;
+  const keysToDelete: string[] = [];
+  let listedObjectCount = 0;
+  let cursor: string | undefined;
+
+  do {
+    const listed = await env.IMAGE_BUCKET.list({
+      prefix: `${prefix}/`,
+      limit: R2_ORPHAN_CLEANUP_LIST_LIMIT,
+      ...(cursor ? { cursor } : {}),
+    });
+    listedObjectCount += listed.objects.length;
+
+    for (const object of listed.objects) {
+      if (keysToDelete.length >= R2_ORPHAN_CLEANUP_MAX_DELETE_PER_RUN) break;
+      if (object.uploaded.getTime() > cutoffMs || referencedKeys.has(object.key)) continue;
+      keysToDelete.push(object.key);
+    }
+
+    if (keysToDelete.length >= R2_ORPHAN_CLEANUP_MAX_DELETE_PER_RUN || !listed.truncated) break;
+    cursor = listed.cursor;
+  } while (cursor);
+
+  if (keysToDelete.length > 0) {
+    await env.IMAGE_BUCKET.delete(keysToDelete);
+  }
+
+  const summary = {
+    event: "unreferenced_r2_cleanup_completed",
+    cutoffIso: new Date(cutoffMs).toISOString(),
+    referencedR2KeyCount: referencedKeys.size,
+    listedObjectCount,
+    deletedR2KeyCount: keysToDelete.length,
+  };
+  console.info(JSON.stringify(summary));
+  return summary;
 }
 
 async function deleteUnreferencedQuestionSets(env: Env, questionSetIds: string[]) {
@@ -5007,6 +5061,11 @@ export class RoomDurableObject {
 export default {
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     await cleanupExpiredRooms(env);
+    try {
+      await cleanupUnreferencedR2Objects(env);
+    } catch (error) {
+      logAuxiliaryFailure("unreferenced_r2_cleanup_failed", error);
+    }
   },
 
   async fetch(request: Request, env: Env): Promise<Response> {

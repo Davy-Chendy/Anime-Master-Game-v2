@@ -4,7 +4,11 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
-import worker, { expandCleanupQuestionSetImageRows, type Env } from "../worker/index";
+import worker, {
+  cleanupUnreferencedR2Objects,
+  expandCleanupQuestionSetImageRows,
+  type Env,
+} from "../worker/index";
 import { encodeQuestionSetManifest } from "../worker/questionSetManifest";
 import {
   isR2ImageUploadTooLarge,
@@ -94,11 +98,26 @@ function createCleanupTestEnv(options: CleanupTestEnvOptions = {}) {
     },
     IMAGE_BUCKET: {
       async delete(key: string) { deletedKeys.push(key); },
+      async list() { return { objects: [], truncated: false, delimitedPrefixes: [] }; },
     },
     R2_IMAGE_PREFIX: "question-images",
     R2_PUBLIC_BASE_URL: options.publicBaseUrl ?? "https://assets.example.com",
   } as unknown as Env;
   return { deletedKeys, env, sqlite };
+}
+
+function createListedR2Object(key: string, uploaded: Date) {
+  return {
+    key,
+    version: "test-version",
+    size: 1,
+    etag: "test-etag",
+    httpEtag: '"test-etag"',
+    uploaded,
+    checksums: {},
+    storageClass: "Standard",
+    writeHttpMetadata() {},
+  } as R2Object;
 }
 
 test("10 MB final-image policy accepts the boundary and rejects one extra byte", () => {
@@ -231,4 +250,122 @@ test("cleanup avoids D1 LIKE limits and preserves an image referenced by another
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='active-room'").get().count, 1);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='expired-set'").get().count, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='active-set'").get().count, 1);
+});
+
+test("R2 reconciliation paginates, protects current and recent images, and deletes at most 1000 old orphans", async () => {
+  const publicBaseUrl = "https://assets.example.com";
+  const { env, sqlite } = createCleanupTestEnv({ publicBaseUrl });
+  const now = Date.UTC(2026, 7, 4, 0, 0, 0);
+  const oldUploaded = new Date(now - 4 * 24 * 60 * 60 * 1000);
+  const recentUploaded = new Date(now - 24 * 60 * 60 * 1000);
+  const legacyKey = "question-images/referenced-legacy.webp";
+  const manifestKey = "question-images/referenced-manifest.webp";
+  const recentKey = "question-images/recent-orphan.webp";
+  const oldOrphanKeys = Array.from(
+    { length: 1001 },
+    (_, index) => `question-images/old-orphan-${index.toString().padStart(4, "0")}.webp`,
+  );
+  const manifestJson = encodeQuestionSetManifest([{
+    id: "manifest-q1",
+    questionSetId: "manifest-set",
+    imageUrl: `${publicBaseUrl}/${manifestKey}`,
+    orderIndex: 0,
+    labelText: null,
+    createdAt: oldUploaded.toISOString(),
+  }]);
+  const insertQuestionSet = sqlite.prepare(`INSERT INTO question_sets(
+    id,title,created_by_player_id,is_public,image_count,manifest_version,manifest_json,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?,?,?)`);
+  insertQuestionSet.run(
+    "legacy-set", "Legacy", "host", 1, 1, null, null, oldUploaded.toISOString(), oldUploaded.toISOString(),
+  );
+  insertQuestionSet.run(
+    "manifest-set", "Manifest", "host", 0, 1, 1, manifestJson, oldUploaded.toISOString(), oldUploaded.toISOString(),
+  );
+  sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
+    .run("legacy-q1", "legacy-set", `${publicBaseUrl}/${legacyKey}`, 0);
+
+  const listedObjects = [
+    createListedR2Object(legacyKey, oldUploaded),
+    createListedR2Object(manifestKey, oldUploaded),
+    createListedR2Object(recentKey, recentUploaded),
+    ...oldOrphanKeys.map((key) => createListedR2Object(key, oldUploaded)),
+  ];
+  const deletedBatches: string[][] = [];
+  let listCalls = 0;
+  env.IMAGE_BUCKET = {
+    async list(options = {}) {
+      listCalls += 1;
+      const start = options.cursor ? Number(options.cursor) : 0;
+      const end = Math.min(start + 400, listedObjects.length);
+      const objects = listedObjects.slice(start, end);
+      return end < listedObjects.length
+        ? { objects, truncated: true, cursor: String(end), delimitedPrefixes: [] }
+        : { objects, truncated: false, delimitedPrefixes: [] };
+    },
+    async delete(keys: string | string[]) {
+      deletedBatches.push(Array.isArray(keys) ? keys : [keys]);
+    },
+  } as R2Bucket;
+
+  const summary = await cleanupUnreferencedR2Objects(env, now);
+
+  assert.equal(listCalls, 3);
+  assert.equal(summary.deletedR2KeyCount, 1000);
+  assert.equal(deletedBatches.length, 1);
+  assert.equal(deletedBatches[0].length, 1000);
+  assert.equal(deletedBatches[0].includes(legacyKey), false);
+  assert.equal(deletedBatches[0].includes(manifestKey), false);
+  assert.equal(deletedBatches[0].includes(recentKey), false);
+  assert.equal(oldOrphanKeys.filter((key) => deletedBatches[0].includes(key)).length, 1000);
+});
+
+test("scheduled cleanup isolates R2 reconciliation failures and retries on the next run", async () => {
+  const { env, sqlite } = createCleanupTestEnv();
+  const now = Date.now();
+  const expiredAt = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+  sqlite.prepare(`INSERT INTO question_sets(
+    id,title,created_by_player_id,is_public,image_count,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?)`).run("expired-set", "Expired", "host", 0, 1, expiredAt, expiredAt);
+  sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
+    .run("expired-q1", "expired-set", "https://example.com/not-r2.webp", 0);
+  sqlite.prepare("INSERT INTO rooms(id,room_code,host_player_id,prepared_question_set_id,updated_at) VALUES(?,?,?,?,?)")
+    .run("expired-room", "EXP002", "host", "expired-set", expiredAt);
+
+  const orphanKey = "question-images/retry-orphan.webp";
+  const orphanObject = createListedR2Object(orphanKey, new Date(now - 4 * 24 * 60 * 60 * 1000));
+  let listAttempts = 0;
+  let deleteAttempts = 0;
+  const deletedKeys: string[] = [];
+  env.IMAGE_BUCKET = {
+    async list() {
+      listAttempts += 1;
+      if (listAttempts === 1) throw new Error("temporary list failure");
+      return { objects: [orphanObject], truncated: false, delimitedPrefixes: [] };
+    },
+    async delete(keys: string | string[]) {
+      deleteAttempts += 1;
+      if (deleteAttempts === 1) throw new Error("temporary delete failure");
+      deletedKeys.push(...(Array.isArray(keys) ? keys : [keys]));
+    },
+  } as R2Bucket;
+
+  const errors: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  try {
+    await worker.scheduled({} as ScheduledController, env);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='expired-room'").get().count, 0);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='expired-set'").get().count, 0);
+
+    await worker.scheduled({} as ScheduledController, env);
+    await worker.scheduled({} as ScheduledController, env);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(listAttempts, 3);
+  assert.equal(deleteAttempts, 2);
+  assert.deepEqual(deletedKeys, [orphanKey]);
+  assert.equal(errors.filter((entry) => entry.includes('"event":"unreferenced_r2_cleanup_failed"')).length, 2);
 });
