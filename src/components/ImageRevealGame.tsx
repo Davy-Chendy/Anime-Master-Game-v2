@@ -5462,7 +5462,7 @@ export function ImageRevealGame({
                 />
               </label>
               <fieldset>
-                <legend className="mb-2 text-sm font-semibold text-slate-950">出题方式</legend>
+                <legend className="mb-2 text-sm font-semibold text-slate-950">出题方式（自动识别）</legend>
                 <div className="grid grid-cols-2 gap-2">
                   {([
                     ["player_manual", "玩家手动出题"],
