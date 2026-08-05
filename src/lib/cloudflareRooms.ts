@@ -173,6 +173,7 @@ export const createUploadedQuestionSet = (params: {
   description?: string;
   imageUrls?: string[];
   questions?: QuestionImportItem[];
+  creationMethod?: QuestionSetCreationMethod;
 }) => rpc<QuestionSet>("createUploadedQuestionSet", params);
 
 export const createQuestionSetFromUrlText = (params: {

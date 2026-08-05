@@ -10,6 +10,40 @@ export type UploadableImage = {
   type: string;
 };
 
+export type UploadSourceFile = {
+  file: File;
+  path: string;
+};
+
+export type DroppedUploadFiles = {
+  files: UploadSourceFile[];
+  skippedDirectoryCount: number;
+};
+
+type BrowserFileSystemEntry = {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  fullPath?: string;
+};
+
+type BrowserFileSystemFileEntry = BrowserFileSystemEntry & {
+  isFile: true;
+  file: (success: (file: File) => void, failure?: (error: DOMException) => void) => void;
+};
+
+type BrowserFileSystemDirectoryReader = {
+  readEntries: (
+    success: (entries: BrowserFileSystemEntry[]) => void,
+    failure?: (error: DOMException) => void,
+  ) => void;
+};
+
+type BrowserFileSystemDirectoryEntry = BrowserFileSystemEntry & {
+  isDirectory: true;
+  createReader: () => BrowserFileSystemDirectoryReader;
+};
+
 export type R2UploadResult = {
   ok: true;
   path: string;
@@ -72,15 +106,21 @@ export function getR2UploadConfigStatus() {
   };
 }
 
-export function filesToUploadableImages(fileList: FileList | File[]) {
-  const files = Array.from(fileList);
+export function toUploadSourceFiles(fileList: FileList | File[]) {
+  return Array.from(fileList).map((file) => ({
+    file,
+    path: getPath(file),
+  }));
+}
+
+export function filesToUploadableImages(sourceFiles: UploadSourceFile[]) {
   const seen = new Set<string>();
 
-  return files
-    .filter(isImageFile)
-    .map((file) => ({
+  return sourceFiles
+    .filter(({ file }) => isImageFile(file))
+    .map(({ file, path }) => ({
       file,
-      path: getPath(file),
+      path,
       name: file.name,
       size: file.size,
       type: file.type || guessMime(file.name),
@@ -94,6 +134,96 @@ export function filesToUploadableImages(fileList: FileList | File[]) {
       return true;
     })
     .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+export function extractCreationToolLabelFromFilename(filename: string) {
+  const basename = filename.replace(/^.*[\\/]/, "");
+  const match = basename.match(/^\d+-(.+)-mosaic\.(?:jpe?g|png|webp|gif|avif)$/i);
+  const label = match?.[1].trim() ?? "";
+  return label || null;
+}
+
+export function getLocalUploadCreationMethod(labelTexts: Array<string | null>) {
+  return labelTexts.length > 0 && labelTexts.every((labelText) => Boolean(labelText?.trim()))
+    ? "creation_tool_assisted" as const
+    : "player_manual" as const;
+}
+
+export function buildLocalUploadQuestionImport(
+  items: UploadableImage[],
+  uploadResults: R2UploadItemResult[],
+) {
+  const itemByPath = new Map(items.map((item) => [item.path, item]));
+  const questions = uploadResults
+    .filter((result): result is R2UploadResult => result.ok)
+    .map((result) => ({
+      imageUrl: result.url,
+      labelText: extractCreationToolLabelFromFilename(itemByPath.get(result.path)?.name ?? ""),
+    }));
+
+  return {
+    questions,
+    creationMethod: getLocalUploadCreationMethod(questions.map((question) => question.labelText)),
+  };
+}
+
+export async function readDroppedUploadFiles(dataTransfer: DataTransfer): Promise<DroppedUploadFiles> {
+  const items = Array.from(dataTransfer.items ?? []).filter((item) => item.kind === "file");
+  const droppedItems = items.map((item) => {
+    const candidate = item as unknown as { webkitGetAsEntry?: () => BrowserFileSystemEntry | null };
+    const supportsEntry = typeof candidate.webkitGetAsEntry === "function";
+    return {
+      entry: supportsEntry ? candidate.webkitGetAsEntry?.() ?? null : null,
+      fallbackFile: item.getAsFile(),
+      supportsEntry,
+    };
+  });
+  const supportsEntries = droppedItems.some((item) => item.supportsEntry);
+
+  if (!supportsEntries) {
+    return {
+      files: toUploadSourceFiles(dataTransfer.files),
+      skippedDirectoryCount: 0,
+    };
+  }
+
+  const files: UploadSourceFile[] = [];
+  let skippedDirectoryCount = 0;
+
+  for (const droppedItem of droppedItems) {
+    const entry = droppedItem.entry;
+
+    if (!entry) {
+      const file = droppedItem.fallbackFile;
+      if (file) {
+        files.push({ file, path: getPath(file) });
+      }
+      continue;
+    }
+
+    if (entry.isFile) {
+      const file = await readFileEntry(entry as BrowserFileSystemFileEntry);
+      files.push({ file, path: normalizeDroppedPath(entry.fullPath || file.name) });
+      continue;
+    }
+
+    if (entry.isDirectory) {
+      const directoryEntries = await readAllDirectoryEntries(entry as BrowserFileSystemDirectoryEntry);
+      for (const child of directoryEntries) {
+        if (child.isFile) {
+          const file = await readFileEntry(child as BrowserFileSystemFileEntry);
+          files.push({
+            file,
+            path: normalizeDroppedPath(child.fullPath || `${entry.name}/${file.name}`),
+          });
+        } else if (child.isDirectory) {
+          skippedDirectoryCount += 1;
+        }
+      }
+    }
+  }
+
+  return { files, skippedDirectoryCount };
 }
 
 export async function uploadImagesToR2(
@@ -157,6 +287,33 @@ function isImageFile(file: File) {
 
 function getPath(file: File) {
   return file.webkitRelativePath || file.name;
+}
+
+function normalizeDroppedPath(path: string) {
+  return path.replace(/^[\\/]+/, "");
+}
+
+function readFileEntry(entry: BrowserFileSystemFileEntry) {
+  return new Promise<File>((resolve, reject) => {
+    entry.file(resolve, reject);
+  });
+}
+
+async function readAllDirectoryEntries(entry: BrowserFileSystemDirectoryEntry) {
+  const reader = entry.createReader();
+  const entries: BrowserFileSystemEntry[] = [];
+
+  while (true) {
+    const batch = await new Promise<BrowserFileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+
+    if (batch.length === 0) {
+      return entries;
+    }
+
+    entries.push(...batch);
+  }
 }
 
 function guessMime(name: string) {

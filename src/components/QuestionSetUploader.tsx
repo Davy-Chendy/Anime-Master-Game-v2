@@ -3,10 +3,15 @@
 import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import {
+  buildLocalUploadQuestionImport,
+  extractCreationToolLabelFromFilename,
   filesToUploadableImages,
   getR2UploadConfigStatus,
+  readDroppedUploadFiles,
+  toUploadSourceFiles,
   uploadImagesToR2,
   type R2UploadItemResult,
+  type UploadSourceFile,
   type UploadProgress,
   type UploadableImage,
 } from "@/lib/r2Upload";
@@ -18,6 +23,7 @@ import {
   parseImageUrlsText,
   parseQuestionImportText,
   prepareQuestionSetForStart,
+  type QuestionImportItem,
 } from "@/lib/cloudflareRooms";
 import type {
   CommunityQuestionSetSort,
@@ -168,14 +174,8 @@ function formatBytes(bytes: number) {
   return `${bytes} B`;
 }
 
-function isCurrentFolderFile(file: File) {
-  const relativePath = file.webkitRelativePath || "";
-
-  if (!relativePath) {
-    return true;
-  }
-
-  return relativePath.split(/[\\/]/).filter(Boolean).length <= 2;
+function isCurrentFolderFile(sourceFile: UploadSourceFile) {
+  return sourceFile.path.split(/[\\/]/).filter(Boolean).length <= 2;
 }
 
 async function pickCurrentFolderFiles() {
@@ -259,6 +259,10 @@ export function QuestionSetUploader({
   }, [urlText]);
   const urlsTextForPreview = previewUrls.join("\n");
   const progressPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const recognizedLabelCount = useMemo(
+    () => items.filter((item) => extractCreationToolLabelFromFilename(item.name)).length,
+    [items],
+  );
 
   useEffect(() => {
     if (mode !== "community") {
@@ -323,14 +327,13 @@ export function QuestionSetUploader({
     }
   }
 
-  function addFiles(fileList: FileList | File[] | null) {
-    if (!fileList) {
+  function addFiles(sourceFiles: UploadSourceFile[] | null, skippedDirectoryCount = 0) {
+    if (!sourceFiles) {
       return;
     }
 
-    const selectedFiles = Array.from(fileList);
-    const currentFolderFiles = selectedFiles.filter(isCurrentFolderFile);
-    const skippedNestedFiles = selectedFiles.length - currentFolderFiles.length;
+    const currentFolderFiles = sourceFiles.filter(isCurrentFolderFile);
+    const skippedNestedFiles = sourceFiles.length - currentFolderFiles.length;
     const imageFiles = filesToUploadableImages(currentFolderFiles);
     const oversizedFiles = imageFiles.filter((item) => item.size > maxUploadImageBytes);
     const incoming = imageFiles.filter((item) => item.size <= maxUploadImageBytes);
@@ -360,6 +363,7 @@ export function QuestionSetUploader({
     const warningParts = [
       sortedItems.length > maxUploadImageCount ? `一次最多选择 ${maxUploadImageCount} 张图片，已保留前 ${maxUploadImageCount} 张` : "",
       skippedNestedFiles > 0 ? `已忽略 ${skippedNestedFiles} 个子文件夹内的文件` : "",
+      skippedDirectoryCount > 0 ? `已忽略 ${skippedDirectoryCount} 个子文件夹` : "",
       oversizedFiles.length > 0 ? `已跳过 ${oversizedFiles.length} 张超过 ${formatBytes(maxUploadImageBytes)} 的图片` : "",
       skippedNonImages > 0 ? `已忽略 ${skippedNonImages} 个非图片文件` : "",
     ].filter(Boolean);
@@ -380,7 +384,7 @@ export function QuestionSetUploader({
       const pickedFiles = await pickCurrentFolderFiles();
 
       if (pickedFiles) {
-        addFiles(pickedFiles);
+        addFiles(toUploadSourceFiles(pickedFiles));
         return;
       }
     } catch (error) {
@@ -409,10 +413,17 @@ export function QuestionSetUploader({
     }
   }
 
-  function handleDrop(event: DragEvent<HTMLDivElement>) {
+  async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDragging(false);
-    addFiles(event.dataTransfer.files);
+    const dataTransfer = event.dataTransfer;
+
+    try {
+      const dropped = await readDroppedUploadFiles(dataTransfer);
+      addFiles(dropped.files, dropped.skippedDirectoryCount);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "读取拖入的文件夹失败，请重试");
+    }
   }
 
   async function readJsonlFiles(fileList: FileList | File[] | null) {
@@ -443,8 +454,11 @@ export function QuestionSetUploader({
     readJsonlFiles(event.dataTransfer.files);
   }
 
-  async function createQuestionSetFromUrls(imageUrls: string[]) {
-    if (imageUrls.length === 0) {
+  async function createQuestionSetFromUploadedQuestions(
+    questions: QuestionImportItem[],
+    creationMethod: QuestionSetCreationMethod,
+  ) {
+    if (questions.length === 0) {
       onError("至少需要一张图片");
       return null;
     }
@@ -454,7 +468,8 @@ export function QuestionSetUploader({
       presenterPlayerId,
       title: getDraftQuestionSetTitle(room),
       description: "",
-      imageUrls,
+      questions,
+      creationMethod,
     });
 
     setQuestionSet(createdQuestionSet);
@@ -479,16 +494,14 @@ export function QuestionSetUploader({
       const uploadResults = await uploadImagesToR2(items, setProgress);
       setResults(uploadResults);
 
-      const imageUrls = uploadResults
-        .filter((result): result is Extract<R2UploadItemResult, { ok: true }> => result.ok)
-        .map((result) => result.url);
+      const { questions, creationMethod } = buildLocalUploadQuestionImport(items, uploadResults);
 
-      if (imageUrls.length === 0) {
+      if (questions.length === 0) {
         onError("没有图片上传成功，未创建题库");
         return;
       }
 
-      await createQuestionSetFromUrls(imageUrls);
+      await createQuestionSetFromUploadedQuestions(questions, creationMethod);
     } catch (error) {
       onError(error instanceof Error ? error.message : "上传题库失败，请稍后重试");
     } finally {
@@ -768,7 +781,7 @@ export function QuestionSetUploader({
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
             >
-              <p className="text-base font-semibold text-slate-900">拖拽图片到这里</p>
+              <p className="text-base font-semibold text-slate-900">拖拽图片或文件夹到这里</p>
               <div className="mt-4 flex flex-wrap justify-center gap-3">
                 <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()}>
                   选择图片
@@ -776,14 +789,23 @@ export function QuestionSetUploader({
                 <Button type="button" variant="secondary" onClick={handleChooseFolder}>
                   选择文件夹
                 </Button>
-                <Button type="button" variant="secondary" onClick={clearFiles} disabled={isUploading || items.length === 0}>
-                  清空
-                </Button>
               </div>
               <p className="mt-3 text-xs text-[var(--muted)]">
                 文件夹只取当前层图片，不读取子文件夹；单张不超过 {formatBytes(maxUploadImageBytes)}，最多 {maxUploadImageCount} 张
               </p>
-              <input ref={fileInputRef} className="hidden" type="file" accept="image/*" multiple onChange={(event) => addFiles(event.target.files)} />
+              {items.length > 0 ? (
+                <p className="mt-2 text-xs font-medium text-slate-700">
+                  已从文件名识别 {recognizedLabelCount}/{items.length} 个答案
+                </p>
+              ) : null}
+              <input
+                ref={fileInputRef}
+                className="hidden"
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(event) => addFiles(toUploadSourceFiles(event.target.files ?? []))}
+              />
               <input
                 ref={folderInputRef}
                 className="hidden"
@@ -791,7 +813,7 @@ export function QuestionSetUploader({
                 accept="image/*"
                 multiple
                 {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
-                onChange={(event) => addFiles(event.target.files)}
+                onChange={(event) => addFiles(toUploadSourceFiles(event.target.files ?? []))}
               />
             </div>
             <div className="grid gap-3 text-sm sm:grid-cols-3">
@@ -834,9 +856,14 @@ export function QuestionSetUploader({
                 有图片上传失败，可以再次点击上传重试
               </p>
             ) : null}
-            <Button className="w-full sm:w-auto" type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
-              {isUploading ? "上传中…" : "上传并创建"}
-            </Button>
+            <div className="flex items-center justify-between gap-3">
+              <Button type="button" variant="secondary" onClick={clearFiles} disabled={isUploading || items.length === 0}>
+                清空
+              </Button>
+              <Button type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
+                {isUploading ? "上传中…" : "上传并创建"}
+              </Button>
+            </div>
           </div>
         ) : null}
 

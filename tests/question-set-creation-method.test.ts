@@ -385,10 +385,23 @@ test("new question sets default by creation path, publishing can confirm the met
       title: "Assisted",
       imageUrlsText: "{\"image_url\":\"https://example.com/assisted.webp\",\"label_text\":\"Example\"}",
     });
+    const localFilenameAssisted = await createUploadedQuestionSet({
+      roomId: "room-1",
+      presenterPlayerId: "host",
+      title: "Local filename assisted",
+      questions: [{ imageUrl: "https://example.com/local.webp", labelText: "樱满集-罪恶王冠" }],
+      creationMethod: "creation_tool_assisted",
+    });
 
     assert.equal(manual.creationMethod, "player_manual");
     assert.equal(assisted.creationMethod, "creation_tool_assisted");
-    assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM questions WHERE question_set_id IN (?,?)").get(manual.id, assisted.id).count, 0);
+    assert.equal(localFilenameAssisted.creationMethod, "creation_tool_assisted");
+    assert.deepEqual(localFilenameAssisted.questions?.map((question) => question.labelText), ["樱满集-罪恶王冠"]);
+    assert.equal(
+      db.sqlite.prepare("SELECT COUNT(*) count FROM questions WHERE question_set_id IN (?,?,?)")
+        .get(manual.id, assisted.id, localFilenameAssisted.id).count,
+      0,
+    );
     const storedManual = db.sqlite.prepare("SELECT manifest_version,manifest_revision,manifest_json,image_urls_text FROM question_sets WHERE id=?").get(manual.id);
     assert.equal(storedManual.manifest_version, 1);
     assert.equal(storedManual.manifest_revision, 0);
