@@ -4,9 +4,12 @@ import test from "node:test";
 import {
   buildLocalUploadQuestionImport,
   extractCreationToolLabelFromFilename,
+  findNearestLocalUploadDropTarget,
   filesToUploadableImages,
   getLocalUploadCreationMethod,
+  moveLocalUploadDraftQuestionToIndex,
   readDroppedUploadFiles,
+  removeLocalUploadDraftQuestion,
   toUploadSourceFiles,
 } from "../src/lib/r2Upload";
 
@@ -105,8 +108,8 @@ test("successful upload results stay paired with filenames and determine the who
     successResult("questions/002-答案二.jpg", "https://assets.example.com/two.webp"),
   ]);
   assert.deepEqual(mixed.questions, [
-    { imageUrl: "https://assets.example.com/one.webp", labelText: "答案一" },
-    { imageUrl: "https://assets.example.com/two.webp", labelText: null },
+    { key: "questions/001-答案一-mosaic.jpg", imageUrl: "https://assets.example.com/one.webp", labelText: "答案一" },
+    { key: "questions/002-答案二.jpg", imageUrl: "https://assets.example.com/two.webp", labelText: null },
   ]);
   assert.equal(mixed.creationMethod, "player_manual");
 
@@ -115,6 +118,68 @@ test("successful upload results stay paired with filenames and determine the who
     { ok: false as const, path: "questions/002-答案二.jpg", error: "failed", rawBytes: 128 },
   ]);
   assert.equal(recognizedOnly.creationMethod, "creation_tool_assisted");
+});
+
+test("local upload drafts can be reordered without mutating the original list", () => {
+  const questions = [
+    { key: "easy.jpg", imageUrl: "https://assets.example.com/easy.webp", labelText: null },
+    { key: "medium.jpg", imageUrl: "https://assets.example.com/medium.webp", labelText: null },
+    { key: "hard.jpg", imageUrl: "https://assets.example.com/hard.webp", labelText: null },
+  ];
+
+  const reordered = moveLocalUploadDraftQuestionToIndex(questions, "hard.jpg", 0);
+
+  assert.deepEqual(reordered.map((question) => question.key), ["hard.jpg", "easy.jpg", "medium.jpg"]);
+  assert.deepEqual(questions.map((question) => question.key), ["easy.jpg", "medium.jpg", "hard.jpg"]);
+  assert.equal(moveLocalUploadDraftQuestionToIndex(questions, "missing.jpg", 0), questions);
+
+  const insertedBetween = moveLocalUploadDraftQuestionToIndex(questions, "easy.jpg", 2);
+  assert.deepEqual(insertedBetween.map((question) => question.key), ["medium.jpg", "easy.jpg", "hard.jpg"]);
+  const movedToEnd = moveLocalUploadDraftQuestionToIndex(questions, "easy.jpg", questions.length);
+  assert.deepEqual(movedToEnd.map((question) => question.key), ["medium.jpg", "hard.jpg", "easy.jpg"]);
+
+  const remaining = removeLocalUploadDraftQuestion(reordered, "easy.jpg");
+  assert.deepEqual(remaining.map((question) => question.key), ["hard.jpg", "medium.jpg"]);
+  assert.deepEqual(reordered.map((question) => question.key), ["hard.jpg", "easy.jpg", "medium.jpg"]);
+});
+
+test("local upload drop targets cover card edges, grid gaps, and trailing blank space", () => {
+  const cardRects = [
+    { key: "one", index: 0, left: 0, right: 160, top: 0, bottom: 90 },
+    { key: "two", index: 1, left: 176, right: 336, top: 0, bottom: 90 },
+    { key: "three", index: 2, left: 0, right: 160, top: 106, bottom: 196 },
+  ];
+
+  assert.deepEqual(findNearestLocalUploadDropTarget(-30, 45, cardRects), {
+    insertionIndex: 0,
+    cardKey: "one",
+    side: "before",
+  });
+  assert.deepEqual(findNearestLocalUploadDropTarget(168, 45, cardRects), {
+    insertionIndex: 1,
+    cardKey: "one",
+    side: "after",
+  });
+  assert.deepEqual(findNearestLocalUploadDropTarget(40, 100, cardRects), {
+    insertionIndex: 2,
+    cardKey: "three",
+    side: "before",
+  });
+  assert.deepEqual(findNearestLocalUploadDropTarget(500, 150, cardRects), {
+    insertionIndex: 3,
+    cardKey: "three",
+    side: "after",
+  });
+});
+
+test("local upload drop target rejects unusable pointer or card geometry", () => {
+  assert.equal(findNearestLocalUploadDropTarget(0, 0, []), null);
+  assert.equal(findNearestLocalUploadDropTarget(Number.NaN, 0, [
+    { key: "one", index: 0, left: 0, right: 160, top: 0, bottom: 90 },
+  ]), null);
+  assert.equal(findNearestLocalUploadDropTarget(0, 0, [
+    { key: "invalid", index: 0, left: Number.NaN, right: 160, top: 0, bottom: 90 },
+  ]), null);
 });
 
 test("folder drops read every current-level batch and ignore nested directories", async () => {

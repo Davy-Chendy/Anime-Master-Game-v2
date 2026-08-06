@@ -64,6 +64,27 @@ export type R2UploadFailure = {
 
 export type R2UploadItemResult = R2UploadResult | R2UploadFailure;
 
+export type LocalUploadDraftQuestion = {
+  key: string;
+  imageUrl: string;
+  labelText: string | null;
+};
+
+export type LocalUploadDropCardRect = {
+  key: string;
+  index: number;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+};
+
+export type LocalUploadDropTarget = {
+  insertionIndex: number;
+  cardKey: string;
+  side: "before" | "after";
+};
+
 type PreparedImage = {
   blob: Blob;
   uploadName: string;
@@ -157,6 +178,7 @@ export function buildLocalUploadQuestionImport(
   const questions = uploadResults
     .filter((result): result is R2UploadResult => result.ok)
     .map((result) => ({
+      key: result.path,
       imageUrl: result.url,
       labelText: extractCreationToolLabelFromFilename(itemByPath.get(result.path)?.name ?? ""),
     }));
@@ -165,6 +187,103 @@ export function buildLocalUploadQuestionImport(
     questions,
     creationMethod: getLocalUploadCreationMethod(questions.map((question) => question.labelText)),
   };
+}
+
+export function moveLocalUploadDraftQuestionToIndex(
+  questions: LocalUploadDraftQuestion[],
+  sourceKey: string,
+  insertionIndex: number,
+) {
+  const sourceIndex = questions.findIndex((question) => question.key === sourceKey);
+
+  if (sourceIndex < 0 || !Number.isInteger(insertionIndex)) {
+    return questions;
+  }
+
+  const boundedInsertionIndex = Math.max(0, Math.min(insertionIndex, questions.length));
+  const targetIndex = boundedInsertionIndex > sourceIndex ? boundedInsertionIndex - 1 : boundedInsertionIndex;
+  if (sourceIndex === targetIndex) {
+    return questions;
+  }
+
+  const nextQuestions = questions.slice();
+  const [movedQuestion] = nextQuestions.splice(sourceIndex, 1);
+  nextQuestions.splice(targetIndex, 0, movedQuestion);
+  return nextQuestions;
+}
+
+export function findNearestLocalUploadDropTarget(
+  pointerX: number,
+  pointerY: number,
+  cardRects: LocalUploadDropCardRect[],
+): LocalUploadDropTarget | null {
+  if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
+    return null;
+  }
+
+  const cards = cardRects
+    .filter((card) => Number.isInteger(card.index) && [card.left, card.right, card.top, card.bottom].every(Number.isFinite))
+    .slice()
+    .sort((a, b) => a.index - b.index);
+  if (cards.length === 0) {
+    return null;
+  }
+
+  const rows: Array<{ top: number; bottom: number; cards: LocalUploadDropCardRect[] }> = [];
+  for (const card of cards) {
+    const row = rows[rows.length - 1];
+    if (row && Math.abs(card.top - row.top) <= 4) {
+      row.top = Math.min(row.top, card.top);
+      row.bottom = Math.max(row.bottom, card.bottom);
+      row.cards.push(card);
+    } else {
+      rows.push({ top: card.top, bottom: card.bottom, cards: [card] });
+    }
+  }
+
+  let selectedRow = rows[0];
+  let selectedRowDistance = verticalDistanceToRange(pointerY, selectedRow.top, selectedRow.bottom);
+  for (const row of rows.slice(1)) {
+    const distance = verticalDistanceToRange(pointerY, row.top, row.bottom);
+    if (distance < selectedRowDistance || (distance === selectedRowDistance && row.top > selectedRow.top)) {
+      selectedRow = row;
+      selectedRowDistance = distance;
+    }
+  }
+
+  let target: LocalUploadDropTarget | null = null;
+  let targetDistance = Number.POSITIVE_INFINITY;
+  for (const card of selectedRow.cards) {
+    for (const candidate of [
+      { insertionIndex: card.index, cardKey: card.key, side: "before" as const, edgeX: card.left },
+      { insertionIndex: card.index + 1, cardKey: card.key, side: "after" as const, edgeX: card.right },
+    ]) {
+      const distance = Math.abs(pointerX - candidate.edgeX);
+      if (distance < targetDistance) {
+        target = {
+          insertionIndex: candidate.insertionIndex,
+          cardKey: candidate.cardKey,
+          side: candidate.side,
+        };
+        targetDistance = distance;
+      }
+    }
+  }
+
+  return target;
+}
+
+function verticalDistanceToRange(value: number, start: number, end: number) {
+  if (value < start) return start - value;
+  if (value > end) return value - end;
+  return 0;
+}
+
+export function removeLocalUploadDraftQuestion(
+  questions: LocalUploadDraftQuestion[],
+  questionKey: string,
+) {
+  return questions.filter((question) => question.key !== questionKey);
 }
 
 export async function readDroppedUploadFiles(dataTransfer: DataTransfer): Promise<DroppedUploadFiles> {

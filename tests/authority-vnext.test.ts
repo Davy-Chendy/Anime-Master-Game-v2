@@ -2696,19 +2696,38 @@ test("v2 aggregate projection outbox keeps its legacy full roster replacement se
   );
 });
 
-test("v3 aggregate projection stores nickname swaps without touching normalized players", async () => {
+test("active-game joins reject normalized duplicate nicknames without poisoning final projection", async () => {
   const { state, authority, d1 } = createSqliteProjectionAuthority(2);
   const p0 = socketFor(state, "p0");
   const p1 = socketFor(state, "p1");
-  authority.handleMutation(p0, envelope("p0", 1, "joinRoom", { nickname: "P1", role: "PLAYER" }), Date.now());
-  authority.handleMutation(p1, envelope("p1", 1, "joinRoom", { nickname: "P0", role: "PLAYER" }), Date.now() + 1);
-  const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), Date.now() + 2);
+  const now = Date.now();
+  const beforePlayers = structuredClone(authority.getAggregate()!.players);
+
+  const rejectedAction = envelope("p0", 1, "joinRoom", { nickname: " p1 ", role: "PLAYER" });
+  const rejected = authority.handleMutation(p0, rejectedAction, now);
+  assert.equal(rejected.terminal, true);
+  assert.match(rejected.error ?? "", /昵称已在房间内使用/);
+  assert.deepEqual(rejected.publicDeltas, []);
+  assert.deepEqual(authority.getAggregate()!.players, beforePlayers);
+
+  const replayed = authority.handleMutation(p0, rejectedAction, now + 1);
+  assert.equal(replayed.duplicate, true);
+  assert.equal(replayed.error, rejected.error);
+  assert.deepEqual(authority.getAggregate()!.players, beforePlayers);
+
+  const reconnected = authority.handleMutation(p1, envelope("p1", 1, "joinRoom", { nickname: " p1 ", role: "PLAYER" }), now + 2);
+  assert.equal(reconnected.error, undefined, "the same player may reconnect with its own normalized nickname");
+  const renamed = authority.handleMutation(p0, envelope("p0", 2, "joinRoom", { nickname: "Renamed", role: "PLAYER" }), now + 3);
+  assert.equal(renamed.error, undefined);
+
+  const outcome = authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), now + 4);
   await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
 
   assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(state.storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_projection_outbox").get().count, 0);
   const projected = decodeRoomState(d1.db.prepare("SELECT * FROM rooms WHERE id='r1'").get() as never);
   assert.deepEqual(projected.filter((player) => player.id !== "host").map(({ id, nickname }) => ({ id, nickname })), [
-    { id: "p0", nickname: "P1" }, { id: "p1", nickname: "P0" },
+    { id: "p0", nickname: "Renamed" }, { id: "p1", nickname: "p1" },
   ]);
   assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM player_write_audit").get().count, 0);
 });

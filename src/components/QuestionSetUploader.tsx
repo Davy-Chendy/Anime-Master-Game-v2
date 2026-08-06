@@ -1,16 +1,21 @@
 "use client";
 
-import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import {
   buildLocalUploadQuestionImport,
   extractCreationToolLabelFromFilename,
+  findNearestLocalUploadDropTarget,
   filesToUploadableImages,
+  getLocalUploadCreationMethod,
   getR2UploadConfigStatus,
+  moveLocalUploadDraftQuestionToIndex,
   readDroppedUploadFiles,
+  removeLocalUploadDraftQuestion,
   toUploadSourceFiles,
   uploadImagesToR2,
-  type R2UploadItemResult,
+  type LocalUploadDraftQuestion,
+  type LocalUploadDropTarget,
   type UploadSourceFile,
   type UploadProgress,
   type UploadableImage,
@@ -23,7 +28,6 @@ import {
   parseImageUrlsText,
   parseQuestionImportText,
   prepareQuestionSetForStart,
-  type QuestionImportItem,
 } from "@/lib/cloudflareRooms";
 import type {
   CommunityQuestionSetSort,
@@ -212,12 +216,16 @@ export function QuestionSetUploader({
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const jsonlInputRef = useRef<HTMLInputElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const draggedDraftKeyRef = useRef<string | null>(null);
   const communityRequestIdRef = useRef(0);
   const communityPreviewRequestIdRef = useRef(0);
   const communityDetailCacheRef = useRef(new Map<string, QuestionSet>());
   const [mode, setMode] = useState<SetupMode>("upload");
   const [urlText, setUrlText] = useState("");
   const [items, setItems] = useState<UploadableImage[]>([]);
+  const [localUploadDraft, setLocalUploadDraft] = useState<LocalUploadDraftQuestion[] | null>(null);
+  const [draggedDraftKey, setDraggedDraftKey] = useState<string | null>(null);
+  const [draftDropTarget, setDraftDropTarget] = useState<LocalUploadDropTarget | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isDraggingImport, setIsDraggingImport] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -234,13 +242,23 @@ export function QuestionSetUploader({
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
   const [isConfirmingQuestionSet, setIsConfirmingQuestionSet] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
-  const [results, setResults] = useState<R2UploadItemResult[]>([]);
   const [questionSet, setQuestionSet] = useState<QuestionSet | CommunityQuestionSetSummary | null>(null);
   const configStatus = getR2UploadConfigStatus();
 
   const detailedQuestionSet = isQuestionSetDetail(questionSet) ? questionSet : null;
-  const previewUrls = useMemo(() => getQuestionSetUrls(detailedQuestionSet), [detailedQuestionSet]);
-  const previewItems = useMemo(() => getQuestionSetPreviewItems(detailedQuestionSet), [detailedQuestionSet]);
+  const previewUrls = useMemo(
+    () => localUploadDraft?.map((question) => question.imageUrl) ?? getQuestionSetUrls(detailedQuestionSet),
+    [detailedQuestionSet, localUploadDraft],
+  );
+  const previewItems = useMemo(
+    () => localUploadDraft?.map((question, index) => ({
+      key: question.key,
+      url: question.imageUrl,
+      labelText: question.labelText,
+      index,
+    })) ?? getQuestionSetPreviewItems(detailedQuestionSet),
+    [detailedQuestionSet, localUploadDraft],
+  );
   const importPreview = useMemo(() => {
     try {
       const importItems = parseQuestionImportText(urlText);
@@ -293,28 +311,10 @@ export function QuestionSetUploader({
 
   function resetCreatedSet() {
     setQuestionSet(null);
-    setResults([]);
-  }
-
-  async function markQuestionSetReady(selectedQuestionSet: Pick<QuestionSet, "id">) {
-    if (!room.id) {
-      return;
-    }
-
-    setIsConfirmingQuestionSet(true);
-    try {
-      const nextRoom = await prepareQuestionSetForStart({
-        roomId: room.id,
-        presenterPlayerId,
-        questionSetId: selectedQuestionSet.id,
-      });
-      onRoomUpdated({ ...room, ...nextRoom, players: room.players });
-      clearError();
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "通知房主失败，请稍后重试");
-    } finally {
-      setIsConfirmingQuestionSet(false);
-    }
+    setLocalUploadDraft(null);
+    draggedDraftKeyRef.current = null;
+    setDraggedDraftKey(null);
+    setDraftDropTarget(null);
   }
 
   function switchMode(nextMode: SetupMode) {
@@ -328,7 +328,7 @@ export function QuestionSetUploader({
   }
 
   function addFiles(sourceFiles: UploadSourceFile[] | null, skippedDirectoryCount = 0) {
-    if (!sourceFiles) {
+    if (!sourceFiles || isConfirmingQuestionSet) {
       return;
     }
 
@@ -380,6 +380,10 @@ export function QuestionSetUploader({
   }
 
   async function handleChooseFolder() {
+    if (isConfirmingQuestionSet) {
+      return;
+    }
+
     try {
       const pickedFiles = await pickCurrentFolderFiles();
 
@@ -400,6 +404,10 @@ export function QuestionSetUploader({
   }
 
   function clearFiles() {
+    if (isConfirmingQuestionSet) {
+      return;
+    }
+
     setItems([]);
     setProgress(emptyProgress);
     resetCreatedSet();
@@ -416,6 +424,9 @@ export function QuestionSetUploader({
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDragging(false);
+    if (isConfirmingQuestionSet) {
+      return;
+    }
     const dataTransfer = event.dataTransfer;
 
     try {
@@ -454,30 +465,6 @@ export function QuestionSetUploader({
     readJsonlFiles(event.dataTransfer.files);
   }
 
-  async function createQuestionSetFromUploadedQuestions(
-    questions: QuestionImportItem[],
-    creationMethod: QuestionSetCreationMethod,
-  ) {
-    if (questions.length === 0) {
-      onError("至少需要一张图片");
-      return null;
-    }
-
-    const createdQuestionSet = await createUploadedQuestionSet({
-      roomId: room.id ?? "",
-      presenterPlayerId,
-      title: getDraftQuestionSetTitle(room),
-      description: "",
-      questions,
-      creationMethod,
-    });
-
-    setQuestionSet(createdQuestionSet);
-    clearError();
-    scrollToPreview();
-    return createdQuestionSet;
-  }
-
   async function handleUpload() {
     clearError();
 
@@ -492,18 +479,18 @@ export function QuestionSetUploader({
 
     try {
       const uploadResults = await uploadImagesToR2(items, setProgress);
-      setResults(uploadResults);
-
-      const { questions, creationMethod } = buildLocalUploadQuestionImport(items, uploadResults);
+      const { questions } = buildLocalUploadQuestionImport(items, uploadResults);
 
       if (questions.length === 0) {
-        onError("没有图片上传成功，未创建题库");
+        onError("没有图片上传成功，无法生成预览");
         return;
       }
 
-      await createQuestionSetFromUploadedQuestions(questions, creationMethod);
+      setLocalUploadDraft(questions);
+      clearError();
+      scrollToPreview();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "上传题库失败，请稍后重试");
+      onError(error instanceof Error ? error.message : "上传图片失败，请稍后重试");
     } finally {
       setIsUploading(false);
     }
@@ -709,18 +696,157 @@ export function QuestionSetUploader({
   }
 
   async function handleSelectCommunitySet(selectedQuestionSet: QuestionSet | CommunityQuestionSetSummary) {
+    setLocalUploadDraft(null);
     setQuestionSet(selectedQuestionSet);
     clearError();
     scrollToPreview();
   }
 
+  function moveDraftQuestion(sourceKey: string, insertionIndex: number) {
+    setLocalUploadDraft((current) => current
+      ? moveLocalUploadDraftQuestionToIndex(current, sourceKey, insertionIndex)
+      : current);
+  }
+
+  function handleDraftDragStart(event: DragEvent<HTMLElement>, questionKey: string) {
+    draggedDraftKeyRef.current = questionKey;
+    setDraggedDraftKey(questionKey);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", questionKey);
+  }
+
+  function getDraftDropTarget(container: HTMLDivElement, pointerX: number, pointerY: number) {
+    const cardRects = Array.from(container.querySelectorAll<HTMLElement>("[data-draft-question-key]"))
+      .map((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          key: element.dataset.draftQuestionKey ?? "",
+          index: Number(element.dataset.draftQuestionIndex),
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          bottom: bounds.bottom,
+        };
+      });
+    return findNearestLocalUploadDropTarget(pointerX, pointerY, cardRects);
+  }
+
+  function clearDraftDragState() {
+    draggedDraftKeyRef.current = null;
+    setDraggedDraftKey(null);
+    setDraftDropTarget(null);
+  }
+
+  function handleDraftGridDragOver(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const target = getDraftDropTarget(event.currentTarget, event.clientX, event.clientY);
+    setDraftDropTarget((current) => (
+      current?.insertionIndex === target?.insertionIndex
+      && current?.cardKey === target?.cardKey
+      && current?.side === target?.side
+        ? current
+        : target
+    ));
+  }
+
+  function handleDraftGridDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const sourceKey = draggedDraftKeyRef.current || event.dataTransfer.getData("text/plain");
+    const target = getDraftDropTarget(event.currentTarget, event.clientX, event.clientY);
+    if (sourceKey && target) {
+      moveDraftQuestion(sourceKey, target.insertionIndex);
+    }
+    clearDraftDragState();
+  }
+
+  function handleDraftGridDragLeave(event: DragEvent<HTMLDivElement>) {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
+      return;
+    }
+    setDraftDropTarget(null);
+  }
+
+  function handleDraftKeyboardMove(event: KeyboardEvent<HTMLElement>, questionKey: string) {
+    if (
+      event.target !== event.currentTarget
+      || isConfirmingQuestionSet
+      || !localUploadDraft
+      || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
+    ) {
+      return;
+    }
+
+    const currentIndex = localUploadDraft.findIndex((question) => question.key === questionKey);
+    const offset = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+    const targetIndex = currentIndex + offset;
+    if (targetIndex < 0 || targetIndex >= localUploadDraft.length) {
+      return;
+    }
+
+    event.preventDefault();
+    moveDraftQuestion(questionKey, offset < 0 ? targetIndex : targetIndex + 1);
+  }
+
+  function handleDeleteDraftQuestion(questionKey: string) {
+    if (isConfirmingQuestionSet) {
+      return;
+    }
+    setLocalUploadDraft((current) => current ? removeLocalUploadDraftQuestion(current, questionKey) : current);
+  }
+
   async function handleConfirmQuestionSet() {
-    if (!questionSet) {
+    if (!room.id) {
+      onError("当前房间信息不完整，请刷新后重试");
+      return;
+    }
+
+    if (!localUploadDraft && !questionSet) {
       onError("请先创建或选择题库");
       return;
     }
 
-    await markQuestionSetReady(questionSet);
+    if (localUploadDraft?.length === 0) {
+      onError("请至少保留一张图片");
+      return;
+    }
+
+    setIsConfirmingQuestionSet(true);
+    try {
+      let selectedQuestionSet = questionSet;
+
+      if (localUploadDraft) {
+        selectedQuestionSet = await createUploadedQuestionSet({
+          roomId: room.id,
+          presenterPlayerId,
+          title: getDraftQuestionSetTitle(room),
+          description: "",
+          questions: localUploadDraft.map((question) => ({
+            imageUrl: question.imageUrl,
+            labelText: question.labelText,
+          })),
+          creationMethod: getLocalUploadCreationMethod(localUploadDraft.map((question) => question.labelText)),
+        });
+        setQuestionSet(selectedQuestionSet);
+        setLocalUploadDraft(null);
+      }
+
+      if (!selectedQuestionSet) {
+        throw new Error("请先创建或选择题库");
+      }
+
+      const nextRoom = await prepareQuestionSetForStart({
+        roomId: room.id,
+        presenterPlayerId,
+        questionSetId: selectedQuestionSet.id,
+      });
+      onRoomUpdated({ ...room, ...nextRoom, players: room.players });
+      clearError();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "确认题库失败，请稍后重试");
+    } finally {
+      setIsConfirmingQuestionSet(false);
+    }
   }
 
   async function handleCopyUrlsText() {
@@ -783,10 +909,10 @@ export function QuestionSetUploader({
             >
               <p className="text-base font-semibold text-slate-900">拖拽图片或文件夹到这里</p>
               <div className="mt-4 flex flex-wrap justify-center gap-3">
-                <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()}>
+                <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()} disabled={isConfirmingQuestionSet}>
                   选择图片
                 </Button>
-                <Button type="button" variant="secondary" onClick={handleChooseFolder}>
+                <Button type="button" variant="secondary" onClick={handleChooseFolder} disabled={isConfirmingQuestionSet}>
                   选择文件夹
                 </Button>
               </div>
@@ -857,11 +983,11 @@ export function QuestionSetUploader({
               </p>
             ) : null}
             <div className="flex items-center justify-between gap-3">
-              <Button type="button" variant="secondary" onClick={clearFiles} disabled={isUploading || items.length === 0}>
+              <Button type="button" variant="secondary" onClick={clearFiles} disabled={isUploading || isConfirmingQuestionSet || items.length === 0}>
                 清空
               </Button>
-              <Button type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
-                {isUploading ? "上传中…" : "上传并创建"}
+              <Button type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || isConfirmingQuestionSet || items.length === 0}>
+                {isUploading ? "上传中…" : "上传并预览"}
               </Button>
             </div>
           </div>
@@ -1119,40 +1245,112 @@ export function QuestionSetUploader({
           <h3 className="text-base font-semibold text-slate-950">确认题库</h3>
         </div>
 
-        {questionSet ? (
+        {localUploadDraft !== null || questionSet ? (
           <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <div>
-                <p className="font-semibold text-slate-950">{questionSet.title}</p>
+                <p className="font-semibold text-slate-950">
+                  {localUploadDraft !== null ? getDraftQuestionSetTitle(room) : questionSet?.title}
+                </p>
                 <p className="mt-1 text-sm text-[var(--muted)]">
-                  {questionSet.imageCount} 张图片，{questionSet.isPublic ? "社区公开题库" : "未发布题库"}
-                  {questionSet.isPublic ? `，上传者：${getQuestionSetUploaderName(questionSet)}` : ""}
+                  {localUploadDraft !== null
+                    ? `${localUploadDraft.length} 张图片，尚未确认题库`
+                    : `${questionSet?.imageCount ?? 0} 张图片，${questionSet?.isPublic ? "社区公开题库" : "未发布题库"}`}
+                  {questionSet?.isPublic ? `，上传者：${getQuestionSetUploaderName(questionSet)}` : ""}
                 </p>
               </div>
-              <Button type="button" onClick={handleConfirmQuestionSet} disabled={isConfirmingQuestionSet}>
+              <Button
+                type="button"
+                onClick={handleConfirmQuestionSet}
+                disabled={isConfirmingQuestionSet || localUploadDraft?.length === 0}
+              >
                 {isConfirmingQuestionSet ? "确认中…" : "确认使用这个题库"}
               </Button>
             </div>
-            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-              {previewItems.slice(0, 12).map((item) => (
-                <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={item.key}>
-                  <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={item.url} />
+            <div
+              className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4"
+              role="list"
+              onDragLeave={localUploadDraft !== null ? handleDraftGridDragLeave : undefined}
+              onDragOver={localUploadDraft !== null ? handleDraftGridDragOver : undefined}
+              onDrop={localUploadDraft !== null ? handleDraftGridDrop : undefined}
+            >
+              {previewItems.map((item) => (
+                <figure
+                  aria-label={localUploadDraft !== null ? `第 ${item.index + 1} 题，可拖拽或使用方向键调整顺序` : undefined}
+                  className={`relative rounded-md border bg-white p-2 outline-none transition ${
+                    draggedDraftKey === item.key
+                      ? "border-rose-400 opacity-60"
+                      : "border-[var(--line)] focus-visible:border-rose-400 focus-visible:ring-4 focus-visible:ring-rose-100"
+                  } ${localUploadDraft !== null ? "cursor-grab active:cursor-grabbing" : ""}`}
+                  draggable={localUploadDraft !== null && !isConfirmingQuestionSet}
+                  data-draft-question-index={item.index}
+                  data-draft-question-key={item.key}
+                  key={item.key}
+                  role="listitem"
+                  tabIndex={localUploadDraft !== null ? 0 : undefined}
+                  onDragEnd={clearDraftDragState}
+                  onDragStart={(event) => handleDraftDragStart(event, item.key)}
+                  onKeyDown={(event) => handleDraftKeyboardMove(event, item.key)}
+                >
+                  {draftDropTarget?.cardKey === item.key && draftDropTarget.side === "before" ? (
+                    <span aria-hidden="true" className="pointer-events-none absolute -left-2 top-1 z-20 h-[calc(100%-0.5rem)] w-1 rounded-full bg-rose-500 shadow-sm" />
+                  ) : null}
+                  {draftDropTarget?.cardKey === item.key && draftDropTarget.side === "after" ? (
+                    <span aria-hidden="true" className="pointer-events-none absolute -right-2 top-1 z-20 h-[calc(100%-0.5rem)] w-1 rounded-full bg-rose-500 shadow-sm" />
+                  ) : null}
+                  <span className="absolute left-3 top-3 z-10 rounded bg-slate-950/80 px-2 py-1 text-xs font-bold text-white">
+                    {item.index + 1}
+                  </span>
+                  {localUploadDraft !== null ? (
+                    <button
+                      aria-label={`删除第 ${item.index + 1} 题`}
+                      className="group absolute right-0 top-0 z-10 grid h-8 w-8 place-items-center rounded-tr-md focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-200 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isConfirmingQuestionSet}
+                      type="button"
+                      onClick={() => handleDeleteDraftQuestion(item.key)}
+                      onDragStart={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <span className="grid h-6 w-6 place-items-center rounded-full bg-white/95 text-slate-500 shadow-sm ring-1 ring-slate-300/80 transition group-hover:bg-rose-50 group-hover:text-rose-600 group-hover:ring-rose-200">
+                        <svg
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeLinecap="round"
+                          strokeWidth="2.25"
+                          viewBox="0 0 24 24"
+                        >
+                          <path d="M6 6l12 12M18 6L6 18" />
+                        </svg>
+                      </span>
+                    </button>
+                  ) : null}
+                  <img
+                    alt={`第 ${item.index + 1} 题预览`}
+                    className="aspect-video w-full rounded bg-black object-contain"
+                    draggable={false}
+                    src={item.url}
+                  />
                   <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写答案"}>
                     {item.labelText?.trim() || "未填写答案"}
                   </figcaption>
                 </figure>
               ))}
-              {previewUrls.length === 0
-                ? results.slice(0, 12).map((result) =>
-                    result.ok ? (
-                      <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={result.url}>
-                        <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={result.url} />
-                        <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写答案</figcaption>
-                      </figure>
-                    ) : null,
-                  )
-                : null}
+              {localUploadDraft?.length === 0 ? (
+                <p className="col-span-full rounded-md border border-dashed border-[var(--line)] px-4 py-6 text-center text-sm text-[var(--muted)]">
+                  已删除全部图片，请重新上传后再确认。
+                </p>
+              ) : null}
             </div>
+            {localUploadDraft && localUploadDraft.length > 0 ? (
+              <p className="mt-3 text-center text-sm text-[var(--muted)]">
+                拖拽图片可调整题目顺序
+              </p>
+            ) : null}
             {urlsTextForPreview ? (
               <details className="mt-4">
                 <summary className="cursor-pointer text-sm font-semibold text-slate-900">图片链接文本</summary>
@@ -1169,7 +1367,7 @@ export function QuestionSetUploader({
           </div>
         ) : (
           <div className="rounded-md border border-dashed border-[var(--line)] bg-slate-50 px-4 py-6 text-sm text-[var(--muted)]">
-            创建或选择题库后，这里会显示预览
+            上传图片或选择题库后，这里会显示预览
           </div>
         )}
       </section>

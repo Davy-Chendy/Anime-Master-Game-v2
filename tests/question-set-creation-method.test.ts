@@ -389,14 +389,23 @@ test("new question sets default by creation path, publishing can confirm the met
       roomId: "room-1",
       presenterPlayerId: "host",
       title: "Local filename assisted",
-      questions: [{ imageUrl: "https://example.com/local.webp", labelText: "樱满集-罪恶王冠" }],
+      questions: [
+        { imageUrl: "https://example.com/hard.webp", labelText: "困难题" },
+        { imageUrl: "https://example.com/easy.webp", labelText: "简单题" },
+        { imageUrl: "https://example.com/medium.webp", labelText: "中等题" },
+      ],
       creationMethod: "creation_tool_assisted",
     });
 
     assert.equal(manual.creationMethod, "player_manual");
     assert.equal(assisted.creationMethod, "creation_tool_assisted");
     assert.equal(localFilenameAssisted.creationMethod, "creation_tool_assisted");
-    assert.deepEqual(localFilenameAssisted.questions?.map((question) => question.labelText), ["樱满集-罪恶王冠"]);
+    assert.deepEqual(localFilenameAssisted.questions?.map((question) => question.imageUrl), [
+      "https://example.com/hard.webp",
+      "https://example.com/easy.webp",
+      "https://example.com/medium.webp",
+    ]);
+    assert.deepEqual(localFilenameAssisted.questions?.map((question) => question.orderIndex), [0, 1, 2]);
     assert.equal(
       db.sqlite.prepare("SELECT COUNT(*) count FROM questions WHERE question_set_id IN (?,?,?)")
         .get(manual.id, assisted.id, localFilenameAssisted.id).count,

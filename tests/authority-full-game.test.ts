@@ -471,7 +471,13 @@ test("ROUND_REVEAL completes three questions with late join, spectator exclusion
   const first = await submitPersonalAnswers(sim, ["p0", "p1"], "q0-r1-secret");
   secrets.push("q0-r1-secret-p0", "q0-r1-secret-p1");
   for (const playerId of initialPlayers.slice(2)) await sim.act(playerId, "submitForfeitAnswer", { playerId });
-  await sim.act("late", "joinRoom", { nickname: "Late", role: "PLAYER" });
+  const duplicateJoin = await sim.act("late", "joinRoom", { nickname: " p0 ", role: "PLAYER" });
+  assert.equal(duplicateJoin.terminal, true);
+  assert.match(duplicateJoin.error ?? "", /昵称已在房间内使用/);
+  assert.equal(sim.aggregate.players.some((player) => player.id === "late"), false);
+  sim.replayLast("late");
+  const joined = await sim.act("late", "joinRoom", { nickname: "Late", role: "PLAYER" });
+  assert.equal(joined.error, undefined);
   const lateRejected = await sim.act("late", "submitAnswer", { playerId: "late", answerText: "not-eligible-yet" });
   assert.equal(lateRejected.terminal, true);
   await judgeAnswers(sim, first, ["p0"]);

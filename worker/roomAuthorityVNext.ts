@@ -1429,6 +1429,13 @@ export class RoomAuthorityVNext {
   private joinRoom(action: VNextPendingMutation): VNextMutationOutcome {
     const aggregate = this.requireActiveOrEnded();
     const nickname = getString(action.payload.nickname) ?? "玩家";
+    const normalizedNickname = nickname.trim().toLowerCase();
+    if (aggregate.players.some((player) => (
+      player.id !== action.actorId
+      && player.nickname.trim().toLowerCase() === normalizedNickname
+    ))) {
+      throw new TerminalMutationError("该昵称已在房间内使用，请换一个昵称。");
+    }
     const role = action.payload.role === "SPECTATOR" ? "SPECTATOR" as const : "PLAYER" as const;
     const selectedTeam = action.payload.team === "red" || action.payload.team === "blue" ? action.payload.team : null;
     const manualTeamBattle = aggregate.gameSession?.gameMode === "TEAM_BATTLE" && aggregate.room?.teamAssignmentMode === "MANUAL";
