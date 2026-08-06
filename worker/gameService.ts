@@ -251,6 +251,8 @@ function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): 
       room.lobby_team_guess_vote_seconds,
       DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
     ),
+    teamPresenterBlockEnabled:
+      room.lobby_team_presenter_block_enabled === 1 || room.lobby_team_presenter_block_enabled === true,
     teamAssignmentMode: normalizeTeamAssignmentMode(room.lobby_team_assignment_mode),
     teamAssignments: sanitizeTeamAssignments(room, players),
     createdAt: room.created_at,
@@ -385,6 +387,7 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     teamMemberNames,
     activeTeam,
     phase,
+    presenterBlockEnabled: typeof record.presenterBlockEnabled === "boolean" ? record.presenterBlockEnabled : undefined,
     revealBlockCount: normalizeRevealBlockCount(record.revealBlockCount),
     disabledBlocks: Array.isArray(record.disabledBlocks)
       ? normalizeDisabledBlocks(record.disabledBlocks, normalizeRevealBlockCount(record.revealBlockCount))
@@ -550,6 +553,7 @@ function createInitialTeamBattleState(
     previousScores?: Record<TeamBattleTeam, number>;
     revealVoteSeconds?: number;
     guessVoteSeconds?: number;
+    presenterBlockEnabled?: boolean;
     manualAssignments?: Partial<Record<string, TeamBattleTeam>>;
   },
 ): TeamBattleState {
@@ -565,13 +569,15 @@ function createInitialTeamBattleState(
     ? guessers.filter((player) => options.manualAssignments?.[player.id] === "blue").map((player) => player.id)
     : guessers.slice(redTeamSize).map((player) => player.id);
   const teamMemberNames = Object.fromEntries(guessers.map((player) => [player.id, player.nickname.trim() || "已离开玩家"]));
+  const presenterBlockEnabled = options?.presenterBlockEnabled === true;
 
   return {
     teams: { red, blue },
     initialTeams: { red, blue },
     teamMemberNames,
     activeTeam: "red",
-    phase: "PRESENTER_BLOCK",
+    phase: presenterBlockEnabled ? "PRESENTER_BLOCK" : "REVEAL_VOTE",
+    presenterBlockEnabled,
     disabledBlocks: [],
     revealLimit: 1,
     turnNumber: 1,
@@ -589,7 +595,7 @@ function createInitialTeamBattleState(
     previousTurnAction: null,
     pendingGuess: null,
     teamScores: options?.previousScores ?? { red: 0, blue: 0 },
-    message: "等待出题人禁用格子",
+    message: presenterBlockEnabled ? "等待出题人禁用格子" : "红队选格",
   };
 }
 
@@ -642,8 +648,9 @@ async function resetTeamBattleStateForQuestion(
     }
   }
   const activeTeam = getAvailableTeamBattleStartingTeam(teams, questionIndex);
+  const presenterBlockEnabled = state.presenterBlockEnabled !== false;
 
-  return {
+  const nextState: TeamBattleState = {
     teams,
     initialTeams,
     teamMemberNames: {
@@ -651,7 +658,8 @@ async function resetTeamBattleStateForQuestion(
       ...teamMemberNames,
     },
     activeTeam,
-    phase: "PRESENTER_BLOCK",
+    phase: presenterBlockEnabled ? "PRESENTER_BLOCK" : "REVEAL_VOTE",
+    presenterBlockEnabled,
     disabledBlocks: [],
     revealLimit: 1,
     turnNumber: state.turnNumber + 1,
@@ -663,10 +671,15 @@ async function resetTeamBattleStateForQuestion(
     previousTurnAction: null,
     pendingGuess: null,
     teamScores: state.teamScores,
-    message: newGuessers.length > 0
-      ? "新玩家已分队 · 等待出题人禁用格子"
-      : "等待出题人禁用格子",
+    message: presenterBlockEnabled
+      ? newGuessers.length > 0
+        ? "新玩家已分队 · 等待出题人禁用格子"
+        : "等待出题人禁用格子"
+      : newGuessers.length > 0
+        ? `新玩家已分队 · ${getTeamName(activeTeam)}选格`
+        : `${getTeamName(activeTeam)}选格`,
   };
+  return presenterBlockEnabled ? nextState : startTeamBattleVotePhase(nextState, "REVEAL_VOTE", Date.now());
 }
 
 function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
@@ -1735,6 +1748,7 @@ export async function createRoom(playerId: string, nickname: string) {
         lobby_round_scores: DEFAULT_ROUND_SCORES,
         lobby_team_reveal_vote_seconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
         lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+        lobby_team_presenter_block_enabled: 0,
         lobby_team_assignment_mode: "MANUAL",
         lobby_team_assignments: "{}",
         runtime_generation: CURRENT_ROOM_RUNTIME_GENERATION,
@@ -2642,6 +2656,7 @@ export async function updateRoomGameSettings(params: {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamPresenterBlockEnabled?: boolean;
   teamAssignmentMode?: TeamAssignmentMode;
 }) {
   assertD1Env();
@@ -2675,6 +2690,9 @@ export async function updateRoomGameSettings(params: {
   if (!currentRoom || (currentRoom.game_status !== "LOBBY" && currentRoom.game_status !== "QUESTION_SETUP")) {
     throw new Error("只有房主可以在房间大厅或题库准备阶段修改游戏模式。");
   }
+  const teamPresenterBlockEnabled = params.teamPresenterBlockEnabled ?? (
+    currentRoom.lobby_team_presenter_block_enabled === 1 || currentRoom.lobby_team_presenter_block_enabled === true
+  );
   const teamAssignmentMode = normalizeTeamAssignmentMode(params.teamAssignmentMode ?? currentRoom.lobby_team_assignment_mode);
   const roomUpdates: Partial<DbRoom> = {
     lobby_game_mode: params.gameMode,
@@ -2683,6 +2701,7 @@ export async function updateRoomGameSettings(params: {
     lobby_round_scores: roundScores,
     lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
     lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
+    lobby_team_presenter_block_enabled: teamPresenterBlockEnabled ? 1 : 0,
     lobby_team_assignment_mode: teamAssignmentMode,
     ...(params.gameMode !== "TEAM_BATTLE" || teamAssignmentMode === "AUTO"
       ? { lobby_team_assignments: "{}" }
@@ -2766,6 +2785,7 @@ export async function startGameWithQuestionSet(params: {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamPresenterBlockEnabled?: boolean;
   authorityVersion?: 2;
 }) {
   assertD1Env();
@@ -2872,6 +2892,9 @@ export async function startGameWithQuestionSet(params: {
     params.teamGuessVoteSeconds ?? room.lobby_team_guess_vote_seconds,
     DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   );
+  const teamPresenterBlockEnabled = params.teamPresenterBlockEnabled ?? (
+    room.lobby_team_presenter_block_enabled === 1 || room.lobby_team_presenter_block_enabled === true
+  );
   const gameMode = isGameMode(params.gameMode) ? params.gameMode : room.lobby_game_mode ?? "ROUND_REVEAL";
   const players = roomPlayers;
   const activeGamePlayers = players.filter(isGamePlayer);
@@ -2903,6 +2926,7 @@ export async function startGameWithQuestionSet(params: {
     ? createInitialTeamBattleState(activeGamePlayers, params.presenterPlayerId, {
         revealVoteSeconds: teamRevealVoteSeconds,
         guessVoteSeconds: teamGuessVoteSeconds,
+        presenterBlockEnabled: teamPresenterBlockEnabled,
         manualAssignments: teamAssignmentMode === "MANUAL" ? manualAssignments : undefined,
       })
     : null;

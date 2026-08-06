@@ -10,7 +10,6 @@ import type { DbPlayer } from "../src/types/game";
 import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/questionSetManifest";
 import { decodeRoomState, encodeRoomState } from "../worker/roomStateManifest";
 import {
-  completeTeamBattleBlockSelection,
   createRoom,
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
@@ -74,7 +73,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0018") {
+function applyMigrations(db: DatabaseSync, through = "0019") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -271,6 +270,28 @@ test("D1 0015 adds manual team state transactionally with safe defaults", () => 
   assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_assignment_mode='INVALID' WHERE id='legacy-team'").run(), /CHECK constraint failed/);
 });
 
+test("D1 0019 adds the presenter block option disabled by default", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0018");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,game_status) VALUES(?,?,?,?)")
+    .run("legacy-block", "BLOCK19", "host", "LOBBY");
+  const migration = readFileSync(join(migrationsDirectory, "0019_team_presenter_block_setting.sql"), "utf8");
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(migration);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_team_presenter_block_enabled'").get().count, 0);
+
+  db.exec(migration);
+  const room = db.prepare("SELECT * FROM rooms WHERE id='legacy-block'").get();
+  assert.equal(room.lobby_team_presenter_block_enabled, 0);
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_team_presenter_block_enabled=2 WHERE id='legacy-block'").run(), /CHECK constraint failed/);
+});
+
 test("D1 0012 upgrades to nullable creation methods without rewriting historical rows", () => {
   const db = new DatabaseSync(":memory:");
   applyMigrations(db, "0012");
@@ -298,12 +319,14 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     const room = await createRoom("host-defaults", "Host");
     assert.equal(room.teamRevealVoteSeconds, 25);
     assert.equal(room.teamGuessVoteSeconds, 50);
+    assert.equal(room.teamPresenterBlockEnabled, false);
     assert.equal(room.teamAssignmentMode, "MANUAL");
 
-    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
+    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
       .get(room.id);
     assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
     assert.equal(stored.lobby_team_guess_vote_seconds, 50);
+    assert.equal(stored.lobby_team_presenter_block_enabled, 0);
     assert.equal(stored.lobby_team_assignment_mode, "MANUAL");
     assert.equal(stored.runtime_generation, CURRENT_ROOM_RUNTIME_GENERATION);
     const aggregate = db.sqlite.prepare("SELECT * FROM rooms WHERE id=?").get(room.id);
@@ -462,9 +485,21 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
       gameMode: "TEAM_BATTLE",
       teamRevealVoteSeconds: 23,
       teamGuessVoteSeconds: 61,
+      teamPresenterBlockEnabled: true,
     });
     assert.equal(room.teamRevealVoteSeconds, 23);
     assert.equal(room.teamGuessVoteSeconds, 61);
+    assert.equal(room.teamPresenterBlockEnabled, true);
+
+    const disabledRoom = await updateRoomGameSettings({
+      roomId: "room-team",
+      hostPlayerId: "host",
+      gameMode: "TEAM_BATTLE",
+      teamRevealVoteSeconds: 23,
+      teamGuessVoteSeconds: 61,
+      teamPresenterBlockEnabled: false,
+    });
+    assert.equal(disabledRoom.teamPresenterBlockEnabled, false);
 
     const started = await startGameWithQuestionSet({
       startRequestId: "team-countdown-01",
@@ -476,21 +511,9 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
     });
     assert.equal(started.gameSession.teamBattleState?.revealVoteSeconds, 23);
     assert.equal(started.gameSession.teamBattleState?.guessVoteSeconds, 61);
-    assert.equal(started.gameSession.teamBattleState?.phase, "PRESENTER_BLOCK");
+    assert.equal(started.gameSession.teamBattleState?.presenterBlockEnabled, false);
+    assert.equal(started.gameSession.teamBattleState?.phase, "REVEAL_VOTE");
     assert.equal(started.gameSession.teamBattleState?.voteDeadlineAt, null);
-
-    const blockSelectionReceivedAtMs = Date.now();
-    const afterBlockSelection = await completeTeamBattleBlockSelection({
-      gameSessionId: started.gameSession.id,
-      presenterPlayerId: "host",
-      disabledBlocks: [],
-      serverReceivedAtMs: blockSelectionReceivedAtMs,
-    });
-    assert.equal(afterBlockSelection.gameSession.teamBattleState?.phase, "REVEAL_VOTE");
-    assert.equal(
-      new Date(afterBlockSelection.gameSession.teamBattleState!.voteDeadlineAt!).getTime(),
-      blockSelectionReceivedAtMs + 23_000,
-    );
   });
 });
 

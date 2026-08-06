@@ -109,7 +109,7 @@
 - `setAnswerJudgements/markPendingWrong/judgeBuzzerAnswer` 可在答案继续到达时执行；按 actionId 去重并从结果重算累计分数。
 - `BUZZER_FIRST_CORRECT` 按 orderToken 判定；更早 pending 未判不得接受后项正确；首个正确强制 checkpoint 后进 REVIEW。
 - `BUZZER_RANKED` 按整道题跨轮的稳定接收顺序计分，本题初始 N 名有效玩家依次获 N..1；每次改判重建本题全部正确 result、buzzer 分值和累计分数；后续轮只统计仍在房的 PLAYER 且本题尚未答对者。
-- `TEAM_BATTLE` 每题先进入无 deadline/Alarm 的 `PRESENTER_BLOCK`；仅出题人通过一次 `completeTeamBattleBlockSelection` 提交去重、排序并按实际 35/45 格范围校验的 `disabledBlocks`。该 mutation 强制 phase-boundary checkpoint 并一次广播全房，然后才启动首个投票 deadline；旧进行中状态缺少 `disabledBlocks` 时按空集合兼容，不改变其当前阶段。
+- `TEAM_BATTLE` 的出题人禁选为高级设置且默认关闭。关闭时每题由 Room DO 直接进入 `REVEAL_VOTE` 并建立首个权威 deadline；开启时才先进入无 deadline/Alarm 的 `PRESENTER_BLOCK`，仅出题人通过一次 `completeTeamBattleBlockSelection` 提交去重、排序并按实际 35/45 格范围校验的 `disabledBlocks`。该 mutation 强制 phase-boundary checkpoint 并一次广播全房，然后启动首个投票 deadline；旧进行中状态缺少开关时按已开启兼容，不改变既有对局流程。
 - `TEAM_BATTLE REVEAL_VOTE` 仅 activeTeam 成员投未揭且未禁用的方块，数量为 min(revealLimit,remainingSelectable)；阶段开始时立即产生 deadline（默认25秒）。activeTeam 全员首次提交完成且剩余超过5秒时，只允许把 deadline 单调缩短为5秒确认期；缩短后的 aggregate 必须先强制 checkpoint，再重排一次 Alarm，之后修改不得再次重排或延长。
 - `TEAM_BATTLE GUESS_VOTE` 在阶段开始时立即产生 deadline（默认50秒），使用同一全员提交确认期规则；两种时长由房间设置限制在1～600秒，旧状态缺字段时使用默认值。
 - `finalizeTeamBattleVote` 在 deadline 后原子结算截止前已提交的票；Room Alarm 是主触发源，Alarm 超过 deadline 仍未广播时仅出题人客户端在1秒后发送一次兜底意图，服务端必须再次校验出题人身份、题号、阶段、回合号和权威 deadline，普通玩家或旧阶段乱序消息不能触发。部分提交只统计提交者，选格零票时所有未揭且未禁用格为0票平票并随机开格，猜测零票时视为skip；其他最高票同票仍在同票集合内随机选择并公开提示；揭格→GUESS_VOTE，guess→JUDGING，skip→TURN_RESULT。
@@ -133,7 +133,7 @@
 ## 写入量和观测目标
 
 - 50人×30题：DO changed rows 目标150–300；普通答案/判定0行；每题边界约2行；rolling checkpoint约1行。
-- TEAM_BATTLE 禁选每题增加1个主持人 mutation 和1行 phase-boundary checkpoint；首个投票 Alarm 从题目建立时延后到禁选完成时设置，不增加每题 Alarm 总数。30题增加30个 mutation/30行，60局每天增加1,800个 mutation/1,800行。
+- TEAM_BATTLE 默认关闭禁选，因此默认预算不增加主持人 mutation、广播或 phase-boundary checkpoint。开启时每题增加1个主持人 mutation 和1行 phase-boundary checkpoint；首个投票 Alarm 从题目建立时延后到禁选完成时设置，不增加每题 Alarm 总数。30题增加30个 mutation/30行，60局每天增加1,800个 mutation/1,800行。
 - TEAM_BATTLE 每个未结束本题的猜测阶段最多增加1个 `advanceTeamBattleTurn` 主持人 mutation、1次小广播和1行 phase-boundary checkpoint；不增加 Alarm、D1 或轮询，50名玩家不会放大。
 - 当前 legacy 普通答案约7–9行；判定为固定 journal/版本写加每目标2行及全员积分重算，最坏数十行。
 - 结构化日志只在 checkpoint/阶段边界输出，不记录答案正文：authorityVersion、restore ms、active/Attachment bytes。

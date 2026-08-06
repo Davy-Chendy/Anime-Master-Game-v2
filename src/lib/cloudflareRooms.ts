@@ -217,6 +217,7 @@ export const updateRoomGameSettings = (params: {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamPresenterBlockEnabled?: boolean;
   teamAssignmentMode?: TeamAssignmentMode;
 }) => rpc<Room>("updateRoomGameSettings", params);
 
@@ -232,6 +233,7 @@ export const startGameWithQuestionSet = (params: {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamPresenterBlockEnabled?: boolean;
 }) => rpc<{ gameSession: GameSession; room: Room }>("startGameWithQuestionSet", params);
 
 export const getGameSessionById = (gameSessionId: string) =>

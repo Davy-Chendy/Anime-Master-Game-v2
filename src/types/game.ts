@@ -41,6 +41,7 @@ export type TeamBattleState = {
   teamMemberNames?: Record<string, string>;
   activeTeam: TeamBattleTeam;
   phase: TeamBattlePhase;
+  presenterBlockEnabled?: boolean;
   revealBlockCount?: number;
   disabledBlocks?: number[];
   revealLimit: number;
@@ -74,6 +75,7 @@ export type Room = {
   roundScores?: number[];
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
+  teamPresenterBlockEnabled?: boolean;
   teamAssignmentMode?: TeamAssignmentMode;
   teamAssignments?: Partial<Record<string, TeamBattleTeam>>;
   createdAt: number | string;
@@ -94,6 +96,7 @@ export type DbRoom = {
   lobby_round_scores?: unknown;
   lobby_team_reveal_vote_seconds?: number | null;
   lobby_team_guess_vote_seconds?: number | null;
+  lobby_team_presenter_block_enabled?: number | boolean | null;
   lobby_team_assignment_mode?: TeamAssignmentMode | null;
   lobby_team_assignments?: unknown;
   runtime_generation?: number | null;

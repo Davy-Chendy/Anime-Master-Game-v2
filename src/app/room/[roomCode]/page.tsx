@@ -71,6 +71,7 @@ type GameSettings = {
   roundScores: number[];
   teamRevealVoteSeconds: number;
   teamGuessVoteSeconds: number;
+  teamPresenterBlockEnabled: boolean;
   teamAssignmentMode: TeamAssignmentMode;
 };
 
@@ -81,6 +82,7 @@ const defaultGameSettings: GameSettings = {
   roundScores: [5, 3, 1],
   teamRevealVoteSeconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
   teamGuessVoteSeconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
+  teamPresenterBlockEnabled: false,
   teamAssignmentMode: "MANUAL",
 };
 
@@ -167,6 +169,7 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
       settings.teamGuessVoteSeconds,
       DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
     ),
+    teamPresenterBlockEnabled: settings.teamPresenterBlockEnabled === true,
     teamAssignmentMode: settings.teamAssignmentMode === "AUTO" ? "AUTO" : "MANUAL",
   };
 }
@@ -179,6 +182,7 @@ function getRoomGameSettings(room: Room | null | undefined): GameSettings {
     roundScores: room?.roundScores,
     teamRevealVoteSeconds: room?.teamRevealVoteSeconds,
     teamGuessVoteSeconds: room?.teamGuessVoteSeconds,
+    teamPresenterBlockEnabled: room?.teamPresenterBlockEnabled,
     teamAssignmentMode: room?.teamAssignmentMode,
   });
 }
@@ -192,6 +196,7 @@ function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
     left.roundScores.every((score, index) => score === right.roundScores[index]) &&
     left.teamRevealVoteSeconds === right.teamRevealVoteSeconds &&
     left.teamGuessVoteSeconds === right.teamGuessVoteSeconds &&
+    left.teamPresenterBlockEnabled === right.teamPresenterBlockEnabled &&
     left.teamAssignmentMode === right.teamAssignmentMode
   );
 }
@@ -1102,6 +1107,19 @@ function GameSettingsPanel({
                 />
               </label>
             </div>
+            <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+              <span>
+                <span className="block text-sm font-medium text-slate-900">出题人禁用格子</span>
+                <span className="mt-1 block text-xs leading-5 text-[var(--muted)]">每题开始前增加禁选阶段；默认关闭。</span>
+              </span>
+              <input
+                checked={settings.teamPresenterBlockEnabled}
+                className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+                disabled={!canEdit}
+                type="checkbox"
+                onChange={(event) => onChange({ ...settings, teamPresenterBlockEnabled: event.target.checked })}
+              />
+            </label>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
               猜对队伍得 1 分；投票截止前可反复修改。
             </div>
@@ -2494,6 +2512,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         roundScores: normalizedSettings.roundScores,
         teamRevealVoteSeconds: normalizedSettings.teamRevealVoteSeconds,
         teamGuessVoteSeconds: normalizedSettings.teamGuessVoteSeconds,
+        teamPresenterBlockEnabled: normalizedSettings.teamPresenterBlockEnabled,
         teamAssignmentMode: normalizedSettings.teamAssignmentMode,
       });
 
@@ -2561,6 +2580,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           roundScores: gameSettings.roundScores,
           teamRevealVoteSeconds: gameSettings.teamRevealVoteSeconds,
           teamGuessVoteSeconds: gameSettings.teamGuessVoteSeconds,
+          teamPresenterBlockEnabled: gameSettings.teamPresenterBlockEnabled,
         });
 
       let started: Awaited<ReturnType<typeof requestStart>>;

@@ -338,6 +338,10 @@ function normalizeTeamSessionDeadline(session: GameSession, nowMs: number) {
   const state = session.teamBattleState;
   if (!state) return { changed: false, deadline: null as VNextDeadline };
   let changed = false;
+  if (typeof state.presenterBlockEnabled !== "boolean") {
+    state.presenterBlockEnabled = true;
+    changed = true;
+  }
   const revealVoteSeconds = normalizeTeamVoteSeconds(state.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS);
   const guessVoteSeconds = normalizeTeamVoteSeconds(state.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS);
   if (state.revealVoteSeconds !== revealVoteSeconds) {
@@ -1363,7 +1367,11 @@ export class RoomAuthorityVNext {
     session.eligiblePlayerIds = this.eligiblePlayers(aggregate.players, session.presenterPlayerId);
     if (session.gameMode === "TEAM_BATTLE") {
       session.teamBattleState = this.resetTeamState(session.teamBattleState, aggregate.players, session.presenterPlayerId, session.currentQuestionIndex);
-      aggregate.deadline = null;
+      if (session.teamBattleState.phase === "REVEAL_VOTE") {
+        this.startTeamVoteDeadline(session.teamBattleState, "REVEAL_VOTE", action.serverReceivedAtMs);
+      } else {
+        aggregate.deadline = null;
+      }
     } else {
       aggregate.deadline = null;
     }
@@ -2234,12 +2242,14 @@ export class RoomAuthorityVNext {
     const teams = { red: initial.red.filter((id) => valid.has(id)), blue: initial.blue.filter((id) => valid.has(id)) };
     const activeTeam: TeamBattleTeam = questionIndex % 2 === 0 ? "red" : "blue";
     const nextActiveTeam = teams[activeTeam].length ? activeTeam : oppositeTeam(activeTeam);
+    const presenterBlockEnabled = previous?.presenterBlockEnabled !== false;
     return {
       teams,
       initialTeams: initial,
       teamMemberNames: Object.fromEntries(players.map((player) => [player.id, player.nickname])),
       activeTeam: nextActiveTeam,
-      phase: "PRESENTER_BLOCK",
+      phase: presenterBlockEnabled ? "PRESENTER_BLOCK" : "REVEAL_VOTE",
+      presenterBlockEnabled,
       revealBlockCount: previous?.revealBlockCount ?? 45,
       disabledBlocks: [],
       revealLimit: 1,
@@ -2252,7 +2262,7 @@ export class RoomAuthorityVNext {
       previousTurnAction: null,
       pendingGuess: null,
       teamScores: previous?.teamScores ?? { red: 0, blue: 0 },
-      message: "等待出题人禁用格子",
+      message: presenterBlockEnabled ? "等待出题人禁用格子" : `${teamName(nextActiveTeam)}选格`,
     };
   }
 

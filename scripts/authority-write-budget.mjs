@@ -37,17 +37,20 @@ const vnextProjectionRows = 2;
 const vnextRows = vnextCheckpointRows + vnextBoundaryRows + vnextProjectionRows;
 
 // TEAM_BATTLE timer example used by the rules/budget review: one question,
-// six active team members, one presenter block-selection mutation, ten reveal
-// phases and ten guess phases. Completing block selection persists one
-// active_game row but only defers the first reveal Alarm; it does not add an
-// Alarm. A phase-end deadline checkpoint also persists one active_game row.
+// six active team members, presenter block selection disabled by default, ten
+// reveal phases and ten guess phases. Enabling the advanced option adds one
+// presenter mutation and one active_game checkpoint but only defers the first
+// reveal Alarm; it does not add an Alarm. A phase-end deadline checkpoint also
+// persists one active_game row.
 // With one submission per member per phase, each phase stays below the 20-action
 // rolling threshold. If all members finish early, the early-completion checkpoint
 // absorbs those dirty actions before the later deadline checkpoint. D1 remains
 // untouched until the final projection.
 const teamExample = {
   activeMembers: 6,
-  presenterBlockMutations: 1,
+  presenterBlockEnabledByDefault: false,
+  presenterBlockMutations: 0,
+  presenterBlockMutationsWhenEnabled: 1,
   revealPhases: 10,
   guessPhases: 10,
 };
@@ -62,10 +65,12 @@ const teamExampleEarlyCompletionCheckpointRows = teamExamplePhases;
 const teamExampleExtraRollingRows = Math.floor(teamExample.activeMembers / checkpointEvery) * teamExamplePhases;
 const teamExampleAlarmSchedules = teamExamplePhases * 2;
 const teamBlockSelectionBudget = {
-  perGameMutations: questions,
-  perGameCheckpointRows: questions,
-  perDayMutationsAt60Games: questions * 60,
-  perDayCheckpointRowsAt60Games: questions * 60,
+  defaultPerGameMutations: 0,
+  defaultPerGameCheckpointRows: 0,
+  whenEnabledPerGameMutations: questions,
+  whenEnabledPerGameCheckpointRows: questions,
+  whenEnabledPerDayMutationsAt60Games: questions * 60,
+  whenEnabledPerDayCheckpointRowsAt60Games: questions * 60,
 };
 const teamTurnResultBudget = {
   confirmationsPerQuestionAtMost: teamExample.guessPhases,
@@ -125,10 +130,12 @@ if (players === 50 && questions === 30) {
   assert.ok(manifestSavingsAt60Games >= 8_900, `manifest daily write saving target missed: ${manifestSavingsAt60Games}`);
   assert.ok(aggregatePlayerWriteTarget.upper < productionPlayerRoomBaseline.playerWrites / 4);
   assert.deepEqual(teamBlockSelectionBudget, {
-    perGameMutations: 30,
-    perGameCheckpointRows: 30,
-    perDayMutationsAt60Games: 1_800,
-    perDayCheckpointRowsAt60Games: 1_800,
+    defaultPerGameMutations: 0,
+    defaultPerGameCheckpointRows: 0,
+    whenEnabledPerGameMutations: 30,
+    whenEnabledPerGameCheckpointRows: 30,
+    whenEnabledPerDayMutationsAt60Games: 1_800,
+    whenEnabledPerDayCheckpointRowsAt60Games: 1_800,
   });
   assert.deepEqual(teamTurnResultBudget, {
     confirmationsPerQuestionAtMost: 10,
@@ -142,7 +149,7 @@ if (players === 50 && questions === 30) {
       + teamExample.presenterBlockMutations
       + teamExamplePresenterFallbackMutationsAtMost
       + teamExampleTurnResultConfirmationMutationsAtMost,
-    151,
+    150,
   );
 }
 
@@ -173,7 +180,13 @@ console.log(JSON.stringify({
         + teamExample.presenterBlockMutations
         + teamExamplePresenterFallbackMutationsAtMost
         + teamExampleTurnResultConfirmationMutationsAtMost,
+      totalMutationsAtMostWhenPresenterBlockEnabled:
+        teamExampleVoteMutations
+        + teamExample.presenterBlockMutationsWhenEnabled
+        + teamExamplePresenterFallbackMutationsAtMost
+        + teamExampleTurnResultConfirmationMutationsAtMost,
       blockSelectionCheckpointRows: teamExampleBlockCheckpointRows,
+      blockSelectionCheckpointRowsWhenEnabled: teamExample.presenterBlockMutationsWhenEnabled,
       turnResultConfirmationCheckpointRowsAtMost: teamExampleTurnResultConfirmationCheckpointRowsAtMost,
       alarmSchedulesAtMostWhenEveryPhaseCompletesEarly: teamExampleAlarmSchedules,
       alarmExecutions: teamExamplePhases,
