@@ -108,6 +108,8 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 按每局新建一套 30 张图片、每天 60 局的极端上限，上传产生 1,800 次 Workers 请求和 1,800 次 R2 Class A `PutObject`/天；按 30 天计算为 54,000 次 Class A，约占 100 万月额度的 5.4%。实际题库复用会更低。该链路不再产生上传相关 `ListObjects` 或 upload-gate DO 请求/duration。
 
+JSONL/图片链接导入先在 Worker 中抓取并写入 R2，再把已准备图片返回客户端排序、删除；玩家确认后新增 1 次 `createUploadedQuestionSet` Worker RPC，才写入最终题集。R2 写入次数与原链路一致，确认后的 D1 题集写入次数不变，放弃草稿时反而不再留下私有题集。按每天 60 局全部使用链接题库估算，最多新增 60 次 Workers 请求/天，占 100,000 次日额度的 0.06%；该操作仅由出题人触发，不随房间 50 人在线而放大。
+
 ## 修改时必须完成的预算检查
 
 涉及 Worker、DO、D1、WebSocket、Alarm、R2、Images、Pages Functions 或 Cron 的改动，实施前后都要回答：

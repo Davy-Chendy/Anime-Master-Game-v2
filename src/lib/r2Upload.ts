@@ -85,6 +85,16 @@ export type LocalUploadDropTarget = {
   side: "before" | "after";
 };
 
+export function buildPreparedUrlImportDraft(
+  questions: Array<{ imageUrl: string; labelText?: string | null; r2Key?: string | null }>,
+): LocalUploadDraftQuestion[] {
+  return questions.map((question, index) => ({
+    key: `url-import:${index}:${question.r2Key ?? question.imageUrl}`,
+    imageUrl: question.imageUrl,
+    labelText: question.labelText?.trim() || null,
+  }));
+}
+
 type PreparedImage = {
   blob: Blob;
   uploadName: string;

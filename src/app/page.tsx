@@ -8,7 +8,8 @@ import { FormField } from "@/components/FormField";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { createNewLocalPlayerSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
-import { createRoom, getRoomByCode, joinRoom } from "@/lib/cloudflareRooms";
+import { createRoom, getRoomWithPlayers, joinRoom } from "@/lib/cloudflareRooms";
+import { isRoomNicknameTaken } from "@/lib/roomNickname";
 
 const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
@@ -237,7 +238,7 @@ export default function HomePage() {
     setNotice("");
 
     try {
-      const existingRoom = await getRoomByCode(trimmedRoomCode);
+      const existingRoom = await getRoomWithPlayers(trimmedRoomCode);
 
       if (!existingRoom) {
         setError("房间不存在。请检查房间号是否正确");
@@ -251,15 +252,20 @@ export default function HomePage() {
         session = createNewLocalPlayerSession(trimmedNickname);
       }
 
-      if (existingRoom.game_status === "PLAYING") {
+      if (isRoomNicknameTaken(existingRoom.players, session.playerId, trimmedNickname)) {
+        setError("该昵称已在房间内使用，请换一个昵称。");
+        return;
+      }
+
+      if (existingRoom.status === "PLAYING") {
         saveLocalSession({
           playerId: session.playerId,
           nickname: trimmedNickname,
           roomCode: trimmedRoomCode,
-          isHost: existingRoom.host_player_id === session.playerId,
+          isHost: existingRoom.hostPlayerId === session.playerId,
         });
 
-        router.push(`/room/${existingRoom.room_code}`);
+        router.push(`/room/${existingRoom.code}`);
         return;
       }
 
@@ -270,11 +276,11 @@ export default function HomePage() {
           saveLocalSession({
             playerId: session.playerId,
             nickname: trimmedNickname,
-            roomCode: existingRoom.room_code,
-            isHost: existingRoom.host_player_id === session.playerId,
+            roomCode: existingRoom.code,
+            isHost: existingRoom.hostPlayerId === session.playerId,
           });
 
-          router.push(`/room/${existingRoom.room_code}`);
+          router.push(`/room/${existingRoom.code}`);
           return;
         }
 

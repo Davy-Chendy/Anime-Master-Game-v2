@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildLocalUploadQuestionImport,
+  buildPreparedUrlImportDraft,
   extractCreationToolLabelFromFilename,
   findNearestLocalUploadDropTarget,
   filesToUploadableImages,
@@ -141,6 +142,22 @@ test("local upload drafts can be reordered without mutating the original list", 
   const remaining = removeLocalUploadDraftQuestion(reordered, "easy.jpg");
   assert.deepEqual(remaining.map((question) => question.key), ["hard.jpg", "medium.jpg"]);
   assert.deepEqual(reordered.map((question) => question.key), ["hard.jpg", "easy.jpg", "medium.jpg"]);
+});
+
+test("prepared URL imports become stable editable drafts", () => {
+  const draft = buildPreparedUrlImportDraft([
+    { imageUrl: "https://assets.example.com/one.webp", labelText: " 答案一 ", r2Key: "question-images/one.webp" },
+    { imageUrl: "https://assets.example.com/two.webp", labelText: "" },
+    { imageUrl: "https://assets.example.com/two.webp", labelText: null },
+  ]);
+
+  assert.deepEqual(draft.map((question) => question.imageUrl), [
+    "https://assets.example.com/one.webp",
+    "https://assets.example.com/two.webp",
+    "https://assets.example.com/two.webp",
+  ]);
+  assert.deepEqual(draft.map((question) => question.labelText), ["答案一", null, null]);
+  assert.equal(new Set(draft.map((question) => question.key)).size, draft.length);
 });
 
 test("local upload drop targets cover card edges, grid gaps, and trailing blank space", () => {

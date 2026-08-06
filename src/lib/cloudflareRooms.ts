@@ -185,6 +185,7 @@ export const createQuestionSetFromUrlText = (params: {
   retryQuestions?: QuestionUrlImportInput[];
   preparedQuestions?: PreparedQuestionUrlImport[];
   fallbackToOriginalUrls?: boolean;
+  prepareOnly?: boolean;
 }) => rpc<QuestionSetUrlImportResult>("createQuestionSetFromUrlText", params);
 
 export const getQuestionSetById = (questionSetId: string) =>

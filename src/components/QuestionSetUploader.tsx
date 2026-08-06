@@ -4,10 +4,10 @@ import { DragEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "
 import { Button } from "@/components/Button";
 import {
   buildLocalUploadQuestionImport,
+  buildPreparedUrlImportDraft,
   extractCreationToolLabelFromFilename,
   findNearestLocalUploadDropTarget,
   filesToUploadableImages,
-  getLocalUploadCreationMethod,
   getR2UploadConfigStatus,
   moveLocalUploadDraftQuestionToIndex,
   readDroppedUploadFiles,
@@ -224,6 +224,7 @@ export function QuestionSetUploader({
   const [urlText, setUrlText] = useState("");
   const [items, setItems] = useState<UploadableImage[]>([]);
   const [localUploadDraft, setLocalUploadDraft] = useState<LocalUploadDraftQuestion[] | null>(null);
+  const [draftCreationMethod, setDraftCreationMethod] = useState<QuestionSetCreationMethod>("player_manual");
   const [draggedDraftKey, setDraggedDraftKey] = useState<string | null>(null);
   const [draftDropTarget, setDraftDropTarget] = useState<LocalUploadDropTarget | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -239,6 +240,7 @@ export function QuestionSetUploader({
   const [communityHasMore, setCommunityHasMore] = useState(false);
   const [communityNextOffset, setCommunityNextOffset] = useState(0);
   const [loadingCommunityPreviewId, setLoadingCommunityPreviewId] = useState<string | null>(null);
+  const [loadingCommunitySelectionId, setLoadingCommunitySelectionId] = useState<string | null>(null);
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
   const [isConfirmingQuestionSet, setIsConfirmingQuestionSet] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
@@ -312,6 +314,7 @@ export function QuestionSetUploader({
   function resetCreatedSet() {
     setQuestionSet(null);
     setLocalUploadDraft(null);
+    setDraftCreationMethod("player_manual");
     draggedDraftKeyRef.current = null;
     setDraggedDraftKey(null);
     setDraftDropTarget(null);
@@ -479,7 +482,7 @@ export function QuestionSetUploader({
 
     try {
       const uploadResults = await uploadImagesToR2(items, setProgress);
-      const { questions } = buildLocalUploadQuestionImport(items, uploadResults);
+      const { questions, creationMethod } = buildLocalUploadQuestionImport(items, uploadResults);
 
       if (questions.length === 0) {
         onError("没有图片上传成功，无法生成预览");
@@ -487,6 +490,7 @@ export function QuestionSetUploader({
       }
 
       setLocalUploadDraft(questions);
+      setDraftCreationMethod(creationMethod);
       clearError();
       scrollToPreview();
     } catch (error) {
@@ -536,7 +540,7 @@ export function QuestionSetUploader({
           success: preparedQuestions.length,
           fail: 0,
           latestMessage: fallbackToOriginalUrls
-            ? "正在用原链接代替失败图片并创建题库"
+            ? "正在用原链接代替失败图片并生成预览"
             : preparedQuestions.length > 0
               ? `正在重试 ${retryQuestions.length} 张失败图片`
               : "正在抓取、压缩并上传远端图片",
@@ -550,6 +554,7 @@ export function QuestionSetUploader({
           retryQuestions,
           preparedQuestions,
           fallbackToOriginalUrls,
+          prepareOnly: true,
         });
 
         if (result.status === "created") {
@@ -564,6 +569,25 @@ export function QuestionSetUploader({
               result.fallbackCount > 0
                 ? `题库已创建：${result.importedCount} 张已上传图库，${result.fallbackCount} 张使用原链接`
                 : `题库已创建：${result.importedCount} 张图片已上传图库`,
+          });
+          clearError();
+          scrollToPreview();
+          break;
+        }
+
+        if (result.status === "prepared") {
+          setLocalUploadDraft(buildPreparedUrlImportDraft(result.preparedQuestions));
+          setDraftCreationMethod("creation_tool_assisted");
+          setProgress({
+            ...emptyProgress,
+            total: result.importedCount + result.fallbackCount,
+            done: result.importedCount + result.fallbackCount,
+            success: result.importedCount,
+            fail: result.fallbackCount,
+            latestMessage:
+              result.fallbackCount > 0
+                ? `图片已准备：${result.importedCount} 张已上传图库，${result.fallbackCount} 张使用原链接`
+                : `图片已准备：${result.importedCount} 张图片已上传图库`,
           });
           clearError();
           scrollToPreview();
@@ -696,10 +720,34 @@ export function QuestionSetUploader({
   }
 
   async function handleSelectCommunitySet(selectedQuestionSet: QuestionSet | CommunityQuestionSetSummary) {
-    setLocalUploadDraft(null);
-    setQuestionSet(selectedQuestionSet);
+    if (loadingCommunitySelectionId) {
+      return;
+    }
+
+    setLoadingCommunitySelectionId(selectedQuestionSet.id);
     clearError();
-    scrollToPreview();
+    try {
+      let detail = isQuestionSetDetail(selectedQuestionSet)
+        ? selectedQuestionSet
+        : communityDetailCacheRef.current.get(selectedQuestionSet.id);
+      if (!detail) {
+        detail = await getCommunityQuestionSetDetail(selectedQuestionSet.id) ?? undefined;
+      }
+      if (!detail) {
+        throw new Error("题库已取消公开或不存在");
+      }
+
+      communityDetailCacheRef.current.set(detail.id, detail);
+      setLocalUploadDraft(null);
+      setDraftCreationMethod("player_manual");
+      setQuestionSet(detail);
+      clearError();
+      scrollToPreview();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "加载社区题库失败");
+    } finally {
+      setLoadingCommunitySelectionId(null);
+    }
   }
 
   function moveDraftQuestion(sourceKey: string, insertionIndex: number) {
@@ -825,7 +873,7 @@ export function QuestionSetUploader({
             imageUrl: question.imageUrl,
             labelText: question.labelText,
           })),
-          creationMethod: getLocalUploadCreationMethod(localUploadDraft.map((question) => question.labelText)),
+          creationMethod: draftCreationMethod,
         });
         setQuestionSet(selectedQuestionSet);
         setLocalUploadDraft(null);
@@ -1043,9 +1091,11 @@ export function QuestionSetUploader({
                 已识别 {importPreview.items.length} 张图片，{importPreview.labeledCount} 个带答案
               </p>
             )}
-            <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
-              {isCreatingFromText ? "抓取并创建中…" : "创建题库"}
-            </Button>
+            <div className="flex justify-end">
+              <Button type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText || isConfirmingQuestionSet}>
+                {isCreatingFromText ? "上传中…" : "上传并预览"}
+              </Button>
+            </div>
             {isCreatingFromText || progress.total > 0 ? (
               <div>
                 <div className="h-3 overflow-hidden rounded-full bg-slate-100">
@@ -1156,8 +1206,12 @@ export function QuestionSetUploader({
                       >
                         {loadingCommunityPreviewId === item.id ? "加载中…" : "预览"}
                       </Button>
-                      <Button type="button" onClick={() => handleSelectCommunitySet(item)}>
-                        选择
+                      <Button
+                        type="button"
+                        onClick={() => handleSelectCommunitySet(item)}
+                        disabled={loadingCommunitySelectionId !== null}
+                      >
+                        {loadingCommunitySelectionId === item.id ? "加载中…" : "选择"}
                       </Button>
                     </div>
                   </div>

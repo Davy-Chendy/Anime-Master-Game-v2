@@ -13,6 +13,7 @@ import {
   createRoom,
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
+  getCommunityQuestionSetDetail,
   getCommunityQuestionSets,
   getQuestionSetById,
   joinRoom,
@@ -456,8 +457,10 @@ test("new question sets default by creation path, publishing can confirm the met
 
     const manualPage = await getCommunityQuestionSets({ creationMethod: "player_manual" });
     const assistedPage = await getCommunityQuestionSets({ creationMethod: "creation_tool_assisted" });
+    const communityDetail = await getCommunityQuestionSetDetail(manual.id);
     assert.deepEqual(manualPage.items.map((item) => item.id), [assisted.id]);
     assert.deepEqual(assistedPage.items.map((item) => item.id), [manual.id]);
+    assert.deepEqual(communityDetail?.questions?.map((question) => question.imageUrl), ["https://example.com/manual.webp"]);
     assert.equal(manualPage.total, 1);
     assert.equal(assistedPage.total, 1);
   });

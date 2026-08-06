@@ -206,6 +206,12 @@ export type QuestionSetUrlImportResult =
       fallbackCount: number;
     }
   | {
+      status: "prepared";
+      preparedQuestions: PreparedQuestionUrlImport[];
+      importedCount: number;
+      fallbackCount: number;
+    }
+  | {
       status: "needs_decision";
       preparedQuestions: PreparedQuestionUrlImport[];
       failedQuestions: FailedQuestionUrlImport[];

@@ -1642,6 +1642,7 @@ type CreateQuestionSetFromUrlTextParams = {
   retryQuestions?: unknown;
   preparedQuestions?: unknown;
   fallbackToOriginalUrls?: boolean;
+  prepareOnly?: boolean;
 };
 
 type RemoteFetchResult = {
@@ -2066,13 +2067,23 @@ async function createQuestionSetFromPreparedUrlImport(
   preparedQuestions: PreparedQuestionUrlImport[],
   fallbackCount: number,
 ): Promise<QuestionSetUrlImportResult> {
+  const sortedQuestions = sortPreparedQuestions(preparedQuestions);
+  if (params.prepareOnly) {
+    return {
+      status: "prepared",
+      preparedQuestions: sortedQuestions,
+      importedCount: Math.max(0, preparedQuestions.length - fallbackCount),
+      fallbackCount,
+    };
+  }
+
   const questionSet = await gameService.createUploadedQuestionSet({
     roomId: params.roomId ?? "",
     presenterPlayerId: params.presenterPlayerId ?? "",
     title: params.title ?? "",
     description: params.description,
     creationMethod: "creation_tool_assisted",
-    questions: sortPreparedQuestions(preparedQuestions).map((item) => ({
+    questions: sortedQuestions.map((item) => ({
       imageUrl: item.imageUrl,
       labelText: item.labelText ?? null,
     })),
