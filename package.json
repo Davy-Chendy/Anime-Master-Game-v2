@@ -22,6 +22,7 @@
     "test:question-set-creation-analysis": "tsx --test tests/question-set-creation-method-analysis.test.ts",
     "test:local-image-upload": "tsx --test tests/local-image-upload.test.ts",
     "test:r2-upload": "tsx --test tests/r2-upload.test.ts",
+    "promo:prepare": "node scripts/prepare-promo-assets.mjs",
     "analyze:question-set-creation-method": "node scripts/analyze-question-set-creation-method.mjs",
     "backfill:question-set-creation-method": "node scripts/backfill-question-set-creation-method.mjs",
     "test:authority-state-machine": "tsx --test --test-name-pattern=\"seeded state-machine\" tests/authority-full-game.test.ts",

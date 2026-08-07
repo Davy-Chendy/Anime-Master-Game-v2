@@ -643,6 +643,17 @@ export class RoomAuthorityVNext {
     return this.aggregate;
   }
 
+  syncQuestionSetMetadata(questionSet: QuestionSet) {
+    const aggregate = this.requireActiveOrEnded();
+    if (!aggregate.questionSet || aggregate.questionSet.id !== questionSet.id) return false;
+    aggregate.questionSet = {
+      ...clone(questionSet),
+      questions: clone(aggregate.questions),
+    };
+    this.markDirty();
+    return true;
+  }
+
   resetAfterFailedTransition() {
     this.aggregate = null;
     this.restored = false;

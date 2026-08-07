@@ -1,0 +1,150 @@
+html,
+body {
+  background: #fff;
+}
+
+.stage {
+  background: #fff;
+}
+
+.stage::after {
+  box-shadow: inset 0 0 7vw rgba(31, 38, 48, 0.08);
+}
+
+.cover-wall,
+.mosaic-wall {
+  position: absolute;
+  top: -46%;
+  bottom: -46%;
+  display: grid;
+  width: calc(50% - 4px);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  opacity: 0;
+  transform-origin: center;
+}
+
+.cover-wall {
+  left: 0;
+  padding-right: 6px;
+  background: #fff;
+  transform: scale(1.055) rotate(-0.18deg);
+}
+
+.cover-column,
+.mosaic-column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cover-column {
+  transform: translateY(var(--cover-start));
+}
+
+.cover-card,
+.mosaic-card {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(25, 30, 38, 0.12);
+  border-radius: 6px;
+  background: #f2f3f4;
+  box-shadow: 0 12px 26px rgba(25, 30, 38, 0.16);
+}
+
+.cover-card {
+  aspect-ratio: 0.71;
+}
+
+.cover-card img,
+.mosaic-card canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mosaic-wall {
+  z-index: 20;
+  right: 0;
+  padding-left: 6px;
+  background: #fff;
+  transform: scale(1.055) rotate(0.18deg);
+}
+
+.mosaic-column {
+  transform: translateY(var(--mosaic-start));
+}
+
+.mosaic-card {
+  aspect-ratio: 0.82;
+  background: #f0f0ed;
+}
+
+.mosaic-card canvas {
+  image-rendering: pixelated;
+}
+
+.split-divider {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 8px);
+  width: 16px;
+  opacity: 0;
+  background: linear-gradient(90deg, transparent, #d9dce1 44%, #d9dce1 56%, transparent);
+  box-shadow: none;
+}
+
+body.playing .cover-wall,
+body.playing .mosaic-wall {
+  animation: split-wall 6s cubic-bezier(0.22, 0.72, 0.16, 1) both;
+}
+
+body.playing .cover-column {
+  animation: cover-travel 5.4s linear 0.3s both;
+}
+
+body.playing .mosaic-column {
+  animation: mosaic-travel 5.4s linear 0.3s both;
+}
+
+body.playing .split-divider {
+  animation: divider-reveal 6s ease both;
+}
+
+body.playing .end-fade {
+  animation: scene-fade 6s linear both;
+}
+
+@keyframes split-wall {
+  0%, 5% { opacity: 0; transform: scale(1.055); }
+  11% { opacity: 1; }
+  88%, 100% { opacity: 1; transform: scale(.965); }
+}
+
+@keyframes cover-travel {
+  from { transform: translateY(var(--cover-start)); }
+  to { transform: translateY(var(--cover-end)); }
+}
+
+@keyframes mosaic-travel {
+  from { transform: translateY(var(--mosaic-start)); }
+  to { transform: translateY(var(--mosaic-end)); }
+}
+
+@keyframes divider-reveal {
+  0%, 6% { opacity: 0; }
+  12%, 94% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes scene-fade {
+  0%, 4% { opacity: 1; }
+  9% { opacity: 0; }
+  94% { opacity: 0; }
+  100% { opacity: 1; }
+}

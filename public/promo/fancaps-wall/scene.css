@@ -1,0 +1,121 @@
+.dense-wall {
+  position: absolute;
+  inset: -34% -16%;
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 14px;
+  opacity: 0;
+  transform: scale(1.18) rotate(-0.35deg);
+}
+
+.image-column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  transform: translateY(var(--start-y));
+}
+
+.image-card,
+.nine-grid img,
+.hero {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: #111318;
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.34);
+}
+
+.image-card {
+  flex: 0 0 auto;
+  aspect-ratio: 16 / 9;
+}
+
+.image-card img,
+.nine-grid img,
+.hero img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.nine-grid {
+  position: absolute;
+  z-index: 12;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  width: min(82%, 1460px);
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(1.16);
+}
+
+.nine-grid img {
+  aspect-ratio: 16 / 9;
+}
+
+.hero {
+  position: absolute;
+  z-index: 20;
+  left: 50%;
+  top: 50%;
+  width: min(82%, 1460px);
+  aspect-ratio: 16 / 9;
+  margin: 0;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(1.035);
+}
+
+body.playing .hero {
+  animation: hero-shot 2.45s cubic-bezier(0.22, 0.72, 0.16, 1) both;
+}
+
+body.playing .nine-grid {
+  animation: grid-reveal 3.25s cubic-bezier(0.22, 0.72, 0.16, 1) both;
+}
+
+body.playing .dense-wall {
+  animation: wall-reveal 7.7s cubic-bezier(0.2, 0.7, 0.18, 1) both;
+}
+
+body.playing .image-column {
+  animation: column-travel 5.35s linear 2.35s both;
+}
+
+body.playing .end-fade {
+  animation: scene-fade 8s linear both;
+}
+
+@keyframes hero-shot {
+  0%, 10% { width: min(82%, 1460px); opacity: 0; transform: translate(-50%, -50%) scale(1.035); }
+  16%, 44% { width: min(82%, 1460px); opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  82% { opacity: 1; width: min(26.3%, 468px); transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; width: min(26.3%, 468px); transform: translate(-50%, -50%) scale(.96); }
+}
+
+@keyframes grid-reveal {
+  0%, 34% { opacity: 0; transform: translate(-50%, -50%) scale(1.13); }
+  54%, 68% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(.8); }
+}
+
+@keyframes wall-reveal {
+  0%, 26% { opacity: 0; transform: scale(1.22) rotate(-0.35deg); }
+  39% { opacity: 1; transform: scale(1.09) rotate(-0.25deg); }
+  82%, 100% { opacity: 1; transform: scale(.78) rotate(0deg); }
+}
+
+@keyframes column-travel {
+  from { transform: translateY(var(--start-y)); }
+  to { transform: translateY(var(--end-y)); }
+}
+
+@keyframes scene-fade {
+  0%, 3.5% { opacity: 1; }
+  7% { opacity: 0; }
+  95% { opacity: 0; }
+  100% { opacity: 1; }
+}

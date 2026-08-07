@@ -1162,6 +1162,58 @@ test("game completion broadcasts both final results and GAME_RESULT room state",
   }
 });
 
+test("final result reconciles a newly published question set after authority recovery", async () => {
+  const { state, authority } = createAuthority(1);
+  enterReview(authority);
+  assert.equal(
+    authority.syncQuestionSetMetadata(structuredClone(authority.getAggregate()!.questionSet!)),
+    true,
+  );
+  await authority.forceCheckpoint("phase-boundary");
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  restored.getAggregate()!.questions[0].labelText = "authority label";
+  const publishedQuestionSet: QuestionSet = {
+    ...structuredClone(restored.getAggregate()!.questionSet!),
+    title: "Published Set",
+    description: "Published before the result transition",
+    creationMethod: "player_manual",
+    isPublic: true,
+    questions: [{ ...restored.getAggregate()!.questions[0], labelText: "stale D1 label" }],
+  };
+
+  assert.equal(restored.syncQuestionSetMetadata(publishedQuestionSet), true);
+  const ended = restored.handleMutation(socketFor(state, "host"), envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  const resultDelta = ended.publicDeltas.find((delta) => delta.type === "game_result_snapshot");
+  assert.equal(resultDelta?.type, "game_result_snapshot");
+  if (resultDelta?.type === "game_result_snapshot") {
+    assert.equal(resultDelta.snapshot.questionSet?.isPublic, true);
+    assert.equal(resultDelta.snapshot.questionSet?.title, "Published Set");
+    assert.equal(resultDelta.snapshot.questionSet?.questions?.[0]?.labelText, "authority label");
+  }
+
+  await restored.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+  const recoveredResult = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await recoveredResult.restoreFromStorage();
+  const snapshot = recoveredResult.query("getGameResultSnapshot", []) as { questionSet: QuestionSet | null };
+  assert.equal(snapshot.questionSet?.isPublic, true);
+  assert.equal(snapshot.questionSet?.title, "Published Set");
+  assert.equal(snapshot.questionSet?.questions?.[0]?.labelText, "authority label");
+});
+
+test("the WebSocket final transition refreshes question-set metadata before applying the vNext mutation", () => {
+  const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /private async reconcileVNextQuestionSetBeforeGameResult\(name: string\)/);
+  assert.match(
+    worker,
+    /await this\.reconcileVNextQuestionSetBeforeGameResult\(payload\.name\);[\s\S]{0,160}this\.authorityVNext\.handleMutation/,
+  );
+});
+
 test("players can leave an ended vNext game and roster projection is forced", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");

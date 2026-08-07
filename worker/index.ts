@@ -3771,6 +3771,7 @@ export class RoomDurableObjectV3 {
         payload: mutationPayload,
       };
     }
+    await this.reconcileVNextQuestionSetBeforeGameResult(payload.name);
     const outcome = this.authorityVNext.handleMutation(socket, mutation, receivedAtMs);
     this.invalidateVNextSnapshotCaches(outcome);
     socket.send(JSON.stringify({
@@ -3826,6 +3827,21 @@ export class RoomDurableObjectV3 {
     const receipt = await this.authorityVNext.maybeCheckpoint();
     if (receipt) this.broadcastVNextDurableAck(receipt);
     return true;
+  }
+
+  private async reconcileVNextQuestionSetBeforeGameResult(name: string) {
+    if (name !== "advanceReviewedQuestion" && name !== "skipCurrentQuestion") return;
+    const aggregate = this.authorityVNext.getAggregate();
+    const gameSession = aggregate?.gameSession;
+    if (
+      !aggregate ||
+      aggregate.cutoverState !== "active" ||
+      !gameSession ||
+      aggregate.questions.length === 0 ||
+      gameSession.currentQuestionIndex < aggregate.questions.length - 1
+    ) return;
+    const questionSet = await runWithGameDatabase(this.env, () => gameService.getQuestionSetById(gameSession.questionSetId));
+    if (questionSet) this.authorityVNext.syncQuestionSetMetadata(questionSet);
   }
 
   private sendVNextOutcome(name: string, outcome: VNextMutationOutcome) {
