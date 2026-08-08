@@ -29,11 +29,10 @@ wrangler-local/
 .codex-question-set-backfill/
 /scripts/find-active-rooms.mjs
 
-# local promo recording tools
-/promo-question-wall.html
-/promo-question-wall-motion.html
-/promo-standard-mode.html
-/promo-team-battle.html
+# local promo recording and cover drafts
+/promo-*.html
+/promo-cover*.png
+/.codex-tmp/
 
 # local Cloudflare production usage data
 /docs/cloudflare-usage-history/
