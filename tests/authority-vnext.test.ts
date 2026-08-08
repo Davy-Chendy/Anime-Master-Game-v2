@@ -773,7 +773,7 @@ test("committed terminal rejection keeps the same error after restart", async ()
   assert.equal(replay.error, rejected.error);
 });
 
-test("late join and PLAYER role promotion receive scores on the next question", async () => {
+test("late joins score on the next question while active role switches are rejected", async () => {
   const { state, authority } = createAuthority(1, fakeD1, 2);
   const host = socketFor(state, "host");
   const late = socketFor(state, "late");
@@ -781,19 +781,21 @@ test("late join and PLAYER role promotion receive scores on the next question", 
   const now = Date.now();
   const joined = authority.handleMutation(late, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), now);
   assert.deepEqual(joined.data, { room: authority.getAggregate()?.room, error: null, errorCode: null });
-  authority.handleMutation(host, envelope("host", 1, "updatePlayerRole", { targetPlayerId: "p0", role: "SPECTATOR" }), now + 1);
-  authority.getAggregate()!.scores = authority.getAggregate()!.scores.filter((score) => score.playerId !== "p0");
-  delete authority.getAggregate()!.scoreBaseline.p0;
-  authority.handleMutation(host, envelope("host", 2, "updatePlayerRole", { targetPlayerId: "p0", role: "PLAYER" }), now + 2);
-  const skipped = authority.handleMutation(host, envelope("host", 3, "skipCurrentQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }), now + 3);
+  const activeRoleSwitch = authority.handleMutation(p0, envelope("p0", 1, "updatePlayerRole", { targetPlayerId: "p0", role: "SPECTATOR" }), now + 1);
+  assert.equal(activeRoleSwitch.terminal, true);
+  assert.match(activeRoleSwitch.error ?? "", /大厅或出题准备阶段/);
+  const activeRejoinSwitch = authority.handleMutation(p0, envelope("p0", 2, "joinRoom", { nickname: "P0", role: "SPECTATOR" }), now + 2);
+  assert.equal(activeRejoinSwitch.terminal, true);
+  assert.match(activeRejoinSwitch.error ?? "", /游戏进行中不能切换/);
+  const skipped = authority.handleMutation(host, envelope("host", 1, "skipCurrentQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }), now + 3);
   await authority.forceCheckpoint(skipped.forceCheckpoint ?? "phase-boundary", skipped.archiveQuestion);
-  const opened = authority.handleMutation(host, { ...envelope("host", 4, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), questionIndex: 1 }, now + 4);
+  const opened = authority.handleMutation(host, { ...envelope("host", 2, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), questionIndex: 1 }, now + 4);
   await authority.forceCheckpoint(opened.forceCheckpoint ?? "phase-boundary");
   authority.handleMutation(late, { ...envelope("late", 2, "submitAnswer", { playerId: "late", answerText: "a" }), questionIndex: 1 }, now + 5);
-  authority.handleMutation(p0, { ...envelope("p0", 1, "submitAnswer", { playerId: "p0", answerText: "a" }), questionIndex: 1 }, now + 6);
-  authority.handleMutation(host, { ...envelope("host", 5, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [
+  authority.handleMutation(p0, { ...envelope("p0", 3, "submitAnswer", { playerId: "p0", answerText: "a" }), questionIndex: 1 }, now + 6);
+  authority.handleMutation(host, { ...envelope("host", 3, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [
     { buzzerAnswerId: "late:2:submitAnswer:b", isCorrect: true },
-    { buzzerAnswerId: "p0:1:submitAnswer:b", isCorrect: true },
+    { buzzerAnswerId: "p0:3:submitAnswer:b", isCorrect: true },
   ] }), questionIndex: 1 }, now + 4006);
   assert.equal(authority.getSnapshot().scores.find((score) => score.playerId === "late")?.score, 5);
   assert.equal(authority.getSnapshot().scores.find((score) => score.playerId === "p0")?.score, 5);
@@ -869,6 +871,50 @@ test("cancel current round persistently releases vNext for the next game", async
   authority.beginStart("r1", "g2", { startRequestId: "g2" });
   assert.equal(authority.getAggregate()?.gameId, "g2");
   assert.equal(authority.getAggregate()?.cutoverState, "initializing");
+});
+
+test("hibernation does not revive a team vote Alarm after the host cancels the game", async () => {
+  const { state, authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  const voteDeadlineAt = new Date(Date.now() - 60_000).toISOString();
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0"], blue: ["p1"] },
+    initialTeams: { red: ["p0"], blue: ["p1"] },
+    activeTeam: "red",
+    phase: "GUESS_VOTE",
+    revealBlockCount: 45,
+    revealLimit: 1,
+    turnNumber: 1,
+    voteDeadlineAt,
+    revealVotes: {},
+    guessVotes: {},
+    previousTurnAction: null,
+    pendingGuess: null,
+    teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = {
+    kind: "team-vote",
+    gameId: "g1",
+    questionIndex: 0,
+    phaseKey: "GUESS_VOTE:1",
+    runAtMs: new Date(voteDeadlineAt).getTime(),
+  };
+
+  const canceled = authority.handleMutation(
+    null,
+    envelope("host", 1, "cancelCurrentRound", { roomId: "r1", hostPlayerId: "host" }),
+    Date.now(),
+  );
+  await authority.forceCheckpoint(canceled.forceCheckpoint!);
+  assert.equal(authority.getAggregate()?.cutoverState, "ended");
+  assert.equal(authority.getAggregate()?.deadline, null);
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.equal(restored.getAggregate()?.cutoverState, "ended");
+  assert.equal(restored.getAggregate()?.deadline, null);
+  assert.equal(restored.getDeadline(), null);
 });
 
 test("FIRST_CORRECT judgement locks the question for review", async () => {
@@ -1272,6 +1318,50 @@ test("ended room mutations ignore a stale question index", () => {
   assert.deepEqual(authority.getAggregate()?.room?.teamAssignments, {});
 });
 
+test("pending lobby handoff lets players switch only their own role with manual-team validation", async () => {
+  const { state, authority } = createAuthority(2);
+  const host = socketFor(state, "host");
+  const p0 = socketFor(state, "p0");
+  const p1 = socketFor(state, "p1");
+  const late = socketFor(state, "late");
+  const room = authority.getAggregate()!.room!;
+  room.gameMode = "TEAM_BATTLE";
+  room.teamAssignmentMode = "MANUAL";
+  room.teamAssignments = { p0: "red", p1: "blue" };
+  const now = Date.now();
+
+  const returned = authority.handleMutation(host, envelope("host", 1, "returnRoomToLobby", { hostPlayerId: "host" }), now);
+  await authority.forceCheckpoint(returned.forceCheckpoint ?? "projection");
+  assert.equal(authority.hasPendingRoomHandoff(), true);
+
+  const joined = authority.handleMutation(late, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), now + 1);
+  assert.equal(joined.error, undefined, "new lobby members may join an unassigned manual team before choosing a team");
+  assert.equal(joined.forceCheckpoint, "projection");
+  assert.equal(authority.getAggregate()!.room!.teamAssignments?.late, undefined);
+
+  const changedOther = authority.handleMutation(p0, envelope("p0", 1, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), now + 2);
+  assert.equal(changedOther.terminal, true);
+  assert.match(changedOther.error ?? "", /只能切换自己的/);
+
+  const spectator = authority.handleMutation(p1, envelope("p1", 1, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), now + 3);
+  assert.equal(spectator.error, undefined);
+  assert.equal(spectator.forceCheckpoint, "projection");
+  assert.equal(authority.getAggregate()!.room!.teamAssignments?.p1, undefined);
+
+  const reconnected = authority.handleMutation(p1, envelope("p1", 2, "joinRoom", { nickname: "P1" }), now + 4);
+  assert.equal(reconnected.error, undefined);
+  assert.equal(authority.getAggregate()!.players.find((item) => item.id === "p1")?.role, "SPECTATOR", "reconnect without an explicit role must preserve the current role");
+
+  const missingTeam = authority.handleMutation(p1, envelope("p1", 3, "updatePlayerRole", { targetPlayerId: "p1", role: "PLAYER" }), now + 5);
+  assert.equal(missingTeam.terminal, true);
+  assert.match(missingTeam.error ?? "", /请先选择加入红队或蓝队/);
+
+  const player = authority.handleMutation(p1, envelope("p1", 4, "updatePlayerRole", { targetPlayerId: "p1", role: "PLAYER", team: "red" }), now + 6);
+  assert.equal(player.error, undefined);
+  assert.equal(authority.getAggregate()!.players.find((item) => item.id === "p1")?.role, "PLAYER");
+  assert.equal(authority.getAggregate()!.room!.teamAssignments?.p1, "red");
+});
+
 test("WebSocket active-only room mutations fall through after the vNext game ends", () => {
   const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
   const client = readFileSync(new URL("../src/lib/cloudflareClient.ts", import.meta.url), "utf8");
@@ -1279,6 +1369,7 @@ test("WebSocket active-only room mutations fall through after the vNext game end
     worker,
     /ROOM_AUTHORITY_ACTIVE_ONLY_NAMES\.has\(payload\.name\) && !this\.authorityVNext\.isRunningGame\(gameId\)/,
   );
+  assert.match(worker, /isRoomStateAction && !shouldUseVNextRoomState\(activeAggregate, this\.authorityVNext\.hasPendingRoomHandoff\(\)\)\) return false/);
   assert.match(worker, /connectedAggregate\.cutoverState === "active"[\s\S]{0,180}hasPendingRoomHandoff/);
   assert.match(client, /state\.currentGameId === gameId && actorId/);
   assert.match(client, /isCompletedLobbyHandoff\(change\)[\s\S]{0,220}clearAuthorityOutboxTopic\(topic\)/);
@@ -2835,8 +2926,8 @@ test("active-game joins reject normalized duplicate nicknames without poisoning 
 test("v3 aggregate projection preserves leave, host transfer, and role changes", async () => {
   const { state, authority, d1 } = createSqliteProjectionAuthority(2);
   authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "leaveRoom", { playerId: "host" }), Date.now());
-  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), Date.now() + 1);
-  const outcome = authority.handleMutation(socketFor(state, "p0"), envelope("p0", 2, "returnRoomToLobby", { hostPlayerId: "p0" }), Date.now() + 2);
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "returnRoomToLobby", { hostPlayerId: "p0" }), Date.now() + 1);
+  const outcome = authority.handleMutation(socketFor(state, "p1"), envelope("p1", 1, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), Date.now() + 2);
   await authority.forceCheckpoint(outcome.forceCheckpoint ?? "projection");
 
   assert.equal(await authority.flushFinalProjection(), true);
@@ -2867,8 +2958,8 @@ test("final participants retain scored players after leaving or becoming spectat
     { buzzerAnswerId: "p1:1:submitAnswer:b", isCorrect: true },
   ] }), now + 4000);
   authority.handleMutation(p0, envelope("p0", 2, "leaveRoom", { playerId: "p0" }), now + 4001);
-  authority.handleMutation(host, envelope("host", 3, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), now + 4002);
-  const ended = authority.handleMutation(host, envelope("host", 4, "returnRoomToLobby", { hostPlayerId: "host" }), now + 4003);
+  authority.handleMutation(host, envelope("host", 3, "returnRoomToLobby", { hostPlayerId: "host" }), now + 4002);
+  const ended = authority.handleMutation(p1, envelope("p1", 2, "updatePlayerRole", { targetPlayerId: "p1", role: "SPECTATOR" }), now + 4003);
   await authority.forceCheckpoint(ended.forceCheckpoint ?? "projection");
   await authority.flushFinalProjection();
   const archiveInsert = statements.find((statement) => /INSERT INTO game_result_archives/.test(statement.sql));
@@ -2905,8 +2996,11 @@ test("realtime authority source has no heartbeat, keepalive, or periodic checkpo
 test("WebSocket projection boundaries flush the D1 aggregate outbox", () => {
   const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(worker, /outcome\.forceCheckpoint === "game-end" \|\| outcome\.forceCheckpoint === "projection"[\s\S]{0,160}flushFinalProjection/);
-  assert.match(worker, /aggregate\?\.room\?\.status !== "LOBBY" \|\| this\.authorityVNext\.hasPendingRoomHandoff\(\)/);
-  assert.match(worker, /aggregate\.room\?\.status !== "LOBBY" \|\| this\.authorityVNext\.hasPendingRoomHandoff\(\)/);
+  assert.match(worker, /function shouldUseVNextRoomState[\s\S]{0,260}aggregate\.room\?\.status !== "LOBBY" \|\| hasPendingRoomHandoff/);
+  assert.equal(worker.match(/shouldUseVNextRoomState\(aggregate, this\.authorityVNext\.hasPendingRoomHandoff\(\)\)/g)?.length, 2);
+  assert.match(worker, /shouldUseVNextRoomState\(activeAggregate, this\.authorityVNext\.hasPendingRoomHandoff\(\)\)/);
+  assert.match(worker, /ROOM_HANDOFF_BARRIER_NAMES[\s\S]{0,260}"startGameWithQuestionSet"/);
+  assert.equal(worker.match(/await this\.flushPendingRoomHandoffForLobbyMutation\(/g)?.length, 2, "HTTP and WebSocket lobby mutations must share the handoff barrier");
   assert.equal(
     worker.match(/questionSetManifestVersion: hidden\.questionSetManifestVersion === 1 \? 1 : null/g)?.length,
     3,

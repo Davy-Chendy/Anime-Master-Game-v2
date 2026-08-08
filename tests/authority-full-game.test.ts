@@ -726,8 +726,7 @@ async function runRoundRevealRandomScenario(seed: number) {
         await openRound(sim, randomAvailableBlocks(sim, 1, random)[0]);
         if (question === 0 && round === 1) {
           const lateId = `late-${seed}`;
-          assert.equal((await sim.act(lateId, "joinRoom", { nickname: lateId, role: "SPECTATOR" })).error, undefined);
-          assert.equal((await sim.act("host", "updatePlayerRole", { targetPlayerId: lateId, role: "PLAYER" })).error, undefined);
+          assert.equal((await sim.act(lateId, "joinRoom", { nickname: lateId, role: "PLAYER" })).error, undefined);
           const rejected = await sim.act(lateId, "submitAnswer", { playerId: lateId, answerText: "not-yet-eligible" });
           assert.equal(rejected.terminal, true);
         }

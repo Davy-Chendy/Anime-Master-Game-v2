@@ -391,6 +391,68 @@ async function snapshotStorm(contexts) {
   await Promise.all(requests);
 }
 
+async function exerciseSecondGameLifecycle(metrics, context) {
+  const step = async (label, callback) => {
+    try { return await callback(); } catch (error) { throw new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+  };
+  const host = context.clients.get(context.hostId);
+  const returningPlayerId = context.players[0];
+  const returningPlayer = context.clients.get(returningPlayerId);
+  await returningPlayer.connect(true);
+
+  await step("return to lobby", () => host.action("returnRoomToLobby", [context.room.id, context.hostId]));
+  await step("existing player to spectator", () => returningPlayer.action("updatePlayerRole", [context.room.id, returningPlayerId, returningPlayerId, "SPECTATOR"]));
+  await step("existing spectator to player", () => returningPlayer.action("updatePlayerRole", [context.room.id, returningPlayerId, returningPlayerId, "PLAYER"]));
+
+  const latePlayerId = `${context.room.id}-second-game-late`;
+  const latePlayer = new RuntimeClient(context.clients.get(context.hostId).worker, `room:${context.room.id}`, latePlayerId, metrics);
+  context.clients.set(latePlayerId, latePlayer);
+  await latePlayer.connect();
+  const joined = await step("late spectator join", () => latePlayer.action("joinRoom", [context.room.code, latePlayerId, "Second Game Late", "SPECTATOR"]));
+  assert.equal(joined.error, null);
+  assert.equal(joined.room?.players.some((player) => player.id === latePlayerId), true);
+  await step("late spectator to player", () => latePlayer.action("updatePlayerRole", [context.room.id, latePlayerId, latePlayerId, "PLAYER"]));
+
+  await host.action("selectPresenterForRound", [context.room.id, context.hostId, context.hostId]);
+  await host.action("prepareQuestionSetForStart", [{
+    roomId: context.room.id,
+    presenterPlayerId: context.hostId,
+    questionSetId: context.questionSet.id,
+  }]);
+  const secondGameId = `${context.room.id}-second-game`;
+  const started = await host.action("startGameWithQuestionSet", [{
+    startRequestId: secondGameId,
+    roomId: context.room.id,
+    hostPlayerId: context.hostId,
+    presenterPlayerId: context.hostId,
+    questionSetId: context.questionSet.id,
+    gameMode: "ROUND_REVEAL",
+    maxRevealRounds: 3,
+    roundSeconds: 45,
+    roundScores: [5, 3, 1],
+  }]);
+  assert.equal(started.gameSession.id, secondGameId);
+  assert.equal((await latePlayer.snapshot("getGameBootstrapSnapshot", secondGameId)).gameSession.status, "PLAYING");
+
+  await host.action("cancelCurrentRound", [context.room.id, context.hostId]);
+  await host.action("updateRoomGameSettings", [{
+    roomId: context.room.id,
+    hostPlayerId: context.hostId,
+    gameMode: "ROUND_REVEAL",
+    maxRevealRounds: 3,
+    roundSeconds: 45,
+    roundScores: [5, 3, 1],
+  }]);
+  const lobby = await latePlayer.action("getRoomWithPlayers", [context.room.code]);
+  assert.equal(lobby.status, "LOBBY");
+  assert.equal(lobby.currentGameId, null);
+  assert.equal(lobby.currentPresenterPlayerId, null);
+  assert.equal(lobby.preparedQuestionSetId, null);
+  assert.equal(lobby.players.find((player) => player.id === returningPlayerId)?.role, "PLAYER");
+  assert.equal(lobby.players.find((player) => player.id === latePlayerId)?.role, "PLAYER");
+  return latePlayerId;
+}
+
 async function judgeAndCompleteFirstQuestion(metrics, context) {
   const host = context.clients.get(context.hostId);
   const visibilityStarted = performance.now();
@@ -510,6 +572,9 @@ async function main() {
       assert.equal(result.leaderboard.some((entry) => entry.playerId === context.hostId || context.spectators.includes(entry.playerId)), false);
     }
 
+    const secondGameContext = contexts[1];
+    const secondGameLatePlayerId = await exerciseSecondGameLifecycle(metrics, secondGameContext);
+
     for (const context of contexts) for (const client of context.clients.values()) client.close();
     await worker.stop();
     const [finalRows] = await queryLocalD1(persistTo, `SELECT
@@ -532,7 +597,7 @@ async function main() {
     }, "vNext final projection wrote unchanged roster or normalized result rows");
     const [aggregateRoomRows] = await queryLocalD1(persistTo, `SELECT
       COUNT(*) AS room_rows,
-      SUM(CASE WHEN runtime_generation=4 AND room_state_version=1 AND json_valid(room_state_json) AND game_status='GAME_RESULT' THEN 1 ELSE 0 END) AS valid_aggregate_rows,
+      SUM(CASE WHEN runtime_generation=4 AND room_state_version=1 AND json_valid(room_state_json) AND game_status IN ('GAME_RESULT','LOBBY') THEN 1 ELSE 0 END) AS valid_aggregate_rows,
       MIN(room_state_revision) AS min_revision,
       MIN(json_array_length(json_extract(room_state_json,'$.players'))) AS min_roster_size,
       MAX(json_array_length(json_extract(room_state_json,'$.players'))) AS max_roster_size
@@ -542,6 +607,13 @@ async function main() {
     assert.ok(aggregateRoomRows.min_revision >= 1, "final projection did not update aggregate room state");
     assert.equal(aggregateRoomRows.min_roster_size, 1 + REGULAR_PLAYERS + SPECTATORS_PER_ROOM);
     assert.equal(aggregateRoomRows.max_roster_size, 1 + EXTREME_PLAYERS + SPECTATORS_PER_ROOM);
+    const [secondGameLobby] = await queryLocalD1(persistTo, `SELECT game_status,current_presenter_player_id,current_game_id,prepared_question_set_id,room_state_json
+      FROM rooms WHERE id='${secondGameContext.room.id}'`);
+    assert.equal(secondGameLobby.game_status, "LOBBY");
+    assert.equal(secondGameLobby.current_presenter_player_id, null);
+    assert.equal(secondGameLobby.current_game_id, null);
+    assert.equal(secondGameLobby.prepared_question_set_id, null);
+    assert.equal(JSON.parse(secondGameLobby.room_state_json).players.some((player) => player.id === secondGameLatePlayerId && player.role === "PLAYER"), true);
     const archiveRows = await queryLocalD1(persistTo, "SELECT game_session_id,result_json FROM game_result_archives ORDER BY game_session_id");
     assert.equal(archiveRows.length, ROOM_COUNT);
     for (const row of archiveRows) {
@@ -558,7 +630,7 @@ async function main() {
       metrics.maxArchiveBytes = Math.max(metrics.maxArchiveBytes, Buffer.byteLength(row.result_json));
     }
 
-    const totalPeople = contexts.reduce((sum, context) => sum + 1 + context.players.length + context.spectators.length, 0);
+    const totalPeople = contexts.reduce((sum, context) => sum + 1 + context.players.length + context.spectators.length, 0) + 1;
     const result = {
       event: "authority_local_runtime_result",
       runtime: "wrangler-dev-workerd",

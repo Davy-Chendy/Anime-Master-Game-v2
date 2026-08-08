@@ -3,6 +3,7 @@
 import { RoomGameAuthority, type AuthorityVersion } from "./roomGameAuthority";
 import {
   RoomAuthorityVNext,
+  type VNextAggregate,
   type VNextMutationEnvelope,
   type VNextMutationOutcome,
   type VNextSocketAttachment,
@@ -378,6 +379,22 @@ const ROOM_AUTHORITY_MEMBERSHIP_NAMES = new Set(["joinRoom", "leaveRoom", "kickP
 const ROOM_AUTHORITY_ACTIVE_ONLY_NAMES = new Set(["cancelCurrentRound"]);
 const ROOM_AUTHORITY_ROSTER_QUERY_NAMES = new Set(["getRoomWithPlayers", "getPlayersByRoomId"]);
 const VNEXT_POSITIONAL_ROOM_MUTATIONS = new Set(["joinRoom", "leaveRoom", "kickPlayerFromRoom", "dissolveRoom", "updatePlayerRole", "cancelCurrentRound", "returnRoomToLobby"]);
+const ROOM_HANDOFF_BARRIER_NAMES = new Set([
+  "selectPresenterForRound",
+  "cancelPresenterSetup",
+  "prepareQuestionSetForStart",
+  "updateRoomGameSettings",
+  "selectTeamForPlayer",
+  "startGameWithQuestionSet",
+]);
+
+function shouldUseVNextRoomState(aggregate: VNextAggregate | null, hasPendingRoomHandoff: boolean) {
+  return Boolean(
+    aggregate?.gameSession
+    && aggregate.cutoverState !== "initializing"
+    && (aggregate.room?.status !== "LOBBY" || hasPendingRoomHandoff),
+  );
+}
 
 function getVNextPositionalMutation(name: string, args: unknown[]) {
   switch (name) {
@@ -3112,6 +3129,12 @@ export class RoomDurableObjectV3 {
     return task;
   }
 
+  private async flushPendingRoomHandoffForLobbyMutation(name: string | undefined) {
+    if (!name || !ROOM_HANDOFF_BARRIER_NAMES.has(name) || !this.authorityVNext.hasPendingRoomHandoff()) return;
+    const handoffReady = await this.authorityVNext.flushRoomHandoff();
+    if (!handoffReady) throw new Error("上一局房间状态仍在同步，请稍后重试。");
+  }
+
   private async handleBroadcastMessage(message: BroadcastMessage) {
     if (this.deadlineReconcileRequired) {
       await this.ensureDeadlineReconciled(message.topic, "legacy_broadcast_recovery");
@@ -3180,6 +3203,7 @@ export class RoomDurableObjectV3 {
       rpcArgs = body.args ?? [];
       const mutationDeadlinePolicy = getMutationDeadlinePolicy(body.name ?? "");
       const localRoomId = getRoomIdFromTopic(localTopic);
+      await this.flushPendingRoomHandoffForLobbyMutation(body.name);
       if (localTopic && localRoomId && body.name === "startGameWithQuestionSet" && isRecord(body.args?.[0])) {
         const startParams = { ...body.args[0], authorityVersion: 2 };
         const gameId = typeof startParams.startRequestId === "string" ? startParams.startRequestId : null;
@@ -3219,7 +3243,7 @@ export class RoomDurableObjectV3 {
       if (localTopic && body.name && ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body.name) && this.authorityVNext.hasStoredState()) {
         await this.restoreVNextAuthority();
         const aggregate = this.authorityVNext.getAggregate();
-        if (aggregate?.cutoverState !== "initializing" && (aggregate?.room?.status !== "LOBBY" || this.authorityVNext.hasPendingRoomHandoff())) {
+        if (shouldUseVNextRoomState(aggregate, this.authorityVNext.hasPendingRoomHandoff())) {
           return Response.json({ data: this.authorityVNext.query(body.name, body.args ?? []) });
         }
       }
@@ -3228,7 +3252,7 @@ export class RoomDurableObjectV3 {
         await this.resumeInitializingVNextStart();
         const aggregate = this.authorityVNext.getAggregate();
         const positional = getVNextPositionalMutation(body.name, body.args ?? []);
-        if (aggregate?.gameSession && aggregate.cutoverState !== "initializing" && (aggregate.room?.status !== "LOBBY" || this.authorityVNext.hasPendingRoomHandoff()) && positional) {
+        if (shouldUseVNextRoomState(aggregate, this.authorityVNext.hasPendingRoomHandoff()) && positional) {
           const seen = aggregate.seenSeqByActor[positional.actorId] ?? aggregate.committedSeqByActor[positional.actorId] ?? 0;
           const envelope: VNextMutationEnvelope = {
             actionId: body.clientActionId || crypto.randomUUID(),
@@ -3724,8 +3748,10 @@ export class RoomDurableObjectV3 {
     const argRecord = isRecord(payload.args?.[0]) ? payload.args?.[0] : null;
     const positional = getVNextPositionalMutation(payload.name, payload.args ?? []);
     const activeAggregate = this.authorityVNext.getAggregate();
+    const isRoomStateAction = VNEXT_POSITIONAL_ROOM_MUTATIONS.has(payload.name) || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(payload.name);
+    if (isRoomStateAction && !shouldUseVNextRoomState(activeAggregate, this.authorityVNext.hasPendingRoomHandoff())) return false;
     const gameId = payload.mutation?.gameId ?? queryGameId ?? (typeof argRecord?.gameSessionId === "string" ? argRecord.gameSessionId : null)
-      ?? (VNEXT_POSITIONAL_ROOM_MUTATIONS.has(payload.name) || ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(payload.name) ? activeAggregate?.gameId ?? null : null);
+      ?? (isRoomStateAction ? activeAggregate?.gameId ?? null : null);
     if (payload.mutation && this.authorityVNext.hasGameState() && !this.authorityVNext.hasGameState(payload.mutation.gameId)) {
       await this.restoreVNextAuthority();
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, error: "该操作属于已结束的游戏，请刷新后重试。" }));
@@ -3962,6 +3988,8 @@ export class RoomDurableObjectV3 {
       }
 
       if (await this.tryHandleVNextAction(socket, payload, receivedAtMs)) return;
+
+      await this.flushPendingRoomHandoffForLobbyMutation(payload.name);
 
       if (payload.name === "startGameWithQuestionSet" && isRecord(payload.args?.[0])) {
         payload.args = [{ ...payload.args[0], authorityVersion: 2 }];

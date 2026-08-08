@@ -43,6 +43,7 @@ const COMMITTED_REJECTION_LIMIT = 128;
 const FINAL_PROJECTION_LIMIT_BYTES = 1024 * 1024;
 const FINAL_PROJECTION_RESERVE_BYTES = 400 * 1024;
 const GAME_RESULT_ARCHIVE_LIMIT_BYTES = 512 * 1024;
+const MAX_PLAYERS_PER_ROOM = 50;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: 45 }, (_, index) => index);
@@ -550,7 +551,7 @@ export class RoomAuthorityVNext {
       this.restored = true;
       return null;
     }
-    const normalizedTeam = aggregate.gameSession
+    const normalizedTeam = aggregate.cutoverState === "active" && aggregate.gameSession
       ? normalizeTeamSessionDeadline(aggregate.gameSession, Date.now())
       : { changed: false, deadline: null as VNextDeadline };
     const repairedDeadline = normalizedTeam.deadline && (
@@ -566,9 +567,13 @@ export class RoomAuthorityVNext {
     if (clearedStaleTeamDeadline) {
       aggregate.deadline = null;
     }
-    if (normalizedTeam.changed || repairedDeadline || clearedStaleTeamDeadline) {
+    const clearedInactiveDeadline = aggregate.cutoverState !== "active" && aggregate.deadline !== null;
+    if (clearedInactiveDeadline) {
+      aggregate.deadline = null;
+    }
+    if (normalizedTeam.changed || repairedDeadline || clearedStaleTeamDeadline || clearedInactiveDeadline) {
       this.writeActive(aggregate);
-      this.deadlineRepairPending ||= Boolean(repairedDeadline || clearedStaleTeamDeadline);
+      this.deadlineRepairPending ||= Boolean(repairedDeadline || clearedStaleTeamDeadline || clearedInactiveDeadline);
       console.info(JSON.stringify({
         event: "authority_vnext_team_deadline_repaired",
         authorityVersion: 2,
@@ -1455,16 +1460,29 @@ export class RoomAuthorityVNext {
     ))) {
       throw new TerminalMutationError("该昵称已在房间内使用，请换一个昵称。");
     }
-    const role = action.payload.role === "SPECTATOR" ? "SPECTATOR" as const : "PLAYER" as const;
+    const requestedRole = action.payload.role === "PLAYER" || action.payload.role === "SPECTATOR" ? action.payload.role : null;
     const selectedTeam = action.payload.team === "red" || action.payload.team === "blue" ? action.payload.team : null;
+    let player = aggregate.players.find((item) => item.id === action.actorId);
+    let role = player?.role ?? requestedRole ?? "PLAYER";
+    if (player && requestedRole && requestedRole !== player.role) {
+      if (aggregate.room?.status !== "LOBBY" && aggregate.room?.status !== "QUESTION_SETUP") {
+        throw new TerminalMutationError("游戏进行中不能切换玩家/观战身份。");
+      }
+      if (aggregate.room.status === "QUESTION_SETUP" && player.id === aggregate.room.currentPresenterPlayerId) {
+        throw new TerminalMutationError("当前出题人不能切换为观战身份。");
+      }
+      role = requestedRole;
+    }
+    if (role === "PLAYER" && (!player || player.role !== "PLAYER") && aggregate.players.filter((item) => item.role === "PLAYER").length >= MAX_PLAYERS_PER_ROOM) {
+      throw new TerminalMutationError(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以选择观战加入。`);
+    }
     const manualTeamBattle = aggregate.gameSession?.gameMode === "TEAM_BATTLE" && aggregate.room?.teamAssignmentMode === "MANUAL";
-    if (role === "PLAYER" && manualTeamBattle && action.actorId !== aggregate.gameSession?.presenterPlayerId && !selectedTeam && !aggregate.room?.teamAssignments?.[action.actorId]) {
+    if (role === "PLAYER" && aggregate.cutoverState === "active" && manualTeamBattle && action.actorId !== aggregate.gameSession?.presenterPlayerId && !selectedTeam && !aggregate.room?.teamAssignments?.[action.actorId]) {
       throw new TerminalMutationError("手动分队已开启，请先选择加入红队或蓝队。");
     }
-    let player = aggregate.players.find((item) => item.id === action.actorId);
     if (player) Object.assign(player, { nickname, role, lastSeenAt: nowIso(action.serverReceivedAtMs) });
     else {
-      if (aggregate.players.length >= 50) throw new TerminalMutationError("房间人数已满。");
+      if (aggregate.players.length >= MAX_PLAYERS_PER_ROOM) throw new TerminalMutationError("房间人数已满。");
       player = { id: action.actorId, roomId: aggregate.roomId, nickname, isHost: false, role, joinedAt: nowIso(action.serverReceivedAtMs), lastSeenAt: nowIso(action.serverReceivedAtMs) };
       aggregate.players.push(player);
     }
@@ -1582,17 +1600,40 @@ export class RoomAuthorityVNext {
 
   private updatePlayerRole(action: VNextPendingMutation): VNextMutationOutcome {
     const aggregate = this.requireActiveOrEnded();
-    if (aggregate.room?.hostPlayerId !== action.actorId) throw new TerminalMutationError("只有房主可以修改身份。");
+    const room = aggregate.room;
     const target = getString(action.payload.targetPlayerId);
     const player = aggregate.players.find((item) => item.id === target);
-    if (!player || (action.payload.role !== "PLAYER" && action.payload.role !== "SPECTATOR")) throw new TerminalMutationError("玩家身份参数无效。");
+    if (target !== action.actorId) throw new TerminalMutationError("身份切换失败：只能切换自己的玩家/观战身份。");
+    if (!room) throw new TerminalMutationError("身份切换失败：房间不存在。");
+    if (action.payload.role !== "PLAYER" && action.payload.role !== "SPECTATOR") throw new TerminalMutationError("身份切换失败：未知的玩家身份。");
+    if (room.status !== "LOBBY" && room.status !== "QUESTION_SETUP") throw new TerminalMutationError("只有在房间大厅或出题准备阶段可以切换玩家/观战身份。");
+    if (room.status === "QUESTION_SETUP" && action.payload.role === "SPECTATOR" && target === room.currentPresenterPlayerId) {
+      throw new TerminalMutationError("当前出题人不能切换为观战身份。");
+    }
+    if (!player) throw new TerminalMutationError("身份切换失败：你不在当前房间。");
+    if (action.payload.role === "PLAYER" && player.role !== "PLAYER" && aggregate.players.filter((item) => item.role === "PLAYER").length >= MAX_PLAYERS_PER_ROOM) {
+      throw new TerminalMutationError(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以继续观战。`);
+    }
+    const selectedTeam = action.payload.team === "red" || action.payload.team === "blue" ? action.payload.team : null;
+    const teamAssignments = room.teamAssignments ?? {};
+    const manualTeamBattle = (room.gameMode ?? aggregate.gameSession?.gameMode) === "TEAM_BATTLE" && room.teamAssignmentMode === "MANUAL";
+    if (
+      action.payload.role === "PLAYER"
+      && manualTeamBattle
+      && target !== room.currentPresenterPlayerId
+      && !selectedTeam
+      && !teamAssignments[target]
+    ) {
+      throw new TerminalMutationError("手动分队已开启，请先选择加入红队或蓝队。");
+    }
     player.role = action.payload.role;
-    if (player.role === "SPECTATOR" && aggregate.room?.teamAssignments) delete aggregate.room.teamAssignments[player.id];
-    if (player.role === "PLAYER" && aggregate.cutoverState === "active") this.ensurePlayerScore(player.id);
-    if (aggregate.room) aggregate.room.players = aggregate.players;
-    const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(aggregate.room!) };
+    room.teamAssignments = teamAssignments;
+    if (player.role === "SPECTATOR" || player.id === room.currentPresenterPlayerId) delete teamAssignments[player.id];
+    else if (selectedTeam) teamAssignments[player.id] = selectedTeam;
+    room.players = aggregate.players;
+    const delta: RealtimeDelta = { scope: "room", type: "room_updated", room: clone(room) };
     return {
-      data: clone(aggregate.room),
+      data: clone(room),
       provisional: true,
       publicDeltas: [delta],
       presenterDeltas: [],
@@ -1749,7 +1790,8 @@ export class RoomAuthorityVNext {
   }
 
   getDeadline() {
-    return this.aggregate?.deadline ?? this.readAggregate()?.deadline ?? null;
+    const aggregate = this.aggregate ?? this.readAggregate();
+    return aggregate?.cutoverState === "active" ? aggregate.deadline : null;
   }
 
   async executeDueDeadline(now = Date.now()) {

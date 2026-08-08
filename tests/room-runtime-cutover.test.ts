@@ -24,6 +24,7 @@ class StorageAdapter {
   readonly db = new DatabaseSync(":memory:");
   failOn = "";
   deletedAlarmCount = 0;
+  private alarmAt: number | null = null;
   readonly sql = {
     exec: <T extends Record<string, unknown>>(query: string, ...bindings: unknown[]) => {
       if (this.failOn && query.includes(this.failOn)) throw new Error("injected migration failure");
@@ -47,7 +48,12 @@ class StorageAdapter {
       throw error;
     }
   }
-  async deleteAlarm() { this.deletedAlarmCount += 1; }
+  async getAlarm() { return this.alarmAt; }
+  async setAlarm(value: number | Date) { this.alarmAt = typeof value === "number" ? value : value.getTime(); }
+  async deleteAlarm() {
+    this.alarmAt = null;
+    this.deletedAlarmCount += 1;
+  }
 }
 
 test("D1 migration leaves old rooms unmarked and supports explicit current-generation rooms", () => {
@@ -140,4 +146,84 @@ test("generation 3 V3 object rejects HTTP and expires stale sockets before busin
 
   await object.webSocketMessage(socket, "{}");
   assert.equal(closeCode, 4001);
+});
+
+test("ended TEAM_BATTLE state cannot recreate an expired vote Alarm on a V3 wake", async () => {
+  const storage = new StorageAdapter();
+  const runtime = new RoomRuntimeV3Storage(storage as unknown as DurableObjectStorage);
+  runtime.initializeSchema();
+  runtime.ensureRoom("room-ended");
+  const expiredAt = Date.now() - 60_000;
+  const aggregate = {
+    authorityVersion: 2,
+    schemaVersion: 1,
+    cutoverState: "ended",
+    roomId: "room-ended",
+    gameId: "game-ended",
+    players: [],
+    gameParticipants: [],
+    questions: [],
+    questionSetManifestVersion: null,
+    dirtyQuestionLabelIds: [],
+    answers: [],
+    buzzerAnswers: [],
+    questionResults: [],
+    scores: [],
+    scoreBaseline: {},
+    committedSeqByActor: {},
+    seenSeqByActor: {},
+    terminalRejections: {},
+    deadline: {
+      kind: "team-vote",
+      gameId: "game-ended",
+      questionIndex: 0,
+      phaseKey: "GUESS_VOTE:1",
+      runAtMs: expiredAt,
+    },
+    gameSession: {
+      id: "game-ended",
+      gameMode: "TEAM_BATTLE",
+      currentQuestionIndex: 0,
+      teamBattleState: {
+        teams: { red: ["player-red"], blue: ["player-blue"] },
+        phase: "GUESS_VOTE",
+        turnNumber: 1,
+        voteDeadlineAt: new Date(expiredAt).toISOString(),
+      },
+    },
+    stateVersion: 1,
+    publicStateVersion: 1,
+    checkpointGeneration: 1,
+    lastCheckpointAtMs: Date.now(),
+  };
+  storage.db.prepare(`INSERT INTO authority_vnext_active_game(
+    id,room_id,game_id,authority_version,schema_version,cutover_state,state_version,state_json,updated_at
+  ) VALUES(1,?,?,?,?,?,?,?,?)`).run(
+    "room-ended",
+    "game-ended",
+    2,
+    1,
+    "ended",
+    1,
+    JSON.stringify(aggregate),
+    Date.now(),
+  );
+  await storage.setAlarm(expiredAt);
+  const state = {
+    storage,
+    id: { toString: () => "room-ended" },
+    blockConcurrencyWhile(callback: () => Promise<void>) { void callback(); },
+    getWebSockets: () => [],
+  } as unknown as DurableObjectState;
+  const env = { DB: {} } as unknown as Env;
+
+  await new RoomDurableObjectV3(state, env).alarm();
+
+  assert.equal(await storage.getAlarm(), null);
+  assert.equal(storage.deletedAlarmCount, 1);
+  const stored = JSON.parse(String(storage.db.prepare(
+    "SELECT state_json FROM authority_vnext_active_game WHERE id=1",
+  ).get().state_json)) as { cutoverState: string; deadline: unknown };
+  assert.equal(stored.cutoverState, "ended");
+  assert.equal(stored.deadline, null);
 });
