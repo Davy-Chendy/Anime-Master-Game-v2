@@ -1,8 +1,8 @@
 # Proposal: Add Public Rooms
 
-**Change ID:** `add-public-rooms`  
-**Created:** 2026-08-09  
-**Status:** Implementation Complete  
+**Change ID:** `add-public-rooms`
+**Created:** 2026-08-09
+**Status:** Implementation Complete
 **Completed:** 2026-08-09
 
 ## Problem Statement

@@ -1,6 +1,6 @@
 # Delta: Public Rooms
 
-**Change ID:** `add-public-rooms`  
+**Change ID:** `add-public-rooms`
 **Affects:** room creation, room catalog reads, membership summary, question-set preparation, room entry
 
 ## ADDED

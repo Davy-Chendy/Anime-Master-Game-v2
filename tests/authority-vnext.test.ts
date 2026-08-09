@@ -502,6 +502,54 @@ test("hibernation merges uncommitted Attachment exactly once", async () => {
   assert.equal(restored.getAggregate()?.seenSeqByActor.host, 1);
 });
 
+test("FIRST_CORRECT hibernation replay does not revive a persisted round deadline", async () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "BUZZER_FIRST_CORRECT";
+  const startedAt = Date.now();
+
+  authority.handleMutation(
+    host,
+    envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }),
+    startedAt,
+  );
+  authority.handleMutation(
+    player,
+    envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "correct" }),
+    startedAt + 1,
+  );
+  await authority.forceCheckpoint("phase-boundary");
+  const persistedDeadline = authority.getDeadline();
+  assert.ok(persistedDeadline);
+  await state.storage.setAlarm(persistedDeadline.runAtMs);
+
+  const judged = authority.handleMutation(
+    host,
+    envelope("host", 2, "setAnswerJudgements", {
+      presenterPlayerId: "host",
+      judgements: [{ buzzerAnswerId: "p0:1:submitBuzzerAnswer", isCorrect: true }],
+    }),
+    startedAt + 4000,
+  );
+  assert.equal(judged.error, undefined);
+  assert.equal(judged.forceCheckpoint, undefined, "batch judgement must exercise the uncheckpointed Attachment path");
+  assert.equal(authority.getAggregate()?.deadline, null);
+
+  const storedBeforeRestore = JSON.parse(String(state.storage.sql.db.prepare(
+    "SELECT state_json FROM authority_vnext_active_game WHERE id=1",
+  ).get().state_json)) as { deadline: { runAtMs: number } | null };
+  assert.equal(storedBeforeRestore.deadline?.runAtMs, persistedDeadline.runAtMs, "SQLite must still contain the old deadline before the cold restore");
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.equal(restored.getAggregate()?.buzzerAnswers[0]?.status, "correct");
+  assert.equal(restored.getAggregate()?.deadline, null, "Attachment replay must preserve the explicit cleared deadline");
+  assert.equal(restored.getDeadline(), null, "Alarm reconciliation must not fall back to the stale SQLite deadline");
+  assert.equal(await state.storage.getAlarm(), persistedDeadline.runAtMs, "authority restore alone must not mutate the physical Alarm");
+});
+
 test("50 dirty closes merge to one aggregate checkpoint", async () => {
   const { state, authority } = createAuthority(1);
   const sockets: WebSocket[] = [];
