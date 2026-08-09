@@ -14,6 +14,7 @@ import { getInviteNicknameNotice, ROOM_REMOVAL_NOTICE } from "@/lib/roomEntryNot
 import type { RoomVisibility } from "@/types/game";
 
 const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
+const INTRO_VIDEO_URL = "https://www.bilibili.com/video/BV1ZQug6SEKP/?share_source=copy_web&vd_source=adcd58a56c0c896937ee4c3fe22de339";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
@@ -421,7 +422,7 @@ export default function HomePage() {
             </div>
           </section>
 
-          <Panel title="进入房间">
+          <Panel>
             <div className="space-y-4">
               <FormField
                 id="home-nickname"
@@ -438,10 +439,6 @@ export default function HomePage() {
 
               <Button className="w-full" type="button" onClick={handleCreateRoom} disabled={isSubmitting}>
                 {isSubmitting ? "处理中…" : "创建房间"}
-              </Button>
-
-              <Button className="w-full" type="button" variant="secondary" onClick={handleBrowsePublicRooms} disabled={isSubmitting}>
-                浏览公开房间
               </Button>
 
               <div className="border-t border-[var(--line)] pt-4">
@@ -468,6 +465,12 @@ export default function HomePage() {
                 </Button>
               </div>
 
+              <div className="border-t border-[var(--line)] pt-4">
+                <Button className="w-full" type="button" variant="secondary" onClick={handleBrowsePublicRooms} disabled={isSubmitting}>
+                  浏览公开房间
+                </Button>
+              </div>
+
               {error ? <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
               {notice ? <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800" role="status">{notice}</p> : null}
             </div>
@@ -476,7 +479,7 @@ export default function HomePage() {
 
         <footer className="home-footer" aria-label="相关信息">
           <div className="home-footer-grid">
-            <HomeFooterLinkItem href={null} icon="video" label="视频介绍（待补）" />
+            <HomeFooterLinkItem href={INTRO_VIDEO_URL} icon="video" label="视频介绍" />
             <HomeFooterLinkItem href={null} icon="rules" label="文字规则（待补）" />
             <HomeFooterLinkItem href={GITHUB_REPO_URL} icon="github" label="Github 仓库" />
             <HomeFooterLinkItem href={FEEDBACK_QQ_GROUP_URL} icon="group" label="交流反馈Q群" />
