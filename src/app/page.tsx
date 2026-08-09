@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "@/lib/router";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
@@ -10,6 +10,8 @@ import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { createNewLocalPlayerSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import { createRoom, getRoomWithPlayers, joinRoom } from "@/lib/cloudflareRooms";
 import { isRoomNicknameTaken } from "@/lib/roomNickname";
+import { getInviteNicknameNotice, ROOM_REMOVAL_NOTICE } from "@/lib/roomEntryNotice";
+import type { RoomVisibility } from "@/types/game";
 
 const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
@@ -161,23 +163,84 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [selectedRoomVisibility, setSelectedRoomVisibility] = useState<RoomVisibility | null>(null);
+  const [publicRoomName, setPublicRoomName] = useState("");
+  const privateRoomButtonRef = useRef<HTMLButtonElement>(null);
+  const createDialogRef = useRef<HTMLElement>(null);
+  const createDialogTriggerRef = useRef<HTMLElement | null>(null);
+  const isSubmittingRef = useRef(false);
 
   useEffect(() => {
     const session = getLocalSession();
     const searchParams = new URLSearchParams(window.location.search);
     const roomCodeFromUrl = searchParams.get("roomCode") ?? "";
     const roomNotice = searchParams.get("roomNotice") ?? "";
+    const publicRoomsNotice = searchParams.get("publicRoomsNotice") ?? "";
+
+    let nextNotice = "";
 
     if (roomNotice === "kicked") {
-      setNotice("你已被房主移出房间，已回到首页。");
+      nextNotice = ROOM_REMOVAL_NOTICE;
       searchParams.delete("roomNotice");
       const nextSearch = searchParams.toString();
       window.history.replaceState(null, "", `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`);
     }
 
+    if (publicRoomsNotice === "nickname") {
+      setError("请先输入昵称");
+      searchParams.delete("publicRoomsNotice");
+      const nextSearch = searchParams.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`);
+    }
+
+    const validRoomCodeFromUrl = /^\d{6}$/.test(roomCodeFromUrl) ? roomCodeFromUrl : "";
+    if (!nextNotice) nextNotice = getInviteNicknameNotice(validRoomCodeFromUrl, session.nickname);
+
     setNickname(session.nickname);
-    setRoomCode(/^\d{6}$/.test(roomCodeFromUrl) ? roomCodeFromUrl : (session.roomCode ?? ""));
+    setRoomCode(validRoomCodeFromUrl || session.roomCode || "");
+    setNotice(nextNotice);
+    if (validRoomCodeFromUrl && !session.nickname.trim()) {
+      window.requestAnimationFrame(() => document.getElementById("home-nickname")?.focus());
+    }
   }, []);
+
+  useEffect(() => {
+    isSubmittingRef.current = isSubmitting;
+  }, [isSubmitting]);
+
+  useEffect(() => {
+    if (!isCreateDialogOpen) return;
+    createDialogTriggerRef.current = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    privateRoomButtonRef.current?.focus();
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isSubmittingRef.current) setIsCreateDialogOpen(false);
+      if (event.key === "Tab") {
+        const focusable = Array.from(createDialogRef.current?.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), input:not([disabled])",
+        ) ?? []);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+      createDialogTriggerRef.current?.focus();
+    };
+  }, [isCreateDialogOpen]);
 
   function validateNickname() {
     const trimmedNickname = nickname.trim();
@@ -190,12 +253,18 @@ export default function HomePage() {
     return trimmedNickname;
   }
 
-  async function handleCreateRoom() {
+  function handleCreateRoom() {
     const trimmedNickname = validateNickname();
+    if (!trimmedNickname) return;
+    setError("");
+    setNotice("");
+    setSelectedRoomVisibility(null);
+    setIsCreateDialogOpen(true);
+  }
 
-    if (!trimmedNickname) {
-      return;
-    }
+  async function submitCreateRoom(visibility: RoomVisibility) {
+    const trimmedNickname = validateNickname();
+    if (!trimmedNickname) return;
 
     setIsSubmitting(true);
     setError("");
@@ -203,7 +272,10 @@ export default function HomePage() {
 
     try {
       const session = getLocalSession();
-      const room = await createRoom(session.playerId, trimmedNickname);
+      const room = await createRoom(session.playerId, trimmedNickname, {
+        visibility,
+        name: visibility === "PUBLIC" ? publicRoomName : undefined,
+      });
 
       saveLocalSession({
         playerId: session.playerId,
@@ -305,6 +377,16 @@ export default function HomePage() {
     }
   }
 
+  function handleBrowsePublicRooms() {
+    const trimmedNickname = validateNickname();
+    if (!trimmedNickname) return;
+    const session = getLocalSession();
+    saveLocalSession({ playerId: session.playerId, nickname: trimmedNickname });
+    setError("");
+    setNotice("");
+    router.push("/public-rooms");
+  }
+
   return (
     <AppShell>
       {SHOW_MAINTENANCE_ANNOUNCEMENT ? <MaintenanceAnnouncement /> : null}
@@ -342,6 +424,7 @@ export default function HomePage() {
           <Panel title="进入房间">
             <div className="space-y-4">
               <FormField
+                id="home-nickname"
                 label="昵称"
                 maxLength={20}
                 placeholder="例如：小明"
@@ -355,6 +438,10 @@ export default function HomePage() {
 
               <Button className="w-full" type="button" onClick={handleCreateRoom} disabled={isSubmitting}>
                 {isSubmitting ? "处理中…" : "创建房间"}
+              </Button>
+
+              <Button className="w-full" type="button" variant="secondary" onClick={handleBrowsePublicRooms} disabled={isSubmitting}>
+                浏览公开房间
               </Button>
 
               <div className="border-t border-[var(--line)] pt-4">
@@ -382,7 +469,7 @@ export default function HomePage() {
               </div>
 
               {error ? <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
-              {notice ? <p className="rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">{notice}</p> : null}
+              {notice ? <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800" role="status">{notice}</p> : null}
             </div>
           </Panel>
         </div>
@@ -397,6 +484,38 @@ export default function HomePage() {
           </div>
         </footer>
       </div>
+      {isCreateDialogOpen ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 px-4 py-6" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !isSubmitting) setIsCreateDialogOpen(false);
+        }}>
+          <section ref={createDialogRef} aria-labelledby="create-room-title" aria-modal="true" className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.22)]" role="dialog">
+            <h2 className="text-2xl font-bold text-slate-950" id="create-room-title">选择房间类型</h2>
+            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+              <button aria-pressed={selectedRoomVisibility === "PRIVATE"} ref={privateRoomButtonRef} className={`min-h-24 rounded-xl border p-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${selectedRoomVisibility === "PRIVATE" ? "border-rose-300 bg-rose-50/60" : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"}`} disabled={isSubmitting} onClick={() => setSelectedRoomVisibility("PRIVATE")} type="button">
+                <span className="block font-bold text-slate-950">私人房间</span>
+                <span className="mt-1 block text-sm leading-6 text-[var(--muted)]">通过房间号加入</span>
+              </button>
+              <button aria-pressed={selectedRoomVisibility === "PUBLIC"} className={`min-h-24 rounded-xl border p-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${selectedRoomVisibility === "PUBLIC" ? "border-rose-300 bg-rose-50/60" : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"}`} disabled={isSubmitting} onClick={() => setSelectedRoomVisibility("PUBLIC")} type="button">
+                <span className="block font-bold text-slate-950">公开房间</span>
+                <span className="mt-1 block text-sm leading-6 text-[var(--muted)]">所有玩家可见</span>
+              </button>
+            </div>
+            {selectedRoomVisibility === "PUBLIC" ? (
+              <label className="mt-5 block text-sm font-medium text-slate-700" htmlFor="public-room-name">
+                房间名称（选填）
+                <input autoFocus className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-rose-400 focus:ring-2 focus:ring-rose-100" id="public-room-name" maxLength={40} onChange={(event) => setPublicRoomName(event.target.value)} placeholder={`${nickname.trim()}的房间`} value={publicRoomName} />
+              </label>
+            ) : null}
+            {error ? <p className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <Button disabled={isSubmitting} onClick={() => setIsCreateDialogOpen(false)} type="button" variant="secondary">取消</Button>
+              <Button className="shadow-none" disabled={isSubmitting || !selectedRoomVisibility} onClick={() => selectedRoomVisibility && void submitCreateRoom(selectedRoomVisibility)} type="button">
+                {isSubmitting ? "创建中…" : "创建房间"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

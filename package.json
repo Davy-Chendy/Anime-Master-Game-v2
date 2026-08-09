@@ -19,6 +19,7 @@
     "test:room-entry-nickname": "tsx --test tests/room-entry-nickname.test.ts",
     "test:game-result-archive": "tsx --test tests/game-result-archive.test.ts",
     "test:question-set-creation-method": "tsx --test tests/question-set-creation-method.test.ts",
+    "test:public-rooms": "tsx --test --test-name-pattern=\"public room\" tests/public-rooms.test.ts tests/public-room-sorting.test.ts tests/question-set-creation-method.test.ts",
     "test:question-set-creation-analysis": "tsx --test tests/question-set-creation-method-analysis.test.ts",
     "test:local-image-upload": "tsx --test tests/local-image-upload.test.ts",
     "test:r2-upload": "tsx --test tests/r2-upload.test.ts",

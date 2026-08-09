@@ -10,6 +10,8 @@ export type Player = {
 
 export type PlayerRole = "PLAYER" | "SPECTATOR";
 export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
+export type RoomVisibility = "PRIVATE" | "PUBLIC";
+export type RoomQuestionSource = "COMMUNITY" | "CREATION_TOOL" | "MANUAL";
 export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED" | "TEAM_BATTLE";
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
@@ -69,6 +71,10 @@ export type Room = {
   currentPresenterPlayerId?: string | null;
   currentGameId?: string | null;
   preparedQuestionSetId?: string | null;
+  visibility?: RoomVisibility;
+  name?: string | null;
+  memberCount?: number;
+  preparedQuestionSource?: RoomQuestionSource | null;
   gameMode?: GameMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
@@ -90,6 +96,10 @@ export type DbRoom = {
   current_presenter_player_id: string | null;
   current_game_id: string | null;
   prepared_question_set_id?: string | null;
+  room_visibility?: RoomVisibility | null;
+  room_name?: string | null;
+  member_count?: number | null;
+  prepared_question_source?: RoomQuestionSource | null;
   lobby_game_mode?: GameMode | null;
   lobby_max_reveal_rounds?: number | null;
   lobby_round_seconds?: number | null;
@@ -105,6 +115,22 @@ export type DbRoom = {
   room_state_json?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type PublicRoomSummary = {
+  id: string;
+  code: string;
+  name: string;
+  status: RoomStatus;
+  gameMode: GameMode;
+  memberCount: number;
+  capacity: number;
+  isMemberCountApproximate: boolean;
+  questionSource: RoomQuestionSource | null;
+  currentQuestionIndex?: number | null;
+  questionCount?: number | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type DbPlayer = {

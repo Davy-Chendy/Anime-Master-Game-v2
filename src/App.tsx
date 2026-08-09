@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import HomePage from "@/app/page";
 import RoomPage from "@/app/room/[roomCode]/page";
+import PublicRoomsPage from "@/app/public-rooms/page";
 
 function currentPath() {
   return window.location.pathname;
@@ -29,6 +30,8 @@ export default function App() {
   if (roomMatch) {
     return <RoomPage initialRoomCode={decodeURIComponent(roomMatch[1])} />;
   }
+
+  if (path === "/public-rooms") return <PublicRoomsPage />;
 
   return <HomePage />;
 }

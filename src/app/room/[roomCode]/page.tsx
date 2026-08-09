@@ -10,6 +10,7 @@ import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, isRoomVersionExpiredError, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
+import { GAME_MODE_LABELS } from "@/lib/gameModeLabels";
 import { ROOM_VERSION_EXPIRED_EVENT, ROOM_VERSION_EXPIRED_MESSAGE } from "@/lib/roomRuntime";
 import {
   cancelCurrentRound,
@@ -304,7 +305,7 @@ type GameModeCopy = {
 
 const gameModeCopy: Record<GameMode, GameModeCopy> = {
   ROUND_REVEAL: {
-    title: "个人 · 标准模式",
+    title: GAME_MODE_LABELS.ROUND_REVEAL,
     summary: "按轮得分，越早猜中分越高",
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
@@ -313,7 +314,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     ],
   },
   BUZZER_FIRST_CORRECT: {
-    title: "个人 · 抢答模式",
+    title: GAME_MODE_LABELS.BUZZER_FIRST_CORRECT,
     summary: "第一个答对的人得分，本题立即结束",
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
@@ -323,7 +324,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     ],
   },
   BUZZER_RANKED: {
-    title: "个人 · 顺位得分模式",
+    title: GAME_MODE_LABELS.BUZZER_RANKED,
     summary: "多人可得分，按答对顺序递减",
     rules: [
       "出题人逐轮打开画面，默认共 3 轮",
@@ -333,7 +334,7 @@ const gameModeCopy: Record<GameMode, GameModeCopy> = {
     ],
   },
   TEAM_BATTLE: {
-    title: "团队 · 对抗模式",
+    title: GAME_MODE_LABELS.TEAM_BATTLE,
     summary: "两队在同一张截图上较量，谁先猜对谁得分",
     rules: [
       "红蓝两队看同一张被遮住的截图",

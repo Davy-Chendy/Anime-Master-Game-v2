@@ -114,14 +114,14 @@ export type UploadProgress = {
 };
 
 const r2UploadConfig = {
-  maxSize: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 1600),
-  quality: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
-  format: process.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
-  concurrency: Number(process.env.NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY ?? 2),
+  maxSize: Number(import.meta.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 1600),
+  quality: Number(import.meta.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
+  format: import.meta.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
+  concurrency: Number(import.meta.env.NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY ?? 2),
 };
 
 function apiBase() {
-  return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+  return (import.meta.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
 }
 
 function apiUrl(path: string) {

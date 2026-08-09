@@ -11,6 +11,7 @@ import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/
 import { decodeRoomState, encodeRoomState } from "../worker/roomStateManifest";
 import {
   createRoom,
+  cancelPresenterSetup,
   createUploadedQuestionSet,
   createQuestionSetFromUrlText,
   getCommunityQuestionSetDetail,
@@ -18,6 +19,7 @@ import {
   getQuestionSetById,
   joinRoom,
   publishQuestionSetToCommunity,
+  prepareQuestionSetForStart,
   returnRoomToLobby,
   runWithGameDatabase,
   selectPresenterForRound,
@@ -74,7 +76,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0019") {
+function applyMigrations(db: DatabaseSync, through = "0020") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -350,6 +352,76 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     });
     assert.equal(Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes), changesBeforeNoOps);
     assert.equal(db.sqlite.prepare("SELECT room_state_revision FROM rooms WHERE id=?").get(room.id).room_state_revision, 0);
+  });
+});
+
+test("public room migration preserves old rooms as private and validates catalog metadata", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0019");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id) VALUES(?,?,?)").run("old-room", "OLD020", "host");
+  db.exec(readFileSync(join(migrationsDirectory, "0020_public_rooms.sql"), "utf8"));
+  const stored = db.prepare("SELECT room_visibility,room_name,member_count,prepared_question_source FROM rooms WHERE id='old-room'").get();
+  assert.deepEqual({ ...stored }, { room_visibility: "PRIVATE", room_name: null, member_count: 0, prepared_question_source: null });
+  assert.throws(() => db.prepare("UPDATE rooms SET room_visibility='UNKNOWN' WHERE id='old-room'").run(), /CHECK constraint failed/);
+  assert.throws(() => db.prepare("UPDATE rooms SET member_count=51 WHERE id='old-room'").run(), /CHECK constraint failed/);
+});
+
+test("public room creation uses an optional trimmed name and piggybacks member counts", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  await runWithGameDatabase(db, async () => {
+    const legacyCompatible = await createRoom("private-host", "Private Host");
+    assert.equal(legacyCompatible.visibility, "PRIVATE");
+    assert.equal(legacyCompatible.name, null);
+
+    const fallback = await createRoom("public-host", "  Alice  ", { visibility: "PUBLIC", name: "   " });
+    assert.equal(fallback.visibility, "PUBLIC");
+    assert.equal(fallback.name, "Alice的房间");
+    assert.equal(fallback.memberCount, 1);
+    const custom = await createRoom("custom-host", "Bob", { visibility: "PUBLIC", name: "  周末动画局  " });
+    assert.equal(custom.name, "周末动画局");
+    const joined = await joinRoom(custom.code, "guest", "Guest");
+    assert.equal(joined.error, null);
+    assert.equal(joined.room?.memberCount, 2);
+    assert.equal(db.sqlite.prepare("SELECT member_count FROM rooms WHERE id=?").get(custom.id).member_count, 2);
+    await assert.rejects(() => createRoom("long-name-host", "Host", { visibility: "PUBLIC", name: "x".repeat(41) }), /40/);
+  });
+});
+
+test("public room question source freezes when prepared and clears on cancellation", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  await runWithGameDatabase(db, async () => {
+    const room = await createRoom("source-host", "Source Host", { visibility: "PUBLIC" });
+    await selectPresenterForRound(room.id, "source-host", "source-host");
+    const assisted = await createUploadedQuestionSet({
+      roomId: room.id,
+      presenterPlayerId: "source-host",
+      title: "Assisted",
+      imageUrls: ["https://example.com/source.webp"],
+      creationMethod: "creation_tool_assisted",
+    });
+    const prepared = await prepareQuestionSetForStart({ roomId: room.id, presenterPlayerId: "source-host", questionSetId: assisted.id });
+    assert.equal(prepared.preparedQuestionSource, "CREATION_TOOL");
+    await publishQuestionSetToCommunity({ questionSetId: assisted.id, playerId: "source-host", title: "Assisted", creationMethod: "creation_tool_assisted" });
+    assert.equal(db.sqlite.prepare("SELECT prepared_question_source FROM rooms WHERE id=?").get(room.id).prepared_question_source, "CREATION_TOOL");
+    const cancelled = await cancelPresenterSetup(room.id, "source-host");
+    assert.equal(cancelled.preparedQuestionSource, null);
+
+    await selectPresenterForRound(room.id, "source-host", "source-host");
+    const community = await prepareQuestionSetForStart({ roomId: room.id, presenterPlayerId: "source-host", questionSetId: assisted.id });
+    assert.equal(community.preparedQuestionSource, "COMMUNITY");
+    await cancelPresenterSetup(room.id, "source-host");
+
+    await selectPresenterForRound(room.id, "source-host", "source-host");
+    const manualSet = await createUploadedQuestionSet({
+      roomId: room.id,
+      presenterPlayerId: "source-host",
+      title: "Manual",
+      imageUrls: ["https://example.com/manual-source.webp"],
+    });
+    const manual = await prepareQuestionSetForStart({ roomId: room.id, presenterPlayerId: "source-host", questionSetId: manualSet.id });
+    assert.equal(manual.preparedQuestionSource, "MANUAL");
   });
 });
 

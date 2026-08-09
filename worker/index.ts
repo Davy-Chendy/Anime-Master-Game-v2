@@ -38,8 +38,12 @@ import type {
   QuestionSet,
   QuestionSetUrlImportResult,
   QuestionUrlImportInput,
+  PublicRoomSummary,
   RealtimeDelta,
   Room,
+  RoomQuestionSource,
+  RoomStatus,
+  GameMode,
   RoundSnapshot,
 } from "../src/types/game";
 
@@ -2422,6 +2426,203 @@ function getR2ReferenceNeedle(env: Env) {
   return `/${prefix}/`;
 }
 
+type PublicRoomRow = {
+  id: string;
+  room_code: string;
+  room_name: string | null;
+  game_status: RoomStatus;
+  lobby_game_mode: GameMode | null;
+  member_count: number | null;
+  prepared_question_source: RoomQuestionSource | null;
+  created_at: string;
+  updated_at: string;
+  status_rank: number;
+};
+
+type PublicRoomCursor = {
+  version: 2;
+  statusRank: number;
+  updatedAt: string;
+  createdAt: string;
+  id: string;
+};
+
+type PublicRoomPage = {
+  rooms: PublicRoomSummary[];
+  nextCursor: string | null;
+};
+
+const PUBLIC_ROOM_PAGE_SIZE = 20;
+const PUBLIC_ROOM_QUERY_LIMIT = PUBLIC_ROOM_PAGE_SIZE + 1;
+const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 30 * 60 * 1000;
+const PUBLIC_ROOM_PRESENCE_CONCURRENCY = 5;
+const PUBLIC_ROOM_PRESENCE_TIMEOUT_MS = 800;
+
+function encodePublicRoomCursor(room: PublicRoomRow) {
+  return btoa(JSON.stringify({
+    version: 2,
+    statusRank: room.status_rank,
+    updatedAt: room.updated_at,
+    createdAt: room.created_at,
+    id: room.id,
+  } satisfies PublicRoomCursor)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodePublicRoomCursor(value: string | null | undefined): PublicRoomCursor | null {
+  if (!value) return null;
+  if (value.length > 1024) throw new Error("公开房间游标无效。");
+  try {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+    const parsed = JSON.parse(atob(base64)) as Partial<PublicRoomCursor>;
+    if (
+      parsed.version !== 2 ||
+      !Number.isInteger(parsed.statusRank) ||
+      Number(parsed.statusRank) < 0 ||
+      Number(parsed.statusRank) > 4 ||
+      typeof parsed.updatedAt !== "string" ||
+      !Number.isFinite(Date.parse(parsed.updatedAt)) ||
+      typeof parsed.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(parsed.createdAt)) ||
+      typeof parsed.id !== "string" ||
+      !parsed.id
+    ) {
+      throw new Error("invalid cursor payload");
+    }
+    return {
+      version: 2,
+      statusRank: Number(parsed.statusRank),
+      updatedAt: parsed.updatedAt,
+      createdAt: parsed.createdAt,
+      id: parsed.id,
+    };
+  } catch {
+    throw new Error("公开房间游标无效。");
+  }
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+export async function listPublicRooms(env: Env, cursorValue?: string | null, now = Date.now()): Promise<PublicRoomPage> {
+  const cursor = decodePublicRoomCursor(cursorValue);
+  const cutoffIso = new Date(now - PUBLIC_ROOM_ACTIVITY_WINDOW_MS).toISOString();
+  const cursorClause = cursor ? `WHERE
+      status_rank > ? OR
+      (status_rank = ? AND updated_at < ?) OR
+      (status_rank = ? AND updated_at = ? AND created_at < ?) OR
+      (status_rank = ? AND updated_at = ? AND created_at = ? AND id < ?)` : "";
+  const bindings: Array<string | number> = [CURRENT_ROOM_RUNTIME_GENERATION, cutoffIso];
+  if (cursor) {
+    bindings.push(
+      cursor.statusRank,
+      cursor.statusRank, cursor.updatedAt,
+      cursor.statusRank, cursor.updatedAt, cursor.createdAt,
+      cursor.statusRank, cursor.updatedAt, cursor.createdAt, cursor.id,
+    );
+  }
+  bindings.push(PUBLIC_ROOM_QUERY_LIMIT);
+  const result = await env.DB.prepare(`WITH ranked_rooms AS (
+      SELECT
+        id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,updated_at,
+        CASE
+          WHEN game_status='PLAYING' THEN 0
+          WHEN game_status='QUESTION_SETUP' AND prepared_question_source IS NOT NULL THEN 1
+          WHEN game_status='QUESTION_SETUP' THEN 2
+          WHEN game_status='LOBBY' THEN 3
+          ELSE 4
+        END AS status_rank
+      FROM rooms
+      WHERE room_visibility='PUBLIC' AND runtime_generation=?
+        AND (game_status IN ('PLAYING','GAME_RESULT') OR updated_at>=?)
+    )
+    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,updated_at,status_rank
+    FROM ranked_rooms
+    ${cursorClause}
+    ORDER BY status_rank ASC, updated_at DESC, created_at DESC, id DESC
+    LIMIT ?`)
+    .bind(...bindings)
+    .all<PublicRoomRow>();
+  const candidates = result.results ?? [];
+  const pageCandidates = candidates.slice(0, PUBLIC_ROOM_PAGE_SIZE);
+  const rooms: PublicRoomSummary[] = pageCandidates
+    .map((room) => ({
+      id: room.id,
+      code: room.room_code,
+      name: room.room_name?.trim() || "未命名房间",
+      status: room.game_status,
+      gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
+      memberCount: Math.max(0, Math.min(50, Number(room.member_count) || 0)),
+      capacity: 50,
+      isMemberCountApproximate: room.game_status === "PLAYING" || room.game_status === "GAME_RESULT",
+      questionSource: room.prepared_question_source ?? null,
+      currentQuestionIndex: null,
+      questionCount: null,
+      createdAt: room.created_at,
+      updatedAt: room.updated_at,
+    }));
+
+  const enrichedRooms = await mapWithConcurrency(rooms, PUBLIC_ROOM_PRESENCE_CONCURRENCY, async (room) => {
+    if (room.status !== "PLAYING" && room.status !== "GAME_RESULT") return room;
+    try {
+      const topic = `room:${room.id}`;
+      const presenceUrl = new URL("https://room-object/internal/public-presence");
+      presenceUrl.searchParams.set("topic", topic);
+      const abortController = new AbortController();
+      const timeout = setTimeout(() => abortController.abort("房间在线人数读取超时。"), PUBLIC_ROOM_PRESENCE_TIMEOUT_MS);
+      const response = await getRoomObject(env, topic).fetch(new Request(presenceUrl, { signal: abortController.signal }))
+        .finally(() => clearTimeout(timeout));
+      if (!response.ok) throw new Error(`presence ${response.status}`);
+      const presence = await response.json<{
+        status?: RoomStatus;
+        memberCount?: number;
+        updatedAt?: string;
+        currentQuestionIndex?: number;
+        questionCount?: number;
+      }>();
+      if (typeof presence.memberCount !== "number") throw new Error("invalid presence response");
+      const presenceUpdatedAt = typeof presence.updatedAt === "string" && Number.isFinite(Date.parse(presence.updatedAt))
+        ? presence.updatedAt
+        : room.updatedAt;
+      const hasValidProgress = Number.isInteger(presence.currentQuestionIndex) &&
+        Number.isInteger(presence.questionCount) &&
+        Number(presence.currentQuestionIndex) >= 0 &&
+        Number(presence.questionCount) > 0 &&
+        Number(presence.currentQuestionIndex) < Number(presence.questionCount);
+      return {
+        ...room,
+        status: presence.status ?? room.status,
+        memberCount: Math.max(0, Math.min(room.capacity, Math.floor(presence.memberCount))),
+        isMemberCountApproximate: false,
+        updatedAt: presenceUpdatedAt,
+        currentQuestionIndex: hasValidProgress ? Number(presence.currentQuestionIndex) : null,
+        questionCount: hasValidProgress ? Number(presence.questionCount) : null,
+      };
+    } catch {
+      return room;
+    }
+  });
+  const cutoffMs = now - PUBLIC_ROOM_ACTIVITY_WINDOW_MS;
+  return {
+    rooms: enrichedRooms.filter((room) => {
+      const updatedAtMs = Date.parse(room.updatedAt);
+      return Number.isFinite(updatedAtMs) && updatedAtMs >= cutoffMs;
+    }),
+    nextCursor: candidates.length > PUBLIC_ROOM_PAGE_SIZE && pageCandidates.length > 0
+      ? encodePublicRoomCursor(pageCandidates[pageCandidates.length - 1])
+      : null,
+  };
+}
+
 async function getExpiredRooms(env: Env, cutoffIso: string) {
   return queryRows<ExpiredRoomRow>(
     env,
@@ -3012,6 +3213,24 @@ export class RoomDurableObjectV3 {
         { error: ROOM_VERSION_EXPIRED_MESSAGE, code: ROOM_VERSION_EXPIRED_ERROR_CODE },
         { status: 410 },
       );
+    }
+
+    if (url.pathname === "/internal/public-presence" && request.method === "GET") {
+      const topic = url.searchParams.get("topic") ?? "";
+      const roomId = getRoomIdFromRequiredTopic(topic);
+      this.authorityTopic = topic;
+      await this.authorityVNext.restoreFromStorage({ persistRepairs: false });
+      const aggregate = this.authorityVNext.getAggregate();
+      if (!aggregate || aggregate.roomId !== roomId || !aggregate.room || aggregate.dissolved) {
+        return Response.json({ error: "房间实时状态不可用。" }, { status: 404 });
+      }
+      return Response.json({
+        status: aggregate.room.status,
+        memberCount: aggregate.players.length,
+        updatedAt: new Date(aggregate.lastCheckpointAtMs).toISOString(),
+        currentQuestionIndex: aggregate.gameSession?.currentQuestionIndex ?? null,
+        questionCount: aggregate.questions.length,
+      });
     }
 
     if (url.pathname === "/api/rpc" && request.method === "POST") {
@@ -5131,6 +5350,11 @@ export default {
     }
 
     try {
+      if (url.pathname === "/api/public-rooms" && request.method === "GET") {
+        const page = await listPublicRooms(env, url.searchParams.get("cursor"));
+        return json(page, { headers: { "cache-control": "no-store" } }, request, env);
+      }
+
       if (url.pathname === "/api/rpc" && request.method === "POST") {
         const body = await readRpcBody(request);
         const requestHeaders = new Headers(request.headers);

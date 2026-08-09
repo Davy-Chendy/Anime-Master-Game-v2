@@ -47,6 +47,8 @@ import type {
   QuestionSetCreationMethod,
   RoundSnapshot,
   Room,
+  RoomQuestionSource,
+  RoomVisibility,
   TeamBattleGuessVote,
   TeamBattlePreviousTurnAction,
   TeamBattleState,
@@ -239,6 +241,10 @@ function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): 
     currentPresenterPlayerId: room.current_presenter_player_id,
     currentGameId: room.current_game_id,
     preparedQuestionSetId: room.prepared_question_set_id ?? null,
+    visibility: room.room_visibility ?? "PRIVATE",
+    name: room.room_name ?? null,
+    memberCount: room.member_count ?? players.length,
+    preparedQuestionSource: room.prepared_question_source ?? null,
     gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
     maxRevealRounds,
     roundSeconds: normalizeRoundSeconds(room.lobby_round_seconds),
@@ -1721,8 +1727,25 @@ function imageUrlsToText(imageUrls: string[]) {
   return imageUrls.map((url) => url.trim()).filter(Boolean).join("\n");
 }
 
-export async function createRoom(playerId: string, nickname: string) {
+export type CreateRoomOptions = {
+  visibility?: RoomVisibility;
+  name?: string;
+};
+
+const MAX_PUBLIC_ROOM_NAME_LENGTH = 40;
+
+export async function createRoom(playerId: string, nickname: string, options: CreateRoomOptions | null = {}) {
   assertD1Env();
+
+  const normalizedNickname = nickname.trim();
+  if (!normalizedNickname) throw new Error("请输入昵称。");
+  if (normalizedNickname.length > 20) throw new Error("昵称最多 20 个字符。");
+  const visibility: RoomVisibility = options?.visibility === "PUBLIC" ? "PUBLIC" : "PRIVATE";
+  const requestedName = options?.name?.trim() ?? "";
+  if (requestedName.length > MAX_PUBLIC_ROOM_NAME_LENGTH) {
+    throw new Error(`房间名称最多 ${MAX_PUBLIC_ROOM_NAME_LENGTH} 个字符。`);
+  }
+  const roomName = visibility === "PUBLIC" ? (requestedName || `${normalizedNickname}的房间`) : null;
 
   let roomCode = createRoomCode();
 
@@ -1732,7 +1755,7 @@ export async function createRoom(playerId: string, nickname: string) {
     const hostPlayer: DbPlayer = {
       id: playerId,
       room_id: roomId,
-      nickname: nickname.trim(),
+      nickname: normalizedNickname,
       is_host: true,
       role: "PLAYER",
       joined_at: createdAt,
@@ -1755,6 +1778,9 @@ export async function createRoom(playerId: string, nickname: string) {
         room_state_version: ROOM_STATE_MANIFEST_VERSION,
         room_state_revision: 0,
         room_state_json: encodeRoomState(roomId, playerId, [hostPlayer]),
+        room_visibility: visibility,
+        room_name: roomName,
+        member_count: 1,
         created_at: createdAt,
         updated_at: createdAt,
       })
@@ -1837,6 +1863,7 @@ async function updateRoomAggregate(
     .from("rooms")
     .update({
       ...roomUpdates,
+      member_count: players.length,
       room_state_json: roomStateJson,
       room_state_revision: currentRevision + 1,
     })
@@ -2072,6 +2099,7 @@ export async function leaveRoom(roomId: string, playerId: string) {
     roomUpdates.game_status = "LOBBY";
     roomUpdates.current_presenter_player_id = null;
     roomUpdates.prepared_question_set_id = null;
+    roomUpdates.prepared_question_source = null;
   }
 
   const updatedRoom = await updateRoomAggregate(room, remainingPlayers, roomUpdates);
@@ -2141,6 +2169,7 @@ export async function kickPlayerFromRoom(roomId: string, hostPlayerId: string, t
       current_presenter_player_id: null,
       current_game_id: null,
       prepared_question_set_id: null,
+      prepared_question_source: null,
       game_status: "LOBBY",
     } satisfies Partial<DbRoom>);
   }
@@ -2213,6 +2242,7 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
       game_status: "QUESTION_SETUP",
       current_game_id: null,
       prepared_question_set_id: null,
+      prepared_question_source: null,
       lobby_team_assignments: JSON.stringify(nextAssignments),
   });
 
@@ -2252,6 +2282,7 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
       current_presenter_player_id: null,
       current_game_id: null,
       prepared_question_set_id: null,
+      prepared_question_source: null,
       game_status: "LOBBY",
     })
     .eq("id", roomId)
@@ -2279,6 +2310,7 @@ export async function cancelPresenterSetup(roomId: string, presenterPlayerId: st
       current_presenter_player_id: null,
       current_game_id: null,
       prepared_question_set_id: null,
+      prepared_question_source: null,
       game_status: "LOBBY",
     })
     .eq("id", roomId)
@@ -2625,10 +2657,17 @@ export async function prepareQuestionSetForStart(params: {
     throw new Error("不能使用他人的未公开题库。");
   }
 
+  const preparedQuestionSource: RoomQuestionSource = questionSet.is_public
+    ? "COMMUNITY"
+    : questionSet.creation_method === "creation_tool_assisted"
+      ? "CREATION_TOOL"
+      : "MANUAL";
+
   const { data: room, error } = await d1
     .from("rooms")
     .update({
       prepared_question_set_id: params.questionSetId,
+      prepared_question_source: preparedQuestionSource,
     })
     .eq("id", params.roomId)
     .eq("current_presenter_player_id", params.presenterPlayerId)
@@ -6756,6 +6795,7 @@ export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
       current_presenter_player_id: null,
       current_game_id: null,
       prepared_question_set_id: null,
+      prepared_question_source: null,
       lobby_team_assignments: "{}",
       game_status: "LOBBY",
     })

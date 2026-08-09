@@ -1,0 +1,188 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { listPublicRooms, type Env } from "../worker/index";
+
+type Status = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
+type Row = {
+  id: string;
+  room_code: string;
+  room_name: string;
+  game_status: Status;
+  lobby_game_mode: "ROUND_REVEAL";
+  member_count: number;
+  prepared_question_source: "MANUAL" | null;
+  created_at: string;
+  updated_at: string;
+  status_rank: number;
+};
+
+const NOW = Date.parse("2026-08-09T10:00:00Z");
+function statusRank(status: Status, questionSource: Row["prepared_question_source"]) {
+  if (status === "PLAYING") return 0;
+  if (status === "QUESTION_SETUP") return questionSource ? 1 : 2;
+  if (status === "LOBBY") return 3;
+  return 4;
+}
+
+function room(
+  id: string,
+  status: Status,
+  updatedAt: string,
+  memberCount = 1,
+  questionSource: Row["prepared_question_source"] = status === "LOBBY" ? null : "MANUAL",
+): Row {
+  return {
+    id,
+    room_code: id.replace(/\D/g, "").padStart(6, "0").slice(-6),
+    room_name: id,
+    game_status: status,
+    lobby_game_mode: "ROUND_REVEAL",
+    member_count: memberCount,
+    prepared_question_source: questionSource,
+    created_at: updatedAt,
+    updated_at: updatedAt,
+    status_rank: statusRank(status, questionSource),
+  };
+}
+
+function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
+  const fetchedTopics: string[] = [];
+  const boundQueries: unknown[][] = [];
+  let queryIndex = 0;
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        assert.match(sql, /room_visibility='PUBLIC'/);
+        assert.match(sql, /game_status IN \('PLAYING','GAME_RESULT'\) OR updated_at>=\?/);
+        assert.match(sql, /game_status='QUESTION_SETUP' AND prepared_question_source IS NOT NULL/);
+        assert.match(sql, /ORDER BY status_rank ASC, updated_at DESC, created_at DESC, id DESC/);
+        assert.doesNotMatch(sql, /SELECT\s+\*/i);
+        return {
+          bind(...values: unknown[]) {
+            boundQueries.push(values);
+            return { all: async () => ({ results: pages[queryIndex++] ?? [] }) };
+          },
+        };
+      },
+    },
+    ROOM_OBJECTS_V3: {
+      idFromName(topic: string) { return topic; },
+      get(topic: string) {
+        return {
+          async fetch() {
+            fetchedTopics.push(topic);
+            const response = presence[topic];
+            if (response instanceof Error) throw response;
+            return response ?? new Response(null, { status: 404 });
+          },
+        };
+      },
+    },
+  } as unknown as Env;
+  return { env, fetchedTopics, boundQueries };
+}
+
+test("public room directory filters every status by authoritative thirty-minute activity", async () => {
+  const rows = [
+    room("playing", "PLAYING", "2026-08-09T07:00:00Z", 3),
+    room("setup-ready", "QUESTION_SETUP", "2026-08-09T09:45:00Z", 2),
+    room("setup-preparing", "QUESTION_SETUP", "2026-08-09T09:44:00Z", 2, null),
+    room("lobby-fresh", "LOBBY", "2026-08-09T09:40:00Z"),
+    room("lobby-stale", "LOBBY", "2026-08-09T09:20:00Z"),
+    room("result", "GAME_RESULT", "2026-08-09T08:00:00Z", 4),
+  ];
+  const { env, fetchedTopics, boundQueries } = createEnv([rows], {
+    "room:playing": Response.json({
+      status: "PLAYING",
+      memberCount: 12,
+      updatedAt: "2026-08-09T09:50:00Z",
+      currentQuestionIndex: 6,
+      questionCount: 30,
+    }),
+    "room:result": Response.json({
+      status: "GAME_RESULT",
+      memberCount: 6,
+      updatedAt: "2026-08-09T09:55:00Z",
+      currentQuestionIndex: 29,
+      questionCount: 30,
+    }),
+  });
+
+  const page = await listPublicRooms(env, null, NOW);
+  assert.deepEqual(page.rooms.map(({ id }) => id), ["playing", "setup-ready", "setup-preparing", "lobby-fresh", "result"]);
+  assert.equal(page.nextCursor, null);
+  assert.deepEqual(fetchedTopics.sort(), ["room:playing", "room:result"]);
+  assert.equal(page.rooms[0].memberCount, 12);
+  assert.equal(page.rooms[0].isMemberCountApproximate, false);
+  assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:50:00Z");
+  assert.equal(page.rooms[0].currentQuestionIndex, 6);
+  assert.equal(page.rooms[0].questionCount, 30);
+  assert.equal(page.rooms[4].updatedAt, "2026-08-09T09:55:00Z");
+  assert.equal(boundQueries[0][1], "2026-08-09T09:30:00.000Z");
+  assert.equal(boundQueries[0].at(-1), 21);
+});
+
+test("public room directory falls back safely when presence is unavailable or invalid", async () => {
+  const rows = [
+    room("playing-error-fresh", "PLAYING", "2026-08-09T09:45:00Z", 3),
+    room("playing-invalid-fresh", "PLAYING", "2026-08-09T09:40:00Z", 4),
+    room("playing-error-stale", "PLAYING", "2026-08-09T09:00:00Z", 5),
+  ];
+  const { env } = createEnv([rows], {
+    "room:playing-error-fresh": new Error("temporary failure"),
+    "room:playing-invalid-fresh": Response.json({
+      status: "PLAYING",
+      memberCount: 8,
+      updatedAt: "not-a-time",
+      currentQuestionIndex: 30,
+      questionCount: 30,
+    }),
+    "room:playing-error-stale": new Error("temporary failure"),
+  });
+
+  const page = await listPublicRooms(env, null, NOW);
+  assert.deepEqual(page.rooms.map(({ id }) => id), ["playing-error-fresh", "playing-invalid-fresh"]);
+  assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:45:00Z");
+  assert.equal(page.rooms[0].memberCount, 3);
+  assert.equal(page.rooms[0].isMemberCountApproximate, true);
+  assert.equal(page.rooms[1].updatedAt, "2026-08-09T09:40:00Z");
+  assert.equal(page.rooms[1].memberCount, 8);
+  assert.equal(page.rooms[1].isMemberCountApproximate, false);
+  assert.equal(page.rooms[1].currentQuestionIndex, null);
+  assert.equal(page.rooms[1].questionCount, null);
+});
+
+test("public room directory uses an opaque cursor to load additional bounded pages", async () => {
+  const firstQuery = Array.from({ length: 21 }, (_, index) => room(
+    `lobby-${String(index).padStart(2, "0")}`,
+    "LOBBY",
+    new Date(Date.UTC(2026, 7, 9, 9, 59 - index)).toISOString(),
+  ));
+  const secondQuery = Array.from({ length: 5 }, (_, index) => room(
+    `lobby-${String(index + 20).padStart(2, "0")}`,
+    "LOBBY",
+    new Date(Date.UTC(2026, 7, 9, 9, 39 - index)).toISOString(),
+  ));
+  const { env, fetchedTopics, boundQueries } = createEnv([firstQuery, secondQuery], {});
+
+  const firstPage = await listPublicRooms(env, null, NOW);
+  assert.equal(firstPage.rooms.length, 20);
+  assert.ok(firstPage.nextCursor);
+  assert.equal(firstPage.rooms[0].id, "lobby-00");
+  assert.equal(firstPage.rooms[19].id, "lobby-19");
+
+  const secondPage = await listPublicRooms(env, firstPage.nextCursor, NOW);
+  assert.deepEqual(secondPage.rooms.map(({ id }) => id), ["lobby-20", "lobby-21", "lobby-22", "lobby-23", "lobby-24"]);
+  assert.equal(secondPage.nextCursor, null);
+  assert.equal(fetchedTopics.length, 0);
+  assert.equal(boundQueries.length, 2);
+  assert.equal(boundQueries[1][2], statusRank("LOBBY", null));
+  assert.equal(boundQueries[1].at(-1), 21);
+});
+
+test("public room directory rejects malformed cursors without querying storage", async () => {
+  const { env, boundQueries } = createEnv([[]], {});
+  await assert.rejects(() => listPublicRooms(env, "not-a-cursor", NOW), /公开房间游标无效/);
+  assert.equal(boundQueries.length, 0);
+});

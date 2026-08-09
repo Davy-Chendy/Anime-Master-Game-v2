@@ -30,6 +30,7 @@ import {
   updateQuestionLabel,
 } from "@/lib/cloudflareRooms";
 import { getTeamBattleViewerAccess } from "@/lib/teamBattleView";
+import { GAME_MODE_LABELS } from "@/lib/gameModeLabels";
 import type {
   Answer,
   BuzzerAnswer,
@@ -4104,14 +4105,7 @@ export function ImageRevealGame({
 
   const currentPlayerName = room.players.find((player) => player.id === playerId)?.nickname ?? "未设置昵称";
   const playingGridClass = "grid gap-4 lg:grid-cols-6";
-  const gameModeCardValue =
-    gameSession.gameMode === "ROUND_REVEAL"
-      ? "个人 · 标准模式"
-      : gameSession.gameMode === "BUZZER_FIRST_CORRECT"
-        ? "个人 · 抢答模式"
-        : gameSession.gameMode === "BUZZER_RANKED"
-          ? "个人 · 顺位得分模式"
-          : "团队 · 对抗模式";
+  const gameModeCardValue = GAME_MODE_LABELS[gameSession.gameMode];
   const revealedBlocksCardValue = `${visibleRevealedBlockCount} / ${visibleBlockCount} 格`;
   const correctPlayersCardValue = `${correctPlayerSet.size} / ${scoringEligibleGuesserIds.length} 人`;
   const teamBattleScoreCardValue = teamBattleState

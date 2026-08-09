@@ -105,7 +105,7 @@ class SqliteProjectionD1 {
   constructor() {
     this.db.exec(`
       PRAGMA foreign_keys=ON;
-      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_presenter_player_id TEXT,current_game_id TEXT,prepared_question_set_id TEXT,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
+      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_presenter_player_id TEXT,current_game_id TEXT,prepared_question_set_id TEXT,prepared_question_source TEXT,member_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
       CREATE TABLE players(id TEXT PRIMARY KEY,room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,nickname TEXT NOT NULL,is_host INTEGER NOT NULL,joined_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,role TEXT NOT NULL);
       CREATE UNIQUE INDEX players_room_nickname_unique ON players(room_id,lower(nickname));
       CREATE INDEX players_room_id_idx ON players(room_id);
@@ -2495,6 +2495,17 @@ test("TEAM_BATTLE shortened deadline survives checkpoint and hibernation restore
   await authority.forceCheckpoint("phase-boundary");
   await state.storage.setAlarm(16_000);
 
+  const storedBeforePresenceRead = state.storage.sql.db.prepare("SELECT state_json FROM authority_vnext_active_game WHERE id=1").get().state_json;
+  const presenceReader = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await presenceReader.restoreFromStorage({ persistRepairs: false });
+  assert.equal(presenceReader.getDeadline()?.runAtMs, 6_000);
+  assert.equal(
+    state.storage.sql.db.prepare("SELECT state_json FROM authority_vnext_active_game WHERE id=1").get().state_json,
+    storedBeforePresenceRead,
+    "a compact public presence restore must not write authority storage",
+  );
+  assert.equal(await state.storage.getAlarm(), 16_000, "a compact public presence restore must not change the Alarm");
+
   const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
   await restored.restoreFromStorage();
   assert.equal(restored.getDeadline()?.runAtMs, 6_000);
@@ -2697,8 +2708,8 @@ test("final projection uses a dissolved tombstone and one aggregate room-state w
   assert.equal(statements.some((statement) => /(?:DELETE FROM|INSERT INTO) players/.test(statement.sql)), false);
   const roomUpdate = statements.find((statement) => /room_state_json/.test(statement.sql));
   assert.ok(roomUpdate);
-  assert.equal(roomUpdate.bindings[7], 1);
-  assert.equal((JSON.parse(String(roomUpdate.bindings[8])) as { players: unknown[] }).players.length, 2);
+  assert.equal(roomUpdate.bindings[9], 1);
+  assert.equal((JSON.parse(String(roomUpdate.bindings[10])) as { players: unknown[] }).players.length, 2);
 
   statements.length = 0;
   const second = createAuthority(1, d1);

@@ -26,6 +26,7 @@ import type {
   PreparedQuestionUrlImport,
   RoundSnapshot,
   Room,
+  RoomVisibility,
   TeamBattleGuessVote,
 } from "@/types/game";
 
@@ -120,7 +121,10 @@ export function parseQuestionImportText(importText: string): QuestionImportItem[
 
 const rpc = <T>(name: string, ...args: unknown[]) => callGameRpc<T>(name, args);
 
-export const createRoom = (playerId: string, nickname: string) => rpc<Room>("createRoom", playerId, nickname);
+export const createRoom = (playerId: string, nickname: string, options?: { visibility?: RoomVisibility; name?: string }) =>
+  options
+    ? rpc<Room>("createRoom", playerId, nickname, options)
+    : rpc<Room>("createRoom", playerId, nickname);
 
 export const getRoomByCode = (roomCode: string) => rpc<DbRoom | null>("getRoomByCode", roomCode);
 
@@ -143,7 +147,7 @@ export const dissolveRoom = (roomId: string, playerId: string) => rpc<void>("dis
 
 export function dissolveRoomOnPageExit(roomId: string, playerId: string) {
   try {
-    void fetch(`${(process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "")}/api/rpc`, {
+    void fetch(`${(import.meta.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "")}/api/rpc`, {
       method: "POST",
       keepalive: true,
       headers: { "content-type": "application/json" },

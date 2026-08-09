@@ -164,7 +164,7 @@ const provisionalActionIds = new Set<string>();
 let recoveryListenersInstalled = false;
 
 function apiBase() {
-  return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+  return (import.meta.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
 }
 
 function apiUrl(path: string) {
@@ -611,7 +611,15 @@ async function httpRpc<T>(name: string, args: unknown[]) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, args }),
   });
-  const payload = (await response.json()) as { data?: T; error?: string; code?: string; authoritySequence?: AuthoritySequenceHint };
+  const payload = await response.json().catch(() => null) as {
+    data?: T;
+    error?: string;
+    code?: string;
+    authoritySequence?: AuthoritySequenceHint;
+  } | null;
+  if (!payload) {
+    throw new GameRpcError("游戏服务响应异常，请稍后重试。", "INVALID_RESPONSE", response.status);
+  }
   const hint = payload.authoritySequence;
   if (hint && hint.gameId && hint.actorId && Number.isInteger(hint.committedSeq) && hint.committedSeq >= 0) {
     await syncAuthoritySequence(hint.gameId, hint.actorId, hint.committedSeq);
