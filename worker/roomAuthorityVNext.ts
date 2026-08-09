@@ -500,6 +500,23 @@ export class RoomAuthorityVNext {
     this.restored = true;
   }
 
+  abortInitializingStart(gameId: string) {
+    const current = this.readActiveRow();
+    if (!current || current.game_id !== gameId || current.cutover_state !== "initializing") return false;
+    this.state.storage.sql.exec(
+      "DELETE FROM authority_vnext_active_game WHERE id=1 AND game_id=? AND cutover_state='initializing'",
+      gameId,
+    );
+    this.aggregate = null;
+    this.restored = true;
+    this.dirtyGeneration = 0;
+    this.committedGeneration = 0;
+    this.dirtyActionCount = 0;
+    this.deadlineRepairPending = false;
+    this.recentActions.clear();
+    return true;
+  }
+
   activateStart(bootstrap: VNextStartBootstrap) {
     const current = this.aggregate ?? this.readAggregate();
     if (!current || current.gameId !== bootstrap.gameSession.id) throw new Error("authority vNext 开局 cutover 标记缺失。");

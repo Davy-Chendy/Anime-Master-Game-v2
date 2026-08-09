@@ -3437,7 +3437,13 @@ export class RoomDurableObjectV3 {
           if (this.authorityVNext.hasPendingFinalProjection() && !this.authorityVNext.canStartAnotherGame()) throw new Error("上一局长期结果队列接近容量上限，请稍后再开始新游戏。");
         }
         this.authorityVNext.beginStart(localRoomId, gameId, startParams);
-        const result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [startParams], receivedAtMs));
+        let result: unknown;
+        try {
+          result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [startParams], receivedAtMs));
+        } catch (error) {
+          this.abortRejectedVNextStart(error, gameId, "request");
+          throw error;
+        }
         if (!isRecord(result)) throw new Error("authority vNext 开局结果无效。");
         const hidden = isRecord(result.__authorityVNextBootstrap) ? result.__authorityVNextBootstrap : null;
         const gameSession = asGameSession(result.gameSession);
@@ -3929,7 +3935,13 @@ export class RoomDurableObjectV3 {
     const initializing = this.authorityVNext.getInitializingStart();
     if (!initializing) return;
     const params = { ...initializing.startParams, authorityVersion: 2 };
-    const result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [params], Date.now()));
+    let result: unknown;
+    try {
+      result = await runWithGameDatabase(this.env, () => callGameFunction("startGameWithQuestionSet", [params], Date.now()));
+    } catch (error) {
+      if (this.abortRejectedVNextStart(error, initializing.gameId, "recovery")) return;
+      throw error;
+    }
     if (!isRecord(result)) throw new Error("authority vNext 开局恢复结果无效。");
     const hidden = isRecord(result.__authorityVNextBootstrap) ? result.__authorityVNextBootstrap : null;
     const gameSession = asGameSession(result.gameSession);
@@ -3948,6 +3960,21 @@ export class RoomDurableObjectV3 {
     });
     this.clearAllSnapshotCaches();
     await this.reconcileVNextAlarm();
+  }
+
+  private abortRejectedVNextStart(error: unknown, gameId: string, source: "request" | "recovery") {
+    if (!(error instanceof gameService.StartGameRejectedError)) return false;
+    const aborted = this.authorityVNext.abortInitializingStart(gameId);
+    if (aborted) {
+      console.info(JSON.stringify({
+        event: "authority_vnext_initializing_start_aborted",
+        authorityVersion: 2,
+        gameId,
+        reason: error.message,
+        source,
+      }));
+    }
+    return aborted;
   }
 
   private async tryHandleVNextAction(
@@ -4290,7 +4317,16 @@ export class RoomDurableObjectV3 {
         }
         this.authorityVNext.beginStart(roomId, gameId, payload.args[0]);
       }
-      const execution = await runWithGameDatabase(this.env, executeAction);
+      let execution: Awaited<ReturnType<typeof executeAction>>;
+      try {
+        execution = await runWithGameDatabase(this.env, executeAction);
+      } catch (error) {
+        if (payload.name === "startGameWithQuestionSet" && isRecord(payload.args?.[0])) {
+          const gameId = typeof payload.args[0].startRequestId === "string" ? payload.args[0].startRequestId : null;
+          if (gameId) this.abortRejectedVNextStart(error, gameId, "request");
+        }
+        throw error;
+      }
       const { deltas, gameResultSnapshot, roundSnapshot, topic } = execution;
       let { responseResult } = execution;
       if (payload.name === "startGameWithQuestionSet" && isRecord(responseResult)) {

@@ -2799,14 +2799,25 @@ async function getCommittedStartedGameRoom(roomId: string, gameSessionId: string
 
 const START_GAME_REQUEST_ID_CONFLICT = "START_GAME_REQUEST_ID_CONFLICT";
 
+export class StartGameRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StartGameRejectedError";
+  }
+}
+
+function rejectStartGame(message: string): never {
+  throw new StartGameRejectedError(message);
+}
+
 function normalizeStartRequestId(value: unknown) {
   if (typeof value !== "string") {
-    throw new Error("页面版本已更新，请刷新后重试。");
+    rejectStartGame("页面版本已更新，请刷新后重试。");
   }
 
   const normalized = value.trim();
   if (!/^[a-zA-Z0-9_-]{16,128}$/.test(normalized)) {
-    throw new Error("开始游戏失败：请求标识无效，请刷新后重试。");
+    rejectStartGame("开始游戏失败：请求标识无效，请刷新后重试。");
   }
 
   return normalized;
@@ -2841,7 +2852,7 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!room) {
-    throw new Error("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
+    rejectStartGame("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
   }
   const roomPlayers = getRoomStatePlayers(room);
 
@@ -2895,7 +2906,7 @@ export async function startGameWithQuestionSet(params: {
     room.prepared_question_set_id !== params.questionSetId ||
     room.game_status !== "QUESTION_SETUP"
   ) {
-    throw new Error("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
+    rejectStartGame("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
   }
 
   const gameSessionId = normalizeStartRequestId(params.startRequestId);
@@ -2911,14 +2922,14 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!questionSet || questionSet.image_count <= 0) {
-    throw new Error("开始游戏失败：题库不存在，或题库中没有图片。");
+    rejectStartGame("开始游戏失败：题库不存在，或题库中没有图片。");
   }
   if (questionSet.image_count > MAX_QUESTION_SET_QUESTIONS) {
-    throw new Error(`开始游戏失败：单个题库最多包含 ${MAX_QUESTION_SET_QUESTIONS} 道题。`);
+    rejectStartGame(`开始游戏失败：单个题库最多包含 ${MAX_QUESTION_SET_QUESTIONS} 道题。`);
   }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
-    throw new Error("开始游戏失败：不能使用他人的未公开题库。");
+    rejectStartGame("开始游戏失败：不能使用他人的未公开题库。");
   }
 
   const maxRevealRounds = normalizeMaxRevealRounds(params.maxRevealRounds ?? room.lobby_max_reveal_rounds);
@@ -2939,12 +2950,12 @@ export async function startGameWithQuestionSet(params: {
   const activeGamePlayers = players.filter(isGamePlayer);
   const presenter = activeGamePlayers.find((player) => player.id === params.presenterPlayerId);
   if (!presenter) {
-    throw new Error("开始游戏失败：出题人必须是玩家身份。");
+    rejectStartGame("开始游戏失败：出题人必须是玩家身份。");
   }
 
   const teamBattleGuessers = activeGamePlayers.filter((player) => player.id !== params.presenterPlayerId);
   if (gameMode === "TEAM_BATTLE" && teamBattleGuessers.length < 2) {
-    throw new Error("红蓝对抗模式至少需要 2 名答题者。");
+    rejectStartGame("红蓝对抗模式至少需要 2 名答题者。");
   }
 
   const teamAssignmentMode = normalizeTeamAssignmentMode(room.lobby_team_assignment_mode);
@@ -2954,10 +2965,10 @@ export async function startGameWithQuestionSet(params: {
     const redCount = teamBattleGuessers.filter((player) => manualAssignments[player.id] === "red").length;
     const blueCount = teamBattleGuessers.filter((player) => manualAssignments[player.id] === "blue").length;
     if (unassigned.length > 0) {
-      throw new Error(`开始游戏失败：${unassigned.map((player) => player.nickname).join("、")}尚未选择队伍。`);
+      rejectStartGame(`开始游戏失败：${unassigned.map((player) => player.nickname).join("、")}尚未选择队伍。`);
     }
     if (redCount === 0 || blueCount === 0) {
-      throw new Error(`开始游戏失败：${redCount === 0 ? "红队" : "蓝队"}至少需要 1 名答题玩家。`);
+      rejectStartGame(`开始游戏失败：${redCount === 0 ? "红队" : "蓝队"}至少需要 1 名答题玩家。`);
     }
   }
 

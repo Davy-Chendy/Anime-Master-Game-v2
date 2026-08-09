@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
+import type { GameDatabase, GamePreparedStatement } from "../worker/d1QueryCompat";
 import { RoomDurableObject, RoomDurableObjectV3, type Env } from "../worker/index";
+import { RoomAuthorityVNext } from "../worker/roomAuthorityVNext";
 import { RoomRuntimeV3Storage } from "../worker/roomRuntimeV3";
+import { decodeRoomState, encodeRoomState } from "../worker/roomStateManifest";
+import type { Player } from "../src/types/game";
+
+const root = resolve(import.meta.dirname, "..");
+const migrationsDirectory = join(root, "d1", "migrations");
 
 class Cursor<T extends Record<string, unknown>> {
   constructor(private readonly rows: T[]) {}
@@ -56,6 +64,91 @@ class StorageAdapter {
   }
 }
 
+class PreparedStatementAdapter implements GamePreparedStatement {
+  private bindings: unknown[] = [];
+  constructor(private readonly statement: ReturnType<DatabaseSync["prepare"]>) {}
+  bind(...values: unknown[]) { this.bindings = values; return this; }
+  async all<T>() { return { results: this.statement.all(...this.bindings) as T[] }; }
+  async first<T>() { return (this.statement.get(...this.bindings) as T | undefined) ?? null; }
+}
+
+class DatabaseAdapter implements GameDatabase {
+  readonly sqlite = new DatabaseSync(":memory:");
+  failNextMatching = "";
+  prepare(query: string) {
+    if (this.failNextMatching && query.toLowerCase().includes(this.failNextMatching.toLowerCase())) {
+      this.failNextMatching = "";
+      return {
+        bind() { return this; },
+        async all() { throw new Error("injected transient D1 failure"); },
+        async first() { throw new Error("injected transient D1 failure"); },
+      } as GamePreparedStatement;
+    }
+    return new PreparedStatementAdapter(this.sqlite.prepare(query));
+  }
+  async batch<T>(statements: GamePreparedStatement[]) {
+    const results: Array<{ results?: T[] }> = [];
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      for (const statement of statements) results.push(await statement.all<T>());
+      this.sqlite.exec("COMMIT");
+      return results;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  }
+}
+
+function applyMigrations(db: DatabaseSync) {
+  for (const name of readdirSync(migrationsDirectory).filter((entry) => /^\d{4}_.+\.sql$/.test(entry)).sort()) {
+    db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
+  }
+}
+
+function seedRejectedTeamStart(db: DatabaseSync) {
+  const players: Player[] = [
+    { id: "host", roomId: "room-rejected", nickname: "Host", isHost: true, joinedAt: "2026-08-08T00:00:00.000Z", lastSeenAt: "2026-08-08T00:00:00.000Z", role: "PLAYER" },
+    { id: "p1", roomId: "room-rejected", nickname: "P1", isHost: false, joinedAt: "2026-08-08T00:00:01.000Z", lastSeenAt: "2026-08-08T00:00:01.000Z", role: "PLAYER" },
+  ];
+  db.prepare(`INSERT INTO rooms(
+    id,room_code,host_player_id,game_status,current_presenter_player_id,prepared_question_set_id,
+    lobby_game_mode,runtime_generation,room_state_version,room_state_revision,room_state_json
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+    "room-rejected", "REJECT", "host", "QUESTION_SETUP", "host", "set-rejected",
+    "TEAM_BATTLE", CURRENT_ROOM_RUNTIME_GENERATION, 1, 0, encodeRoomState("room-rejected", "host", players),
+  );
+  db.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
+    .run("set-rejected", "Rejected Set", "host", 1);
+}
+
+function createV3State(storage: StorageAdapter, id = "room-rejected", sockets: WebSocket[] = []) {
+  return {
+    storage,
+    id: { toString: () => id },
+    blockConcurrencyWhile(callback: () => Promise<void>) { void callback(); },
+    getWebSockets: () => sockets,
+    waitUntil() {},
+  } as unknown as DurableObjectState;
+}
+
+class TestSocket {
+  sent: string[] = [];
+  constructor(private attachment: unknown) {}
+  deserializeAttachment() { return structuredClone(this.attachment); }
+  serializeAttachment(value: unknown) { this.attachment = structuredClone(value); }
+  send(value: string) { this.sent.push(value); }
+  close() {}
+}
+
+function localRpc(name: string, args: unknown[]) {
+  return new Request("https://room-object/api/rpc", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-local-room-object-topic": "room:room-rejected" },
+    body: JSON.stringify({ name, args, clientActionId: crypto.randomUUID() }),
+  });
+}
+
 test("D1 migration leaves old rooms unmarked and supports explicit current-generation rooms", () => {
   const db = new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("../d1/migrations/0001_initial.sql", import.meta.url), "utf8"));
@@ -92,6 +185,99 @@ test("room authority schema is minimal, idempotent, and never creates legacy pro
   assert.equal(storage.db.prepare("SELECT runtime_generation FROM room_runtime_meta").get().runtime_generation, CURRENT_ROOM_RUNTIME_GENERATION);
   assert.equal(runtime.bumpVersion("room-1").stateVersion, 1);
   assert.throws(() => runtime.ensureRoom("room-2"), /identity mismatch/);
+});
+
+test("rejected HTTP start removes the initializing journal without changing D1 room state", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  seedRejectedTeamStart(db.sqlite);
+  const storage = new StorageAdapter();
+  const state = createV3State(storage);
+  const object = new RoomDurableObjectV3(state, { DB: db as unknown as D1Database } as Env);
+
+  const response = await object.fetch(localRpc("startGameWithQuestionSet", [{
+    startRequestId: "rejected-start-01",
+    roomId: "room-rejected",
+    hostPlayerId: "host",
+    presenterPlayerId: "host",
+    questionSetId: "set-rejected",
+    gameMode: "TEAM_BATTLE",
+  }]));
+  const body = await response.json() as { error?: string };
+
+  assert.equal(response.ok, false);
+  assert.match(body.error ?? "", /至少需要 2 名答题者/);
+  assert.equal(storage.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game").get().count, 0);
+  assert.deepEqual(
+    { ...db.sqlite.prepare("SELECT game_status,current_game_id,prepared_question_set_id FROM rooms WHERE id=?").get("room-rejected") },
+    { game_status: "QUESTION_SETUP", current_game_id: null, prepared_question_set_id: "set-rejected" },
+  );
+});
+
+test("rejected WebSocket start removes the initializing journal and returns the rule error", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  seedRejectedTeamStart(db.sqlite);
+  const storage = new StorageAdapter();
+  const socket = new TestSocket({
+    attachmentVersion: 1,
+    topic: "room:room-rejected",
+    playerId: "host",
+    pending: [],
+    serializedBytes: 0,
+  });
+  const state = createV3State(storage, "room-rejected", [socket as unknown as WebSocket]);
+  const object = new RoomDurableObjectV3(state, { DB: db as unknown as D1Database } as Env);
+
+  await object.webSocketMessage(socket as unknown as WebSocket, JSON.stringify({
+    type: "action",
+    name: "startGameWithQuestionSet",
+    clientActionId: "ws-rejected-action",
+    args: [{
+      startRequestId: "rejected-start-ws",
+      roomId: "room-rejected",
+      hostPlayerId: "host",
+      presenterPlayerId: "host",
+      questionSetId: "set-rejected",
+      gameMode: "TEAM_BATTLE",
+    }],
+  }));
+
+  const result = socket.sent.map((value) => JSON.parse(value) as { type?: string; error?: string })
+    .find((message) => message.type === "action_result");
+  assert.match(result?.error ?? "", /至少需要 2 名答题者/);
+  assert.equal(storage.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game").get().count, 0);
+  assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM game_sessions").get().count, 0);
+});
+
+test("persisted rejected start self-heals before join while transient D1 failure keeps its journal", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  seedRejectedTeamStart(db.sqlite);
+  const storage = new StorageAdapter();
+  const state = createV3State(storage);
+  const object = new RoomDurableObjectV3(state, { DB: db as unknown as D1Database } as Env);
+  new RoomAuthorityVNext(state, db as unknown as D1Database).beginStart("room-rejected", "rejected-start-02", {
+    startRequestId: "rejected-start-02",
+    roomId: "room-rejected",
+    hostPlayerId: "host",
+    presenterPlayerId: "host",
+    questionSetId: "set-rejected",
+    gameMode: "TEAM_BATTLE",
+    authorityVersion: 2,
+  });
+
+  db.failNextMatching = "rooms";
+  const transientResponse = await object.fetch(localRpc("joinRoom", ["REJECT", "p2", "P2", "PLAYER"]));
+  assert.equal(transientResponse.ok, false);
+  assert.equal((await transientResponse.json() as { error?: string }).error, "服务发生内部错误，请查看日志。");
+  assert.equal(storage.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game WHERE cutover_state='initializing'").get().count, 1);
+
+  const recoveredResponse = await object.fetch(localRpc("joinRoom", ["REJECT", "p2", "P2", "PLAYER"]));
+  assert.equal(recoveredResponse.ok, true);
+  assert.equal(storage.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game").get().count, 0);
+  const stored = db.sqlite.prepare("SELECT id,host_player_id,room_state_version,room_state_json FROM rooms WHERE id=?").get("room-rejected") as Parameters<typeof decodeRoomState>[0];
+  assert.deepEqual(decodeRoomState(stored).map((player) => player.id), ["host", "p1", "p2"]);
 });
 
 test("V3 migration failure does not advance the schema version", () => {

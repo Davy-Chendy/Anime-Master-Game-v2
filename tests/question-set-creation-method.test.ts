@@ -23,6 +23,7 @@ import {
   returnRoomToLobby,
   runWithGameDatabase,
   selectPresenterForRound,
+  StartGameRejectedError,
   startGameWithQuestionSet,
   selectTeamForPlayer,
   updatePlayerRole,
@@ -590,6 +591,41 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
     assert.equal(started.gameSession.teamBattleState?.phase, "REVEAL_VOTE");
     assert.equal(started.gameSession.teamBattleState?.voteDeadlineAt, null);
   });
+});
+
+test("TEAM_BATTLE roster rejection is typed and performs no D1 start writes", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  db.sqlite.prepare(`INSERT INTO rooms(id,room_code,host_player_id,game_status,current_presenter_player_id,prepared_question_set_id)
+    VALUES(?,?,?,?,?,?)`).run("room-team-small", "TEAM02", "host", "QUESTION_SETUP", "host", "set-team-small");
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["p1", "P1", 0]] as const) {
+    db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+      .run(id, "room-team-small", nickname, isHost, "PLAYER");
+  }
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-team-small");
+  db.sqlite.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
+    .run("set-team-small", "Small Team Set", "host", 1);
+
+  await runWithGameDatabase(db, async () => {
+    await assert.rejects(
+      startGameWithQuestionSet({
+        startRequestId: "team-small-start-01",
+        roomId: "room-team-small",
+        hostPlayerId: "host",
+        presenterPlayerId: "host",
+        questionSetId: "set-team-small",
+        gameMode: "TEAM_BATTLE",
+        authorityVersion: 2,
+      }),
+      (error: unknown) => error instanceof StartGameRejectedError && /至少需要 2 名答题者/.test(error.message),
+    );
+  });
+
+  assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM game_sessions").get().count, 0);
+  assert.deepEqual(
+    { ...db.sqlite.prepare("SELECT game_status,current_game_id,prepared_question_set_id FROM rooms WHERE id=?").get("room-team-small") },
+    { game_status: "QUESTION_SETUP", current_game_id: null, prepared_question_set_id: "set-team-small" },
+  );
 });
 
 test("manual team setup blocks incomplete rosters, allows uneven teams, and switching to AUTO clears assignments", async () => {

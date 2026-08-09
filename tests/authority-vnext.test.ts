@@ -2703,6 +2703,30 @@ test("initializing cutover survives restart with its idempotency parameters", as
   assert.deepEqual(restored.getInitializingStart(), { roomId: "r1", gameId: "g1", startParams: { startRequestId: "g1", presenterPlayerId: "host", authorityVersion: 2 } });
 });
 
+test("aborting a rejected initializing start removes only the matching persisted journal", async () => {
+  const state = new FakeState();
+  state.storage.sql.db.exec(`
+    CREATE TABLE authority_vnext_active_game (id INTEGER PRIMARY KEY CHECK(id=1),room_id TEXT NOT NULL,game_id TEXT NOT NULL,authority_version INTEGER NOT NULL,schema_version INTEGER NOT NULL,cutover_state TEXT NOT NULL,state_version INTEGER NOT NULL,state_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
+    CREATE TABLE authority_vnext_question_archive (game_id TEXT NOT NULL,question_index INTEGER NOT NULL,checkpoint_version INTEGER NOT NULL,state_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(game_id,question_index));
+    CREATE TABLE authority_vnext_projection_outbox (id INTEGER PRIMARY KEY CHECK(id=1),payload_json TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
+  `);
+  const authority = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  authority.beginStart("r1", "g-rejected", { startRequestId: "g-rejected", authorityVersion: 2 });
+
+  assert.equal(authority.abortInitializingStart("another-game"), false);
+  assert.equal(authority.getInitializingStart()?.gameId, "g-rejected");
+  assert.equal(authority.abortInitializingStart("g-rejected"), true);
+  assert.equal(authority.getInitializingStart(), null);
+  assert.equal(authority.hasStoredState(), false);
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  assert.equal(await restored.restoreFromStorage(), null);
+
+  const active = createAuthority(2).authority;
+  assert.equal(active.abortInitializingStart("g1"), false);
+  assert.equal(active.getAggregate()?.cutoverState, "active");
+});
+
 test("ROUND_REVEAL deadline locks submissions but still allows presenter grading", async () => {
   const { state, authority } = createAuthority(1);
   const host = socketFor(state, "host");
