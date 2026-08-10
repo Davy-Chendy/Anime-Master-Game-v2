@@ -3106,7 +3106,7 @@ export function ImageRevealGame({
   let standardTaskDetail = "等待出题人打开图片";
   let standardTaskTone = "border-slate-200 bg-white";
   let spectatorTaskTitle = isQuestionReviewing ? "本题复盘" : "玩家视角";
-  let spectatorTaskDetail = isQuestionReviewing ? "等待切换下一题" : "按住 V 可临时查看原图";
+  let spectatorTaskDetail = isQuestionReviewing ? "等待切换下一题" : "可随时查看完整原图";
 
   if (!isTeamBattleMode) {
     if (isQuestionReviewing) {
@@ -3236,6 +3236,11 @@ export function ImageRevealGame({
     }
 
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsRevealPreviewOpen(false);
+        return;
+      }
+
       if (event.key.toLowerCase() !== "v" || event.repeat || isTypingTarget(event.target)) {
         return;
       }
@@ -4520,6 +4525,18 @@ export function ImageRevealGame({
     </div>
   );
 
+  const mobileSpectatorOriginalButton =
+    isSpectator && canPreviewSpectatorOriginal && !isQuestionReviewing ? (
+      <Button
+        className="w-full lg:hidden"
+        type="button"
+        variant="secondary"
+        onClick={() => setIsRevealPreviewOpen(true)}
+      >
+        查看原图
+      </Button>
+    ) : null;
+
   const actionPanel = (
     <div
       className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
@@ -4539,9 +4556,11 @@ export function ImageRevealGame({
             <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{spectatorTaskTitle}</p>
             <p className="mt-1 text-sm font-medium text-[var(--muted)]">{spectatorTaskDetail}</p>
             {!isTeamBattleMode && !isQuestionReviewing ? (
-              <p className="mt-3 text-xs font-medium text-[var(--muted)]">按住 V 可临时查看原图</p>
+              <p className="mt-3 hidden text-xs font-medium text-[var(--muted)] lg:block">按住 V 可临时查看原图</p>
             ) : null}
           </section>
+
+          {mobileSpectatorOriginalButton}
 
           {!isQuestionReviewing || !isTeamBattleMode ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
@@ -4642,6 +4661,8 @@ export function ImageRevealGame({
               ) : null}
             </p>
           </section>
+
+          {mobileSpectatorOriginalButton}
 
           {teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE" ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
@@ -5331,7 +5352,13 @@ export function ImageRevealGame({
 
       {(isPresenter || isSpectator) && currentQuestion && isRevealPreviewOpen && canRenderPortal
         ? createPortal(
-            <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6">
+            <div
+              aria-label="原图预览"
+              aria-modal="true"
+              className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6"
+              role="dialog"
+              onClick={() => setIsRevealPreviewOpen(false)}
+            >
               <div
                 className="relative w-full max-w-5xl overflow-hidden rounded-md bg-black shadow-2xl"
                 style={{
@@ -5339,7 +5366,16 @@ export function ImageRevealGame({
                   maxHeight: "86vh",
                   maxWidth: isPortraitImage ? `min(80vw, calc(86vh * ${imageAspectRatio}))` : "min(92vw, 1280px)",
                 }}
+                onClick={(event) => event.stopPropagation()}
               >
+                <button
+                  aria-label="关闭原图预览"
+                  className="absolute right-3 top-3 z-10 min-h-11 rounded-md bg-slate-950/80 px-4 text-sm font-semibold text-white shadow-lg transition hover:bg-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                  type="button"
+                  onClick={() => setIsRevealPreviewOpen(false)}
+                >
+                  关闭
+                </button>
                 <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
                 {canPreviewPresenterPlayerView ? (
                   <div
