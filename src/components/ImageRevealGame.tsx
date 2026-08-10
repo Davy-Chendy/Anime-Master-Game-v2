@@ -1677,21 +1677,26 @@ export function ImageRevealGame({
     }
 
     const updateImageDisplayHeight = () => {
-      const nextHeight = Math.round(element.getBoundingClientRect().height);
+      const rect = element.getBoundingClientRect();
+      const sixteenNineHeight = Math.min(rect.width * (9 / 16), window.innerHeight * 0.78);
+      const nextHeight = Math.round(Math.max(rect.height, sixteenNineHeight));
       setImageDisplayHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
     };
 
     updateImageDisplayHeight();
+    window.addEventListener("resize", updateImageDisplayHeight);
 
     if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateImageDisplayHeight);
       return () => window.removeEventListener("resize", updateImageDisplayHeight);
     }
 
     const resizeObserver = new ResizeObserver(updateImageDisplayHeight);
     resizeObserver.observe(element);
 
-    return () => resizeObserver.disconnect();
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateImageDisplayHeight);
+    };
   }, [gameSession?.currentQuestionIndex, gameSession?.id, imageAspectRatio, isPortraitImage]);
 
   useEffect(() => {
