@@ -5166,11 +5166,14 @@ export function ImageRevealGame({
         {isTeamBattleMode && teamBattleState ? (
           <>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">房间 / 当前玩家</p>
-              <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
-              <p className="mt-1 truncate text-xs text-[var(--muted)]">
-                {currentPlayerName}
-                {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <p className="min-w-0 truncate text-[var(--muted)]">房间 / 当前玩家</p>
+                {playerId === room.hostPlayerId ? <span className="shrink-0 rounded bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">房主</span> : null}
+              </div>
+              <p className="mt-1 flex min-w-0 items-baseline text-lg font-semibold text-slate-950">
+                <span className="shrink-0">{room.code}</span>
+                <span className="mx-1.5 shrink-0 text-[var(--muted)]">·</span>
+                <span className="min-w-0 truncate">{currentPlayerName}</span>
               </p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
@@ -5199,11 +5202,14 @@ export function ImageRevealGame({
         ) : (
           <>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">房间 / 当前玩家</p>
-              <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
-              <p className="mt-1 truncate text-xs text-[var(--muted)]">
-                {currentPlayerName}
-                {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <p className="min-w-0 truncate text-[var(--muted)]">房间 / 当前玩家</p>
+                {playerId === room.hostPlayerId ? <span className="shrink-0 rounded bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">房主</span> : null}
+              </div>
+              <p className="mt-1 flex min-w-0 items-baseline text-lg font-semibold text-slate-950">
+                <span className="shrink-0">{room.code}</span>
+                <span className="mx-1.5 shrink-0 text-[var(--muted)]">·</span>
+                <span className="min-w-0 truncate">{currentPlayerName}</span>
               </p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
