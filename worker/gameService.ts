@@ -4,6 +4,7 @@ import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  MAX_ROOM_NOTICE_LENGTH,
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
 } from "../src/types/game";
 import { createD1QueryClient, type GameDatabase, type GameDatabaseMutationTracker } from "./d1QueryCompat";
@@ -243,6 +244,7 @@ function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): 
     preparedQuestionSetId: room.prepared_question_set_id ?? null,
     visibility: room.room_visibility ?? "PRIVATE",
     name: room.room_name ?? null,
+    notice: room.room_notice ?? null,
     memberCount: room.member_count ?? players.length,
     preparedQuestionSource: room.prepared_question_source ?? null,
     gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
@@ -2691,6 +2693,60 @@ export async function prepareQuestionSetForStart(params: {
   }
 
   return toRoom(room);
+}
+
+export async function updateRoomNotice(params: {
+  roomId: string;
+  hostPlayerId: string;
+  notice: string;
+}) {
+  assertD1Env();
+
+  const normalizedNotice = params.notice.replace(/[\r\n]+/g, " ").trim();
+  if (normalizedNotice.length > MAX_ROOM_NOTICE_LENGTH) {
+    throw new Error(`房间信息最多 ${MAX_ROOM_NOTICE_LENGTH} 个字符。`);
+  }
+  const notice = normalizedNotice || null;
+  const { data: currentRoom, error: currentRoomError } = await d1
+    .from("rooms")
+    .select("id,host_player_id,game_status,room_notice,room_visibility,updated_at")
+    .eq("id", params.roomId)
+    .eq("host_player_id", params.hostPlayerId)
+    .maybeSingle<Pick<DbRoom, "id" | "host_player_id" | "game_status" | "room_notice" | "room_visibility" | "updated_at">>();
+
+  if (currentRoomError) throw new Error(currentRoomError.message);
+  if (!currentRoom || (currentRoom.game_status !== "LOBBY" && currentRoom.game_status !== "QUESTION_SETUP")) {
+    throw new Error("只有房主可以在房间大厅或题库准备阶段修改房间信息。");
+  }
+  if ((currentRoom.room_notice ?? null) === notice) {
+    return {
+      roomId: currentRoom.id,
+      notice,
+      updatedAt: currentRoom.updated_at,
+      changed: false,
+    };
+  }
+
+  const { data: updatedRoom, error } = await d1
+    .from("rooms")
+    .update({
+      room_notice: notice,
+      ...(currentRoom.room_visibility === "PUBLIC" ? { public_activity_at: new Date().toISOString() } : {}),
+    })
+    .eq("id", params.roomId)
+    .eq("host_player_id", params.hostPlayerId)
+    .eq("game_status", currentRoom.game_status)
+    .select("id,room_notice,updated_at")
+    .maybeSingle<Pick<DbRoom, "id" | "room_notice" | "updated_at">>();
+
+  if (error) throw new Error(error.message);
+  if (!updatedRoom) throw new Error("修改房间信息失败：房间状态已变化，请按最新状态重试。");
+  return {
+    roomId: updatedRoom.id,
+    notice: updatedRoom.room_notice ?? null,
+    updatedAt: updatedRoom.updated_at,
+    changed: true,
+  };
 }
 
 export async function updateRoomGameSettings(params: {

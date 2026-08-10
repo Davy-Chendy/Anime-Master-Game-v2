@@ -105,6 +105,7 @@ const MUTATION_NAMES = new Set([
   "createQuestionSetFromUrlText",
   "prepareQuestionSetForStart",
   "updateRoomGameSettings",
+  "updateRoomNotice",
   "selectTeamForPlayer",
   "startGameWithQuestionSet",
   "confirmRevealBlocks",

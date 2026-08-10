@@ -226,6 +226,9 @@ export const updateRoomGameSettings = (params: {
   teamAssignmentMode?: TeamAssignmentMode;
 }) => rpc<Room>("updateRoomGameSettings", params);
 
+export const updateRoomNotice = (params: { roomId: string; hostPlayerId: string; notice: string }) =>
+  rpc<{ roomId: string; notice: string | null; updatedAt: string; changed: boolean }>("updateRoomNotice", params);
+
 export const startGameWithQuestionSet = (params: {
   startRequestId: string;
   roomId: string;

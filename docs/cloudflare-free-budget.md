@@ -112,6 +112,12 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 本功能不改变单局 mutation、checkpoint、Alarm、D1 最终投影语句数、索引写入或题目图片链路，因此无需修改 `scripts/authority-write-budget.mjs`。`0021_public_room_activity.sql` 和 `0022_public_room_spectator_count.sql` 只在部署时为现有公开房间各回填一行，均不建立索引；运行时仍只修改既有房间行或既有 DO aggregate 行。
 
+## 房间信息编辑预算（2026-08-10）
+
+房间信息是房主在大厅或题库准备阶段显式保存的低频房间 mutation。正常路径复用已有 Room DO WebSocket，每次点击保存产生 1 条入站 WebSocket 消息、读取 1 行 D1 房间状态；内容真实变化时再更新同一行 `rooms`、更新 1 行 DO runtime version，并向房间广播 1 个只含 `roomId`、最多 80 字正文和 `updatedAt` 的小 delta。连接尚未建立时的 HTTP 路径最多产生 1 次 Worker 请求和 1 次 Room DO 请求，行为和写入上限相同。完全相同的内容直接返回，不更新 D1/DO SQLite，也不广播；不设置 Alarm、不 checkpoint、不查询玩家表、不进入游戏 action journal。
+
+50 人在线时仍只有房主的一次入站操作，最多增加 50 次出站 WebSocket 投递，不会形成 50 次补拉。按每局编辑 2 次、每天 60 局的偏高估算，每日最多新增 120 条入站消息（按 20:1 约 6 次 DO 请求）、120 行 D1 读取、120 行 D1 数据更新和 120 行 DO SQLite version 更新，分别不超过对应 100,000 行日写入额度的 0.12%；不随每局 30 题放大。断线重连只通过既有完整房间恢复读取当前信息，不自动重放保存；D1 临时失败只向房主返回错误并等待人工重试，schema 永久错误不自动重试。`room_notice` 不建索引，migration 只为既有房间增加一个 NULL 列，因此无需修改 `scripts/authority-write-budget.mjs` 的实时游戏基线。
+
 ## 不可接受的额度模式
 
 - 每个答案、判定、积分变化或 UI tick 写 D1/DO SQLite。

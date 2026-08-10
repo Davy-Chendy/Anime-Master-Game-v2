@@ -16,6 +16,7 @@ export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED"
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
 export type TeamAssignmentMode = "AUTO" | "MANUAL";
+export const MAX_ROOM_NOTICE_LENGTH = 80;
 export type TeamBattlePhase = "PRESENTER_BLOCK" | "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "TURN_RESULT" | "REVIEW";
 export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 25;
 export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
@@ -73,6 +74,7 @@ export type Room = {
   preparedQuestionSetId?: string | null;
   visibility?: RoomVisibility;
   name?: string | null;
+  notice?: string | null;
   memberCount?: number;
   preparedQuestionSource?: RoomQuestionSource | null;
   gameMode?: GameMode;
@@ -98,6 +100,7 @@ export type DbRoom = {
   prepared_question_set_id?: string | null;
   room_visibility?: RoomVisibility | null;
   room_name?: string | null;
+  room_notice?: string | null;
   member_count?: number | null;
   spectator_count?: number | null;
   prepared_question_source?: RoomQuestionSource | null;
@@ -346,6 +349,13 @@ export type RealtimeDelta =
       scope: "room";
       type: "room_updated";
       room: Room;
+    }
+  | {
+      scope: "room";
+      type: "room_notice_updated";
+      roomId: string;
+      notice: string | null;
+      updatedAt: string;
     }
   | {
       scope: "room";

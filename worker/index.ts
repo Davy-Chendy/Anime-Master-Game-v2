@@ -16,6 +16,7 @@ import {
   RoomRuntimeV3Storage,
   RoomVersionExpiredError,
 } from "./roomRuntimeV3";
+import { getRoomNoticeUpdatedDelta } from "./roomNotice";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
 import { getManifestImageUrls } from "./questionSetManifest";
 import { RoomChatRateLimiter, tryHandleRoomChatMessage } from "./roomChat";
@@ -250,6 +251,7 @@ const MUTATION_REGISTRY = {
   createQuestionSetFromUrlText: { deadline: "none" },
   prepareQuestionSetForStart: { deadline: "none" },
   updateRoomGameSettings: { deadline: "none" },
+  updateRoomNotice: { deadline: "none" },
   selectTeamForPlayer: { deadline: "none" },
   startGameWithQuestionSet: { deadline: "authoritative-post-state" },
   confirmRevealBlocks: { deadline: "authoritative-post-state" },
@@ -331,6 +333,10 @@ function getMutationDeadlinePolicy(name: string): MutationDeadlinePolicy | null 
   return name in MUTATION_REGISTRY ? MUTATION_REGISTRY[name as MutationName].deadline : null;
 }
 
+function shouldAdvanceRoomVersion(name: string, result: unknown) {
+  return !(name === "updateRoomNotice" && isRecord(result) && result.changed === false);
+}
+
 const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
   "leaveRoom",
@@ -389,6 +395,7 @@ const ROOM_HANDOFF_BARRIER_NAMES = new Set([
   "cancelPresenterSetup",
   "prepareQuestionSetForStart",
   "updateRoomGameSettings",
+  "updateRoomNotice",
   "selectTeamForPlayer",
   "startGameWithQuestionSet",
 ]);
@@ -1257,6 +1264,9 @@ function buildRealtimeDeltas(
   if (name === "dissolveRoom" && typeof args[0] === "string") {
     deltas.push({ scope: "room", type: "room_dissolved", roomId: args[0] });
   }
+
+  const roomNoticeDelta = getRoomNoticeUpdatedDelta(name, result);
+  if (roomNoticeDelta) deltas.push(roomNoticeDelta);
 
   if (room?.id) {
     deltas.push({ scope: "room", type: "room_updated", room });
@@ -3543,9 +3553,8 @@ export class RoomDurableObjectV3 {
         mutationTracker: undefined,
         localAuthorityCommit: localRoomId
           ? async (name, result, clientActionId) => {
-              void name;
-              void result;
               void clientActionId;
+              if (!shouldAdvanceRoomVersion(name, result)) return null;
               return this.runtime.bumpVersion(localRoomId);
             }
           : undefined,
@@ -4368,7 +4377,7 @@ export class RoomDurableObjectV3 {
         this.broadcastVNextCutover();
       }
       let authorityVersion: AuthorityVersion | null = null;
-      if (isMutation && roomId) {
+      if (isMutation && roomId && shouldAdvanceRoomVersion(payload.name ?? "", responseResult)) {
         if (payload.name === "startGameWithQuestionSet") {
           authorityVersion = { epoch: "vnext", stateVersion: this.authorityVNext.getAggregate()?.stateVersion ?? 0 };
         } else {
@@ -5425,6 +5434,7 @@ export default {
           body?.name === "updatePlayerRole" ||
           body?.name === "selectTeamForPlayer" ||
           body?.name === "updateRoomGameSettings" ||
+          body?.name === "updateRoomNotice" ||
           ROOM_AUTHORITY_GAME_NAMES.has(body?.name ?? "") ||
           ROOM_AUTHORITY_ROSTER_QUERY_NAMES.has(body?.name ?? "") ||
           mutationDeadlinePolicy === "authoritative-post-state"

@@ -250,6 +250,52 @@ test("rejected WebSocket start removes the initializing journal and returns the 
   assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM game_sessions").get().count, 0);
 });
 
+test("room notice WebSocket mutation broadcasts one small delta and skips no-op versions", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  seedRejectedTeamStart(db.sqlite);
+  const storage = new StorageAdapter();
+  const socket = new TestSocket({
+    attachmentVersion: 1,
+    topic: "room:room-rejected",
+    playerId: "host",
+    pending: [],
+    serializedBytes: 0,
+  });
+  const state = createV3State(storage, "room-rejected", [socket as unknown as WebSocket]);
+  const object = new RoomDurableObjectV3(state, { DB: db as unknown as D1Database } as Env);
+  const action = (clientActionId: string) => JSON.stringify({
+    type: "action",
+    name: "updateRoomNotice",
+    clientActionId,
+    args: [{ roomId: "room-rejected", hostPlayerId: "host", notice: "满 8 人开始" }],
+  });
+
+  await object.webSocketMessage(socket as unknown as WebSocket, action("notice-save-1"));
+
+  const messages = socket.sent.map((value) => JSON.parse(value) as {
+    type?: string;
+    data?: { changed?: boolean };
+    deltas?: Array<{ type?: string; roomId?: string; notice?: string }>;
+  });
+  const changed = messages.find((message) => message.type === "change");
+  assert.deepEqual(changed?.deltas?.map((delta) => ({ type: delta.type, roomId: delta.roomId, notice: delta.notice })), [{
+    type: "room_notice_updated",
+    roomId: "room-rejected",
+    notice: "满 8 人开始",
+  }]);
+  assert.equal(messages.find((message) => message.type === "action_result")?.data?.changed, true);
+  assert.equal(db.sqlite.prepare("SELECT room_notice FROM rooms WHERE id='room-rejected'").get().room_notice, "满 8 人开始");
+  assert.equal(storage.db.prepare("SELECT state_version FROM room_runtime_meta WHERE id=1").get().state_version, 1);
+
+  socket.sent.length = 0;
+  await object.webSocketMessage(socket as unknown as WebSocket, action("notice-save-2"));
+  const noOpMessages = socket.sent.map((value) => JSON.parse(value) as { type?: string; data?: { changed?: boolean } });
+  assert.equal(noOpMessages.some((message) => message.type === "change"), false);
+  assert.equal(noOpMessages.find((message) => message.type === "action_result")?.data?.changed, false);
+  assert.equal(storage.db.prepare("SELECT state_version FROM room_runtime_meta WHERE id=1").get().state_version, 1);
+});
+
 test("persisted rejected start self-heals before join while transient D1 failure keeps its journal", async () => {
   const db = new DatabaseAdapter();
   applyMigrations(db.sqlite);

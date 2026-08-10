@@ -16,6 +16,7 @@ import {
   createQuestionSetFromUrlText,
   getCommunityQuestionSetDetail,
   getCommunityQuestionSets,
+  getRoomWithPlayers,
   getQuestionSetById,
   joinRoom,
   publishQuestionSetToCommunity,
@@ -28,7 +29,9 @@ import {
   selectTeamForPlayer,
   updatePlayerRole,
   updateRoomGameSettings,
+  updateRoomNotice,
 } from "../worker/gameService";
+import { getRoomNoticeUpdatedDelta } from "../worker/roomNotice";
 
 const root = resolve(import.meta.dirname, "..");
 const migrationsDirectory = join(root, "d1", "migrations");
@@ -77,7 +80,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0022") {
+function applyMigrations(db: DatabaseSync, through = "0023") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -432,6 +435,84 @@ test("spectator count migration backfills public room manifests transactionally 
   );
   assert.throws(() => db.prepare("UPDATE rooms SET spectator_count=51 WHERE id='public-spectators'").run(), /CHECK constraint failed/);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND sql LIKE '%spectator_count%' ").get().count, 0);
+});
+
+test("room notice migration preserves existing rooms and enforces the storage bound", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0022");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id) VALUES(?,?,?)").run("notice-old", "NOT023", "host");
+  const migration = readFileSync(join(migrationsDirectory, "0023_room_notice.sql"), "utf8");
+
+  db.exec("BEGIN");
+  try {
+    db.exec(migration);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='room_notice'").get().count, 0);
+
+  db.exec(migration);
+  assert.equal(db.prepare("SELECT room_notice FROM rooms WHERE id='notice-old'").get().room_notice, null);
+  assert.throws(() => db.prepare("UPDATE rooms SET room_notice=? WHERE id='notice-old'").run("信".repeat(81)), /CHECK constraint failed/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND sql LIKE '%room_notice%'").get().count, 0);
+});
+
+test("room notices are host-authoritative, recoverable, bounded, and emit only changed deltas", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+
+  await runWithGameDatabase(db, async () => {
+    const room = await createRoom("notice-host", "Notice Host");
+    const saved = await updateRoomNotice({
+      roomId: room.id!,
+      hostPlayerId: "notice-host",
+      notice: "  满 8 人\n开始  ",
+    });
+    assert.deepEqual(saved, {
+      roomId: room.id,
+      notice: "满 8 人 开始",
+      updatedAt: saved.updatedAt,
+      changed: true,
+    });
+    assert.deepEqual(getRoomNoticeUpdatedDelta("updateRoomNotice", saved), {
+      scope: "room",
+      type: "room_notice_updated",
+      roomId: room.id,
+      notice: "满 8 人 开始",
+      updatedAt: saved.updatedAt,
+    });
+    assert.equal((await getRoomWithPlayers(room.code))?.notice, "满 8 人 开始");
+
+    const changesBeforeNoOp = Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes);
+    const noOp = await updateRoomNotice({ roomId: room.id!, hostPlayerId: "notice-host", notice: "满 8 人 开始" });
+    assert.equal(noOp.changed, false);
+    assert.equal(Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes), changesBeforeNoOp);
+    assert.equal(getRoomNoticeUpdatedDelta("updateRoomNotice", noOp), null);
+
+    await assert.rejects(
+      () => updateRoomNotice({ roomId: room.id!, hostPlayerId: "not-host", notice: "不应保存" }),
+      /只有房主/,
+    );
+    await assert.rejects(
+      () => updateRoomNotice({ roomId: room.id!, hostPlayerId: "notice-host", notice: "信".repeat(81) }),
+      /最多 80 个字符/,
+    );
+
+    const cleared = await updateRoomNotice({ roomId: room.id!, hostPlayerId: "notice-host", notice: "   " });
+    assert.equal(cleared.notice, null);
+    assert.equal((await getRoomWithPlayers(room.code))?.notice, null);
+
+    db.sqlite.prepare("UPDATE rooms SET game_status='QUESTION_SETUP' WHERE id=?").run(room.id);
+    const setupNotice = await updateRoomNotice({ roomId: room.id!, hostPlayerId: "notice-host", notice: "题库准备中" });
+    assert.equal(setupNotice.notice, "题库准备中");
+
+    db.sqlite.prepare("UPDATE rooms SET game_status='PLAYING' WHERE id=?").run(room.id);
+    await assert.rejects(
+      () => updateRoomNotice({ roomId: room.id!, hostPlayerId: "notice-host", notice: "游戏中修改" }),
+      /大厅或题库准备阶段/,
+    );
+  });
 });
 
 test("public room creation uses an optional trimmed name and piggybacks member counts", async () => {

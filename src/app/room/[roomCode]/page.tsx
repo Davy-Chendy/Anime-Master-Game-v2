@@ -30,6 +30,7 @@ import {
   selectTeamForPlayer,
   startGameWithQuestionSet,
   updateRoomGameSettings,
+  updateRoomNotice,
   updatePlayerRole,
 } from "@/lib/cloudflareRooms";
 import type {
@@ -50,6 +51,7 @@ import type {
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  MAX_ROOM_NOTICE_LENGTH,
 } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
@@ -386,6 +388,12 @@ function isQuestionSetUpdatedDelta(
 
 function isRoomUpdatedDelta(delta: RealtimeDelta): delta is Extract<RealtimeDelta, { scope: "room"; type: "room_updated" }> {
   return delta.scope === "room" && delta.type === "room_updated";
+}
+
+function isRoomNoticeUpdatedDelta(
+  delta: RealtimeDelta,
+): delta is Extract<RealtimeDelta, { scope: "room"; type: "room_notice_updated" }> {
+  return delta.scope === "room" && delta.type === "room_notice_updated";
 }
 
 function isRoomDissolvedDelta(delta: RealtimeDelta): delta is Extract<RealtimeDelta, { scope: "room"; type: "room_dissolved" }> {
@@ -1874,6 +1882,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [isUpdatingSettings, setIsUpdatingSettings] = useState(false);
+  const [isSavingRoomNotice, setIsSavingRoomNotice] = useState(false);
+  const [roomNoticeDraft, setRoomNoticeDraft] = useState("");
+  const [isRoomNoticeDirty, setIsRoomNoticeDirty] = useState(false);
   const [isLeavingRoom, setIsLeavingRoom] = useState(false);
   const [isSwitchingRole, setIsSwitchingRole] = useState(false);
   const [pendingJoinRole, setPendingJoinRole] = useState<PlayerRole | null>(null);
@@ -1897,6 +1908,15 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
     }
   }, [room?.id, room?.status]);
+
+  useEffect(() => {
+    setRoomNoticeDraft(room?.notice ?? "");
+    setIsRoomNoticeDirty(false);
+  }, [room?.id]);
+
+  useEffect(() => {
+    if (!isRoomNoticeDirty) setRoomNoticeDraft(room?.notice ?? "");
+  }, [room?.notice, isRoomNoticeDirty]);
 
   useEffect(() => {
     if (!error) {
@@ -2246,10 +2266,20 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         }
 
         const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
+        const roomNoticeDelta = getRealtimeDeltas(message).find(isRoomNoticeUpdatedDelta);
         cacheGameResultSnapshot(getBroadcastGameResultSnapshot(message));
         const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
         if (pushedRoom && pushedRoom.id === room.id) {
           applyRoomUpdate(pushedRoom);
+          return;
+        }
+        if (roomNoticeDelta && roomNoticeDelta.roomId === room.id) {
+          const noticeUpdate = roomNoticeDelta;
+          setRoom((currentRoom) =>
+            currentRoom?.id === noticeUpdate.roomId
+              ? { ...currentRoom, notice: noticeUpdate.notice, updatedAt: noticeUpdate.updatedAt }
+              : currentRoom,
+          );
           return;
         }
       },
@@ -2287,6 +2317,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
   const canKickPlayers = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP" || room?.status === "PLAYING"));
   const canSwitchRole = Boolean(currentPlayer && canSwitchPlayerRole(room, isCurrentPresenter));
+  const canEditRoomNotice = Boolean(isHost && (room?.status === "LOBBY" || room?.status === "QUESTION_SETUP"));
+  const hasRoomNoticeChanges = roomNoticeDraft.trim() !== (room?.notice ?? "");
   const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
   const shouldShowLobby =
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
@@ -2317,6 +2349,31 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError(caughtError instanceof Error ? caughtError.message : "退出房间失败，请稍后重试");
     } finally {
       setIsLeavingRoom(false);
+    }
+  }
+
+  async function handleSaveRoomNotice() {
+    if (!room?.id || !playerId || !canEditRoomNotice || !hasRoomNoticeChanges || isSavingRoomNotice) return;
+
+    setIsSavingRoomNotice(true);
+    setError("");
+    try {
+      const result = await updateRoomNotice({
+        roomId: room.id,
+        hostPlayerId: playerId,
+        notice: roomNoticeDraft,
+      });
+      setRoom((currentRoom) =>
+        currentRoom?.id === result.roomId
+          ? { ...currentRoom, notice: result.notice, updatedAt: result.updatedAt }
+          : currentRoom,
+      );
+      setRoomNoticeDraft(result.notice ?? "");
+      setIsRoomNoticeDirty(false);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "修改房间信息失败，请稍后重试");
+    } finally {
+      setIsSavingRoomNotice(false);
     }
   }
 
@@ -2643,15 +2700,59 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   return (
     <AppShell>
       {!roomExpired && room?.status !== "PLAYING" ? (
-        <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="mb-5 grid gap-3 lg:grid-cols-[auto_minmax(16rem,1fr)_auto] lg:items-center">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 lg:max-w-md">
             <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">房间 {roomCode}</h1>
             <p className="text-sm text-[var(--muted)] sm:text-base">
               当前玩家：{nickname || "未设置昵称"}
               {isHost ? <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span> : null}
             </p>
           </div>
-          <div className="flex shrink-0 flex-wrap justify-end gap-3">
+          <div className="min-w-0 lg:px-2">
+            {canEditRoomNotice ? (
+              <form
+                className="flex min-w-0 gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleSaveRoomNotice();
+                }}
+              >
+                <label className="sr-only" htmlFor="room-notice-input">房间信息</label>
+                <input
+                  aria-describedby="room-notice-limit"
+                  className="h-12 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-white px-3 text-sm text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-rose-300 focus:ring-2 focus:ring-rose-100 disabled:cursor-not-allowed disabled:bg-slate-50"
+                  disabled={isSavingRoomNotice}
+                  id="room-notice-input"
+                  maxLength={MAX_ROOM_NOTICE_LENGTH}
+                  placeholder="房间信息，例如：满 8 人开始"
+                  type="text"
+                  value={roomNoticeDraft}
+                  onChange={(event) => {
+                    setRoomNoticeDraft(event.target.value);
+                    setIsRoomNoticeDirty(event.target.value.trim() !== (room?.notice ?? ""));
+                  }}
+                />
+                <span className="sr-only" id="room-notice-limit">最多 {MAX_ROOM_NOTICE_LENGTH} 个字符</span>
+                <Button
+                  className="min-w-20 shrink-0"
+                  disabled={isSavingRoomNotice || !hasRoomNoticeChanges}
+                  type="submit"
+                  variant="secondary"
+                >
+                  {isSavingRoomNotice ? "保存中…" : "保存"}
+                </Button>
+              </form>
+            ) : (
+              <p
+                className="flex h-12 min-w-0 items-center rounded-md border border-[var(--line)] bg-slate-50 px-3 text-sm text-slate-700"
+                title={room?.notice || "房主暂未填写房间信息"}
+              >
+                <span className="shrink-0 font-semibold text-slate-950">房间信息：</span>
+                <span className="truncate">{room?.notice || "房主暂未填写"}</span>
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-wrap justify-start gap-3 lg:justify-end">
             <QuestionGuideButton />
             {room ? (
               isHost ? (
