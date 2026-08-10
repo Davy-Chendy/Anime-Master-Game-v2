@@ -15,7 +15,7 @@ import type { Player } from "@/types/game";
 export type RoomChatDisplayMode = "closed" | "compact" | "expanded";
 
 const ROOM_CHAT_PANEL_HEIGHT_STORAGE_KEY = "anime-master:room-chat-panel-height";
-const ROOM_CHAT_PANEL_MIN_HEIGHT = 92;
+const ROOM_CHAT_PANEL_MIN_HEIGHT = 84;
 const ROOM_CHAT_PANEL_DEFAULT_HEIGHT = 240;
 
 export function clampRoomChatPanelHeight(height: number, viewportHeight = 800) {
@@ -255,7 +255,7 @@ export function RoomChatBar({
             }}
           >
             {controller.messages.length > 0 ? controller.messages.map((message) => (
-              <div className="flex min-w-0 items-baseline gap-2 px-3 py-1.5 text-base leading-6 transition hover:bg-[oklch(0.955_0.003_250_/_0.72)]" key={message.messageId} title={`${message.nickname}：${message.text}`}>
+              <div className="flex min-w-0 items-baseline gap-2 px-3 py-1 text-base leading-6 transition hover:bg-[oklch(0.955_0.003_250_/_0.72)]" key={message.messageId} title={`${message.nickname}：${message.text}`}>
                 <span className={`max-w-28 shrink-0 truncate font-semibold ${message.playerId === playerId ? "text-rose-700" : "text-slate-700"}`}>{message.nickname}：</span>
                 <span className="min-w-0 flex-1 truncate text-slate-950">{message.text}</span>
                 <time className="shrink-0 text-sm tabular-nums text-[var(--muted)]">{formatMessageTime(message.sentAt)}</time>
@@ -282,13 +282,15 @@ export function RoomChatBar({
           </button>
         ) : isExpanded ? (
           <div className="pointer-events-none relative z-40 flex h-14 min-w-0 items-center justify-end">
-            <button
-              className="pointer-events-auto h-10 rounded-md border border-slate-200/80 bg-[oklch(0.985_0.002_250_/_0.96)] px-2.5 text-base font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
-              type="button"
-              onClick={() => controller.setMode("compact")}
-            >
-              收起
-            </button>
+            <div className="pointer-events-auto flex h-14 items-center overflow-hidden rounded-lg border border-[var(--line)] bg-white px-1.5">
+              <button
+                className="h-10 rounded-md px-2.5 text-base font-semibold text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+                type="button"
+                onClick={() => controller.setMode("compact")}
+              >
+                收起
+              </button>
+            </div>
           </div>
         ) : (
           <div className="flex h-14 min-w-0 overflow-hidden rounded-lg border border-[var(--line)] bg-slate-50/70 transition hover:border-slate-300 focus-within:ring-4 focus-within:ring-rose-100">
