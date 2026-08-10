@@ -88,15 +88,15 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
   return { env, fetchedTopics, boundQueries };
 }
 
-test("public room directory filters every status by authoritative two-hour activity", async () => {
+test("public room directory filters every status by authoritative one-hour activity", async () => {
   const rows = [
     room("playing", "PLAYING", "2026-08-09T07:00:00Z", 3),
     room("setup-ready", "QUESTION_SETUP", "2026-08-09T09:45:00Z", 2, "MANUAL", 1),
     room("setup-preparing", "QUESTION_SETUP", "2026-08-09T09:44:00Z", 2, null),
     room("lobby-fresh", "LOBBY", "2026-08-09T09:40:00Z"),
-    room("lobby-boundary", "LOBBY", "2026-08-09T08:00:00Z"),
-    room("lobby-stale", "LOBBY", "2026-08-09T07:59:59Z"),
-    { ...room("lobby-membership-churn", "LOBBY", "2026-08-09T09:59:00Z"), activity_at: "2026-08-09T07:00:00Z" },
+    room("lobby-boundary", "LOBBY", "2026-08-09T09:00:00Z"),
+    room("lobby-stale", "LOBBY", "2026-08-09T08:59:59Z"),
+    { ...room("lobby-membership-churn", "LOBBY", "2026-08-09T09:59:00Z"), activity_at: "2026-08-09T08:00:00Z" },
     room("result", "GAME_RESULT", "2026-08-09T08:00:00Z", 4),
   ];
   const { env, fetchedTopics, boundQueries } = createEnv([rows], {
@@ -130,7 +130,7 @@ test("public room directory filters every status by authoritative two-hour activ
   assert.equal(page.rooms[0].questionCount, 30);
   assert.equal(page.rooms.find((room) => room.id === "setup-ready")?.spectatorCount, 1);
   assert.equal(page.rooms[5].updatedAt, "2026-08-09T09:55:00Z");
-  assert.equal(boundQueries[0][1], "2026-08-09T08:00:00.000Z");
+  assert.equal(boundQueries[0][1], "2026-08-09T09:00:00.000Z");
   assert.equal(boundQueries[0].at(-1), 21);
 });
 
@@ -138,7 +138,7 @@ test("public room directory falls back safely when presence is unavailable or in
   const rows = [
     room("playing-error-fresh", "PLAYING", "2026-08-09T09:45:00Z", 3),
     room("playing-invalid-fresh", "PLAYING", "2026-08-09T09:40:00Z", 4),
-    room("playing-error-stale", "PLAYING", "2026-08-09T07:59:59Z", 5),
+    room("playing-error-stale", "PLAYING", "2026-08-09T08:59:59Z", 5),
   ];
   const { env } = createEnv([rows], {
     "room:playing-error-fresh": new Error("temporary failure"),

@@ -14,7 +14,7 @@ The public-room directory currently treats D1 room updates and Room Durable Obje
 - Add a dedicated D1 `public_activity_at` value for lobby and setup activity.
 - Add `lastPublicActivityAtMs` to the existing authority vNext aggregate and persist it through existing checkpoints.
 - Refresh activity only for host/presenter setup actions and authoritative gameplay progress, never for ordinary membership changes, reconnects, or persistence-only checkpoints.
-- Increase the directory visibility window from 30 minutes to 2 hours.
+- Increase the directory visibility window from 30 minutes to 1 hour.
 
 ## Scope
 
@@ -37,7 +37,7 @@ The public-room directory currently treats D1 room updates and Room Durable Obje
 | Database | Yes | Add nullable `public_activity_at` and backfill current public rooms |
 | API | Compatible | Existing `updatedAt` response field now carries dedicated public activity |
 | State | Yes | Store the last meaningful activity in the existing vNext aggregate JSON |
-| UI | Minimal | Update the two-hour explanatory copy |
+| UI | Minimal | Update the one-hour explanatory copy |
 
 ## Architecture Considerations
 
@@ -47,7 +47,7 @@ Room DO remains authoritative for active-game progress. The new timestamp piggyb
 
 - [x] Ordinary joins, leaves, reconnects, role changes, and persistence-only checkpoints do not renew public activity.
 - [x] Authoritative phase progress, game start/result, and meaningful lobby/setup control actions renew public activity.
-- [x] Rooms remain visible for two hours after meaningful activity and are hidden afterwards.
+- [x] Rooms remain visible for one hour after meaningful activity and are hidden afterwards.
 - [x] Runtime Worker, D1, DO, Alarm, checkpoint, and broadcast counts remain unchanged.
 
 ## Risks & Mitigations

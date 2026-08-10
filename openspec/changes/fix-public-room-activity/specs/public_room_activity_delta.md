@@ -12,7 +12,7 @@ Public activity represents room organization or authoritative gameplay progress.
 #### Scenario: Membership churn
 - GIVEN a public room whose host or presenter stops advancing it
 - WHEN ordinary players repeatedly join, leave, reconnect, change role, or select teams
-- THEN its public activity time remains unchanged and it is hidden two hours after the last meaningful activity
+- THEN its public activity time remains unchanged and it is hidden one hour after the last meaningful activity
 
 #### Scenario: Gameplay progress
 - GIVEN a public game is visible
@@ -28,13 +28,13 @@ Public activity represents room organization or authoritative gameplay progress.
 
 ### Requirement: Manually Refreshed Public Catalog
 
-The public-room catalog displays rooms with meaningful activity during the previous two hours. Lobby and setup states use the dedicated D1 activity projection; playing and result states use the compact Room DO activity value with D1 fallback.
+The public-room catalog displays rooms with meaningful activity during the previous hour. Lobby and setup states use the dedicated D1 activity projection; playing and result states use the compact Room DO activity value with D1 fallback.
 
 #### Scenario: Two-hour boundary
 - GIVEN the directory is loaded at a known time
-- WHEN a room last made meaningful progress less than two hours ago
+- WHEN a room last made meaningful progress no more than one hour ago
 - THEN it remains visible
-- AND when its activity is older than two hours it is hidden
+- AND when its activity is older than one hour it is hidden
 
 ## REMOVED
 

@@ -11,7 +11,7 @@
 ## Phase 2: Authority and Directory
 
 - [x] 2.1 Persist gameplay activity through existing authority checkpoints.
-- [x] 2.2 Return gameplay activity from compact presence and filter the directory at two hours.
+- [x] 2.2 Return gameplay activity from compact presence and filter the directory at one hour.
 - [x] 2.3 Cover membership, phase progress, restore, fallback, and boundary behavior.
 
 ## Phase 3: Documentation and Verification

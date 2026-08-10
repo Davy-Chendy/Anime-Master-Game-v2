@@ -166,7 +166,7 @@ export default function PublicRoomsPage() {
           <button className="text-sm font-semibold text-[var(--primary)] hover:underline" onClick={() => router.push("/")} type="button">← 返回首页</button>
           <h1 className="mt-3 text-3xl font-bold text-slate-950 sm:text-4xl">公开房间</h1>
           <p aria-live="polite" className="mt-2 text-sm text-[var(--muted)]">
-            {isLoading ? "正在读取房间" : `${nextCursor ? "已显示" : "共"} ${rooms.length} 个房间 · 仅显示近 2 小时有效活跃的房间`}
+            {isLoading ? "正在读取房间" : `${nextCursor ? "已显示" : "共"} ${rooms.length} 个房间 · 仅显示近 1 小时有效活跃的房间`}
           </p>
         </div>
         <Button className="shadow-none" disabled={isLoading || isLoadingMore} onClick={() => void loadRooms()} type="button" variant="secondary">{isLoading ? "读取中…" : "刷新房间"}</Button>
