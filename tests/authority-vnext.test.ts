@@ -415,6 +415,7 @@ test("batch judgement sends each target only its own compact delta", async () =>
   }), startedAt + 4000);
   assert.equal(outcome.presenterDeltas.length, 1);
   assert.equal(outcome.playerDeltas.length, 12);
+  assert.equal(outcome.playerBackfillDeltas?.length, 12);
   for (const delivery of outcome.playerDeltas) {
     assert.ok(JSON.stringify(delivery.delta).length < 1024);
     assert.equal(delivery.delta.type, "answer_judgements_changed");
@@ -423,6 +424,14 @@ test("batch judgement sends each target only its own compact delta", async () =>
       assert.ok(delivery.delta.scores.every((score) => score.playerId === delivery.playerId));
       assert.ok(delivery.delta.questionResults.every((result) => result.playerId === delivery.playerId));
     }
+  }
+  for (const delivery of outcome.playerBackfillDeltas ?? []) {
+    assert.equal(delivery.deltas.every((delta) => delta.type === "answer_text_backfill"), true);
+    assert.equal(delivery.deltas.every((delta) => JSON.stringify(delta).length < 1024), true);
+    assert.deepEqual(
+      delivery.deltas.flatMap((delta) => delta.type === "answer_text_backfill" ? delta.buzzerAnswers.map((answer) => answer.playerId) : []),
+      Array.from({ length: 12 }, (_, index) => `p${index}`),
+    );
   }
 });
 
@@ -440,8 +449,8 @@ test("answer progress is public without exposing answer text", () => {
   assert.deepEqual(submittedProgress.buzzerAnswers.map((answer) => [answer.playerId, answer.status]), [["p0", "pending"]]);
   assert.equal(JSON.stringify(submittedProgress).includes("secret-answer"), false);
   assert.ok(JSON.stringify(submittedProgress).length < 1024);
-  assert.equal(submitted.spectatorDeltas?.length, 1);
-  assert.equal(JSON.stringify(submitted.spectatorDeltas).includes("secret-answer"), true);
+  assert.equal(submitted.answerViewerDeltas?.length, 1);
+  assert.equal(JSON.stringify(submitted.answerViewerDeltas).includes("secret-answer"), true);
 
   const judged = authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", {
     presenterPlayerId: "host",
@@ -454,6 +463,8 @@ test("answer progress is public without exposing answer text", () => {
   assert.equal(judgedProgress.questionResults.some((result) => result.playerId === "p0"), true);
   assert.equal(JSON.stringify(judgedProgress).includes("secret-answer"), false);
   assert.ok(JSON.stringify(judgedProgress).length < 1024);
+  assert.equal(judged.playerBackfillDeltas?.[0]?.playerId, "p0");
+  assert.equal(JSON.stringify(judged.playerBackfillDeltas).includes("secret-answer"), true);
 });
 
 test("presenter can judge an offline player while later answers still arrive", () => {
@@ -3138,10 +3149,11 @@ test("WebSocket snapshot reads stay inside the message event lifetime", () => {
   }
 });
 
-test("answer text is targeted to current spectators without entering the public stream", () => {
+test("answer text is targeted to current viewers without entering the public stream", () => {
   const worker = readFileSync(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(worker, /player\.role === "SPECTATOR"/);
-  assert.match(worker, /outcome\.spectatorDeltas/);
+  assert.match(worker, /correctPlayerIds\.has\(player\.id\)/);
+  assert.match(worker, /outcome\.answerViewerDeltas/);
 });
 
 test("HTTP room RPC failures emit structured diagnostics", () => {
@@ -3194,9 +3206,10 @@ test("50 players complete 30 questions within the vNext write budget", async () 
       const judged = authority.handleMutation(host, { ...envelope("host", hostSeq, "setAnswerJudgements", { presenterPlayerId: "host", judgements: [{ buzzerAnswerId: `${player.id}:${questionIndex + 1}:submitAnswer:b`, isCorrect: true }] }), questionIndex }, base + 3200);
       judgementLatencies.push(performance.now() - before);
       actionCount += 1;
+      const backfillDeltas = judged.playerBackfillDeltas?.flatMap((delivery) => delivery.deltas) ?? [];
       broadcastCount += judged.presenterDeltas.length + judged.playerDeltas.length;
-      broadcastBytes += JSON.stringify(judged.presenterDeltas).length + JSON.stringify(judged.playerDeltas).length;
-      for (const delta of [...judged.presenterDeltas, ...judged.playerDeltas.map((delivery) => delivery.delta)]) { const bytes = JSON.stringify(delta).length; if (bytes > maxDeltaBytes) { maxDeltaBytes = bytes; maxDeltaType = delta.type; maxDeltaStats = delta.type === "answer_judgements_changed" ? { answers: delta.answers.length, scores: delta.scores.length, results: delta.questionResults.length, hasSession: Boolean(delta.gameSession) } : null; } }
+      broadcastBytes += JSON.stringify(judged.presenterDeltas).length + JSON.stringify(judged.playerDeltas).length + JSON.stringify(backfillDeltas).length;
+      for (const delta of [...judged.presenterDeltas, ...judged.playerDeltas.map((delivery) => delivery.delta), ...backfillDeltas]) { const bytes = JSON.stringify(delta).length; if (bytes > maxDeltaBytes) { maxDeltaBytes = bytes; maxDeltaType = delta.type; maxDeltaStats = delta.type === "answer_judgements_changed" ? { answers: delta.answers.length, scores: delta.scores.length, results: delta.questionResults.length, hasSession: Boolean(delta.gameSession) } : delta.type === "answer_text_backfill" ? { answers: delta.buzzerAnswers.length } : null; } }
       await authority.maybeCheckpoint();
     }
     hostSeq += 1;

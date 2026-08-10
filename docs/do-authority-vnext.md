@@ -68,7 +68,7 @@
 
 ## 广播与稳定窗口
 
-- answer 正文定向发送给主持人和当前观战者（观战 UI 默认隐藏，打开“玩家回答”后展示）；3秒稳定窗口内主持人隐藏正文，窗口结束后立即显示并启用判定；judgement 立即发目标玩家和主持人；谁已作答、公开判定、积分和本题答对人数以小 delta 广播全房。
+- answer 正文定向发送给主持人和当前观战者（观战 UI 默认隐藏，打开“其他玩家回答”后展示）；3秒稳定窗口内主持人隐藏正文，窗口结束后立即显示并启用判定；judgement 立即发目标玩家和主持人；谁已作答、公开判定、积分和本题答对人数以小 delta 广播全房。
 - Worker 转发 WebSocket 到 Room DO 时必须保留 `playerId` 查询参数；Attachment 连接身份不得依赖该连接先发送 mutation 才补全。
 - 同一 payload 只 stringify 一次；普通 delta 目标小于1KB，目标玩家反馈不做延迟批处理。
 - 3秒稳定窗口使用服务端绝对时间；`orderToken=serverReceivedAtMs:actorId:clientSeq` 构成可恢复全序，窗口结束由一次性 UI 定时器触发重绘，不参与保活或持久化。

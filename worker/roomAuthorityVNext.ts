@@ -45,6 +45,7 @@ const FINAL_PROJECTION_RESERVE_BYTES = 400 * 1024;
 const GAME_RESULT_ARCHIVE_LIMIT_BYTES = 512 * 1024;
 const MAX_PLAYERS_PER_ROOM = 50;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+const ANSWER_TEXT_BACKFILL_CHUNK_SIZE = 2;
 const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: 45 }, (_, index) => index);
 const QUESTION_SCOPED_MUTATION_NAMES = new Set([
@@ -176,8 +177,9 @@ export type VNextMutationOutcome = {
   orderToken?: string;
   publicDeltas: RealtimeDelta[];
   presenterDeltas: RealtimeDelta[];
-  spectatorDeltas?: RealtimeDelta[];
+  answerViewerDeltas?: RealtimeDelta[];
   playerDeltas: Array<{ playerId: string; delta: RealtimeDelta }>;
+  playerBackfillDeltas?: Array<{ playerId: string; deltas: RealtimeDelta[] }>;
   forceCheckpoint?: CheckpointTrigger;
   archiveQuestion?: boolean;
   deadlineChanged?: boolean;
@@ -900,7 +902,7 @@ export class RoomAuthorityVNext {
       aggregate.buzzerAnswers.push(buzzer);
     }
     const delta: RealtimeDelta = { scope: "game", type: "answer_submitted", answer: clone(answer), buzzerAnswer: clone(buzzer) };
-    return { data: { ...clone(answer), buzzerAnswer: clone(buzzer) }, provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [buzzer])], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [] };
+    return { data: { ...clone(answer), buzzerAnswer: clone(buzzer) }, provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [buzzer])], presenterDeltas: [delta], answerViewerDeltas: [delta], playerDeltas: [] };
   }
 
   private submitForfeit(action: VNextPendingMutation): VNextMutationOutcome {
@@ -919,7 +921,7 @@ export class RoomAuthorityVNext {
     }
     aggregate.buzzerAnswers = aggregate.buzzerAnswers.filter((item) => questionRoundKey(item.questionIndex, item.revealRound, item.playerId) !== key || item.status !== "pending");
     const delta: RealtimeDelta = { scope: "game", type: "answer_submitted", answer: clone(answer) };
-    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [])], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [] };
+    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([answer], [])], presenterDeltas: [delta], answerViewerDeltas: [delta], playerDeltas: [] };
   }
 
   private cancelForfeit(action: VNextPendingMutation): VNextMutationOutcome {
@@ -931,7 +933,7 @@ export class RoomAuthorityVNext {
     const [removed] = aggregate.answers.splice(index, 1);
     const data = { gameSession: clone(session), canceledAnswerId: removed.id };
     const delta: RealtimeDelta = { scope: "game", type: "answer_canceled", gameSession: clone(session), canceledAnswerId: removed.id, canceledPlayerId: action.actorId };
-    return { data, provisional: true, publicDeltas: [this.publicAnswerProgress([], [], { canceledPlayerIds: [action.actorId] })], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [{ playerId: action.actorId, delta }] };
+    return { data, provisional: true, publicDeltas: [this.publicAnswerProgress([], [], { canceledPlayerIds: [action.actorId] })], presenterDeltas: [delta], answerViewerDeltas: [delta], playerDeltas: [{ playerId: action.actorId, delta }] };
   }
 
   private submitBuzzer(action: VNextPendingMutation): VNextMutationOutcome {
@@ -947,7 +949,7 @@ export class RoomAuthorityVNext {
     const answer: BuzzerAnswer = { id: action.actionId, gameSessionId: session.id, questionIndex: session.currentQuestionIndex, revealRound: session.currentRevealRound, playerId: action.actorId, answerText, status: "pending", scoreAwarded: 0, submittedAt, serverReceivedAt: submittedAt };
     aggregate.buzzerAnswers.push(answer);
     const delta: RealtimeDelta = { scope: "game", type: "buzzer_answer_submitted", buzzerAnswer: clone(answer) };
-    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([], [answer])], presenterDeltas: [delta], spectatorDeltas: [delta], playerDeltas: [] };
+    return { data: clone(answer), provisional: true, publicDeltas: [this.publicAnswerProgress([], [answer])], presenterDeltas: [delta], answerViewerDeltas: [delta], playerDeltas: [] };
   }
 
   private judgeBuzzer(action: VNextPendingMutation): VNextMutationOutcome {
@@ -962,6 +964,7 @@ export class RoomAuthorityVNext {
       publicDeltas: [this.publicAnswerProgress([], outcome.changedAnswers, { gameSession: outcome.sessionChanged ? this.requireActive().gameSession! : undefined, scores: outcome.changedScores, questionResults: outcome.changedQuestionResults, removedQuestionResultPlayerIds: outcome.removedQuestionResultPlayerIds })],
       presenterDeltas: [delta],
       playerDeltas: this.playerJudgementDeltas(outcome.changedAnswers, outcome),
+      playerBackfillDeltas: this.playerAnswerBackfills(outcome.newlyCorrectPlayerIds, outcome.allAnswers),
       ...(this.requireActive().gameSession!.gameMode === "BUZZER_FIRST_CORRECT" && judged.status === "correct" ? { forceCheckpoint: "phase-boundary" as const, deadlineChanged: true } : {}),
     };
   }
@@ -981,6 +984,7 @@ export class RoomAuthorityVNext {
       publicDeltas: [this.publicAnswerProgress([], outcome.changedAnswers, { gameSession: outcome.sessionChanged ? session : undefined, scores: outcome.changedScores, questionResults: outcome.changedQuestionResults, removedQuestionResultPlayerIds: outcome.removedQuestionResultPlayerIds })],
       presenterDeltas: [delta],
       playerDeltas: this.playerJudgementDeltas(outcome.changedAnswers, outcome),
+      playerBackfillDeltas: this.playerAnswerBackfills(outcome.newlyCorrectPlayerIds, outcome.allAnswers),
     };
   }
 
@@ -1053,6 +1057,7 @@ export class RoomAuthorityVNext {
       changedScores: aggregate.scores.filter((score) => previousScores.get(score.playerId) !== `${score.score}:${score.correctCount}`),
       changedQuestionResults: currentResults.filter((result) => previousResults.get(result.playerId) !== JSON.stringify(result)),
       removedQuestionResultPlayerIds: [...previousResults.keys()].filter((playerId) => !currentResultPlayers.has(playerId)),
+      newlyCorrectPlayerIds: [...currentResultPlayers].filter((playerId) => !previousResults.has(playerId)),
       sessionChanged,
     };
   }
@@ -2518,6 +2523,23 @@ export class RoomAuthorityVNext {
         removedQuestionResultPlayerIds: outcome.removedQuestionResultPlayerIds.filter((playerId) => playerId === answer.playerId),
       },
     }));
+  }
+
+  private playerAnswerBackfills(playerIds: string[], answers: BuzzerAnswer[]) {
+    if (!playerIds.length || !answers.length) return [];
+    const session = this.requireActive().gameSession!;
+    if (session.gameMode === "TEAM_BATTLE") return [];
+    const deltas: RealtimeDelta[] = [];
+    for (let index = 0; index < answers.length; index += ANSWER_TEXT_BACKFILL_CHUNK_SIZE) {
+      deltas.push({
+        scope: "game",
+        type: "answer_text_backfill",
+        gameSessionId: session.id,
+        questionIndex: session.currentQuestionIndex,
+        buzzerAnswers: clone(answers.slice(index, index + ANSWER_TEXT_BACKFILL_CHUNK_SIZE)),
+      });
+    }
+    return playerIds.map((playerId) => ({ playerId, deltas: clone(deltas) }));
   }
 
   private committedDuplicateOutcome(envelope: VNextMutationEnvelope): VNextMutationOutcome {

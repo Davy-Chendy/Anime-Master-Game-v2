@@ -416,6 +416,13 @@ export type RealtimeDelta =
     }
   | {
       scope: "game";
+      type: "answer_text_backfill";
+      gameSessionId: string;
+      questionIndex: number;
+      buzzerAnswers: BuzzerAnswer[];
+    }
+  | {
+      scope: "game";
       type: "answer_progress_changed";
       gameSession?: GameSession;
       answers: PublicAnswerProgress[];

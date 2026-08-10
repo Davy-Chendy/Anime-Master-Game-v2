@@ -4146,11 +4146,33 @@ export class RoomDurableObjectV3 {
     const aggregate = this.authorityVNext.getAggregate();
     const presenterId = aggregate?.gameSession?.presenterPlayerId;
     if (presenterId && outcome.presenterDeltas.length) this.sendVNextDeltas(name, outcome.presenterDeltas, new Set([presenterId]));
-    if (outcome.spectatorDeltas?.length) {
-      const spectatorIds = new Set(aggregate?.players.filter((player) => player.role === "SPECTATOR").map((player) => player.id) ?? []);
-      if (spectatorIds.size) this.sendVNextDeltas(name, outcome.spectatorDeltas, spectatorIds);
+    if (outcome.answerViewerDeltas?.length) {
+      const answerViewerIds = new Set(aggregate?.players.filter((player) => player.role === "SPECTATOR").map((player) => player.id) ?? []);
+      const session = aggregate?.gameSession;
+      if (session && session.gameMode !== "TEAM_BATTLE") {
+        const correctPlayerIds = new Set(
+          aggregate?.questionResults
+            .filter((result) => result.questionIndex === session.currentQuestionIndex)
+            .map((result) => result.playerId) ?? [],
+        );
+        for (const player of aggregate?.players ?? []) {
+          if (player.role === "PLAYER" && player.id !== presenterId && correctPlayerIds.has(player.id)) answerViewerIds.add(player.id);
+        }
+      }
+      if (answerViewerIds.size) this.sendVNextDeltas(name, outcome.answerViewerDeltas, answerViewerIds);
     }
-    for (const delivery of outcome.playerDeltas) this.sendVNextDelta(name, delivery.delta, new Set([delivery.playerId]));
+    const privateDeltasByPlayer = new Map<string, RealtimeDelta[]>();
+    for (const delivery of outcome.playerDeltas) {
+      const deltas = privateDeltasByPlayer.get(delivery.playerId) ?? [];
+      deltas.push(delivery.delta);
+      privateDeltasByPlayer.set(delivery.playerId, deltas);
+    }
+    for (const delivery of outcome.playerBackfillDeltas ?? []) {
+      const deltas = privateDeltasByPlayer.get(delivery.playerId) ?? [];
+      deltas.push(...delivery.deltas);
+      privateDeltasByPlayer.set(delivery.playerId, deltas);
+    }
+    for (const [playerId, deltas] of privateDeltasByPlayer) this.sendVNextDeltas(name, deltas, new Set([playerId]));
   }
 
   private invalidateVNextSnapshotCaches(outcome: VNextMutationOutcome) {

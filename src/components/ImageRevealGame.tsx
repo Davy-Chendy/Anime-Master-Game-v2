@@ -444,18 +444,18 @@ type StandardScoreRowProps = {
   buzzerStatus?: BuzzerAnswer["status"];
   isBuzzerMode: boolean;
   isLeadingPendingBuzzerAnswer: boolean;
-  showSpectatorAnswer: boolean;
-  spectatorAnswerText: string;
-  spectatorAnswerStatus: SpectatorAnswerStatus;
-  spectatorAnswerLabel: string;
+  showPlayerAnswer: boolean;
+  playerAnswerText: string;
+  playerAnswerStatus: ScoreboardAnswerStatus;
+  playerAnswerLabel: string;
   onRowRef: (playerId: string, element: HTMLDivElement | null) => void;
 };
 
-type SpectatorAnswerStatus = "correct" | "wrong" | "pending" | "forfeit" | "unanswered";
+type ScoreboardAnswerStatus = "correct" | "wrong" | "pending" | "forfeit" | "unanswered";
 
-type SpectatorAnswerDisplay = {
+type ScoreboardAnswerDisplay = {
   text: string;
-  status: SpectatorAnswerStatus;
+  status: ScoreboardAnswerStatus;
   label: string;
 };
 
@@ -560,7 +560,7 @@ function getCompetitionRankByScore<T extends { score: number }>(rows: T[], index
   return previousRow && previousRow.score === rows[index].score ? getCompetitionRankByScore(rows, index - 1) : index + 1;
 }
 
-function getSpectatorAnswerDisplay(params: {
+function getScoreboardAnswerDisplay(params: {
   nickname: string;
   alreadyCorrect: boolean;
   currentAnswer?: Answer;
@@ -569,7 +569,7 @@ function getSpectatorAnswerDisplay(params: {
   hasForfeitedCurrentRound: boolean;
   isBuzzerMode: boolean;
   isLeadingPendingBuzzerAnswer: boolean;
-}): SpectatorAnswerDisplay {
+}): ScoreboardAnswerDisplay {
   const {
     nickname,
     alreadyCorrect,
@@ -607,7 +607,7 @@ function getSpectatorAnswerDisplay(params: {
   return { text: "", status: "unanswered", label: `${nickname}本轮尚未回答` };
 }
 
-function getSpectatorAnswerTone(status: SpectatorAnswerStatus) {
+function getScoreboardAnswerTone(status: ScoreboardAnswerStatus) {
   if (status === "correct") {
     return "bg-emerald-50 text-emerald-700";
   }
@@ -625,6 +625,38 @@ function getSpectatorAnswerTone(status: SpectatorAnswerStatus) {
   }
 
   return "bg-transparent text-slate-400";
+}
+
+function PlayerAnswerViewSwitch({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) {
+  return (
+    <button
+      aria-checked={enabled}
+      aria-label="其他玩家回答"
+      className="flex w-full items-center justify-between gap-3 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2"
+      role="switch"
+      type="button"
+      onClick={onToggle}
+    >
+      <span className="min-w-0">
+        <span className="block font-semibold text-slate-950">其他玩家回答</span>
+        <span className="mt-0.5 block text-xs font-medium text-[var(--muted)]">在积分榜中实时显示</span>
+      </span>
+      <span
+        aria-hidden="true"
+        className={[
+          "relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200",
+          enabled ? "bg-slate-900" : "bg-slate-200",
+        ].join(" ")}
+      >
+        <span
+          className={[
+            "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-out",
+            enabled ? "translate-x-5" : "translate-x-0",
+          ].join(" ")}
+        />
+      </span>
+    </button>
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -693,10 +725,10 @@ const StandardScoreRow = memo(function StandardScoreRow({
   buzzerStatus,
   isBuzzerMode,
   isLeadingPendingBuzzerAnswer,
-  showSpectatorAnswer,
-  spectatorAnswerText,
-  spectatorAnswerStatus,
-  spectatorAnswerLabel,
+  showPlayerAnswer,
+  playerAnswerText,
+  playerAnswerStatus,
+  playerAnswerLabel,
   onRowRef,
 }: StandardScoreRowProps) {
   const hasWrongCurrentRound = buzzerStatus === "wrong";
@@ -714,18 +746,18 @@ const StandardScoreRow = memo(function StandardScoreRow({
         </div>
         <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
       </div>
-      {showSpectatorAnswer ? (
+      {showPlayerAnswer ? (
         <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
           <span className="shrink-0">答对 {correctCount} 题</span>
           <span className="flex min-w-0 flex-1 items-center">
-            {spectatorAnswerStatus !== "unanswered" ? (
+            {playerAnswerStatus !== "unanswered" ? (
               <span
-                aria-label={spectatorAnswerLabel}
-                className={`inline-flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getSpectatorAnswerTone(spectatorAnswerStatus)}`}
-                title={spectatorAnswerLabel}
+                aria-label={playerAnswerLabel}
+                className={`inline-flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-semibold ${getScoreboardAnswerTone(playerAnswerStatus)}`}
+                title={playerAnswerLabel}
               >
-                <span className="min-w-0 truncate">{spectatorAnswerText}</span>
-                {spectatorAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
+                <span className="min-w-0 truncate">{playerAnswerText}</span>
+                {playerAnswerStatus === "pending" ? <IconHourglass className="h-3.5 w-3.5 shrink-0" /> : null}
               </span>
             ) : null}
           </span>
@@ -1302,7 +1334,7 @@ export function ImageRevealGame({
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isSpectatorLabelOpen, setIsSpectatorLabelOpen] = useState(false);
-  const [isSpectatorAnswerViewEnabled, setIsSpectatorAnswerViewEnabled] = useState(false);
+  const [isAnswerViewEnabled, setIsAnswerViewEnabled] = useState(false);
   const [isScoreboardCompact, setIsScoreboardCompact] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [isRoundPromptSoundEnabled, setIsRoundPromptSoundEnabled] = useState(getInitialRoundPromptSoundEnabled);
@@ -1477,12 +1509,13 @@ export function ImageRevealGame({
       }
       setScores(snapshot.scores);
       setQuestionResults(snapshot.questionResults);
+      const canViewSnapshotAnswers = isPresenter || isSpectator || snapshot.questionResults.some((result) => result.playerId === playerId);
 
       if (targetGameSession.gameMode === "ROUND_REVEAL") {
         setAnswers(sortBySubmittedAt(snapshot.answers));
         setBuzzerAnswers(sortBySubmittedAt(snapshot.buzzerAnswers));
 
-        if (isPresenter || isSpectator) {
+        if (canViewSnapshotAnswers) {
           setLabelAnswers(sortBySubmittedAt(snapshot.labelAnswers.filter((answer) => !isForfeitAnswer(answer))));
         } else {
           setLabelAnswers([]);
@@ -1661,12 +1694,6 @@ export function ImageRevealGame({
   useEffect(() => {
     setCanRenderPortal(true);
   }, []);
-
-  useEffect(() => {
-    if (!isSpectator) {
-      setIsSpectatorAnswerViewEnabled(false);
-    }
-  }, [isSpectator]);
 
   useLayoutEffect(() => {
     const element = imageDisplayRef.current;
@@ -1945,6 +1972,20 @@ export function ImageRevealGame({
             setMyBuzzerAnswer(delta.buzzerAnswer);
           }
         }
+        return;
+      }
+
+      if (
+        delta.scope === "game" &&
+        delta.type === "answer_text_backfill" &&
+        currentGameSession?.id === delta.gameSessionId &&
+        currentGameSession.currentQuestionIndex === delta.questionIndex
+      ) {
+        setBuzzerAnswers((currentAnswers) =>
+          sortBySubmittedAt(delta.buzzerAnswers.reduce((nextAnswers, answer) => upsertById(nextAnswers, answer), currentAnswers)),
+        );
+        const updatedOwnAnswer = delta.buzzerAnswers.find((answer) => answer.playerId === playerId);
+        if (updatedOwnAnswer) setMyBuzzerAnswer(updatedOwnAnswer);
         return;
       }
 
@@ -4132,8 +4173,10 @@ export function ImageRevealGame({
   const sidePanelHeightStyle = {
     "--image-display-height": imageDisplayHeight ? `${imageDisplayHeight}px` : "78vh",
   } as CSSProperties;
-  const showSpectatorAnswersInScoreboard =
-    isSpectator && isSpectatorAnswerViewEnabled && !isScoreboardCompact && !isTeamBattleMode;
+  const canViewPlayerAnswers =
+    !isTeamBattleMode && (isSpectator || (!isPresenter && isCurrentPlayerCorrect));
+  const showPlayerAnswersInScoreboard =
+    canViewPlayerAnswers && isAnswerViewEnabled && !isScoreboardCompact;
 
   const scorePanel = (
     <div
@@ -4250,8 +4293,8 @@ export function ImageRevealGame({
               const buzzerAnswer = buzzerAnswerByPlayerId.get(player.id);
               const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
               const isLeadingPendingBuzzerAnswer = pendingBuzzerAnswers[0]?.id === buzzerAnswer?.id;
-              const spectatorAnswer = showSpectatorAnswersInScoreboard
-                ? getSpectatorAnswerDisplay({
+              const playerAnswer = showPlayerAnswersInScoreboard
+                ? getScoreboardAnswerDisplay({
                     nickname: player.nickname,
                     alreadyCorrect,
                     currentAnswer: currentRoundAnswerByPlayerId.get(player.id),
@@ -4280,10 +4323,10 @@ export function ImageRevealGame({
                   playerId={player.id}
                   rank={rank}
                   score={score}
-                  showSpectatorAnswer={showSpectatorAnswersInScoreboard}
-                  spectatorAnswerLabel={spectatorAnswer?.label ?? ""}
-                  spectatorAnswerStatus={spectatorAnswer?.status ?? "unanswered"}
-                  spectatorAnswerText={spectatorAnswer?.text ?? ""}
+                  showPlayerAnswer={showPlayerAnswersInScoreboard}
+                  playerAnswerLabel={playerAnswer?.label ?? ""}
+                  playerAnswerStatus={playerAnswer?.status ?? "unanswered"}
+                  playerAnswerText={playerAnswer?.text ?? ""}
                 />
               );
             })}
@@ -4504,33 +4547,10 @@ export function ImageRevealGame({
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
               {!isTeamBattleMode ? (
                 <>
-                  <button
-                    aria-checked={isSpectatorAnswerViewEnabled}
-                    aria-label="在详细积分榜显示玩家答案"
-                    className="flex w-full items-center justify-between gap-3 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2"
-                    role="switch"
-                    type="button"
-                    onClick={() => setIsSpectatorAnswerViewEnabled((isEnabled) => !isEnabled)}
-                  >
-                    <span className="min-w-0">
-                      <span className="block font-semibold text-slate-950">玩家回答</span>
-                      <span className="mt-0.5 block text-xs font-medium text-[var(--muted)]">在详细积分榜显示答案</span>
-                    </span>
-                    <span
-                      aria-hidden="true"
-                      className={[
-                        "relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200",
-                        isSpectatorAnswerViewEnabled ? "bg-slate-900" : "bg-slate-200",
-                      ].join(" ")}
-                    >
-                      <span
-                        className={[
-                          "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-out",
-                          isSpectatorAnswerViewEnabled ? "translate-x-5" : "translate-x-0",
-                        ].join(" ")}
-                      />
-                    </span>
-                  </button>
+                  <PlayerAnswerViewSwitch
+                    enabled={isAnswerViewEnabled}
+                    onToggle={() => setIsAnswerViewEnabled((isEnabled) => !isEnabled)}
+                  />
                   <div className="my-3 h-px bg-[var(--line)]" />
                 </>
               ) : null}
@@ -4569,6 +4589,14 @@ export function ImageRevealGame({
             <p className="font-semibold text-slate-950">正确答案</p>
             <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "未填写"}</p>
           </div>
+          {!isPresenter && isCurrentPlayerCorrect ? (
+            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <PlayerAnswerViewSwitch
+                enabled={isAnswerViewEnabled}
+                onToggle={() => setIsAnswerViewEnabled((isEnabled) => !isEnabled)}
+              />
+            </div>
+          ) : null}
           {canAddQuestionLabel ? (
             <Button className="mt-3 w-full" type="button" variant="secondary" onClick={() => setIsLabelModalOpen(true)}>
               向玩家展示答案
@@ -5017,9 +5045,17 @@ export function ImageRevealGame({
             <section className="border-t border-[var(--line)] pt-4">
               <p className="mb-3 text-sm font-semibold text-slate-950">操作</p>
               {isCurrentPlayerCorrect ? (
-                <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
-                  你已答对本题
-                </p>
+                <div className="space-y-3">
+                  <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                    你已答对本题
+                  </p>
+                  <div className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+                    <PlayerAnswerViewSwitch
+                      enabled={isAnswerViewEnabled}
+                      onToggle={() => setIsAnswerViewEnabled((isEnabled) => !isEnabled)}
+                    />
+                  </div>
+                </div>
               ) : !hasRoundStarted ? (
                 <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人打开图片</p>
               ) : (

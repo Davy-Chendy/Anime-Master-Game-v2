@@ -261,11 +261,23 @@ class FullGameSimulator {
     const presenterId = this.session.presenterPlayerId;
     const presenter = this.clients.get(presenterId);
     if (presenter) presenter.privateEvents.push(...structuredClone(outcome.presenterDeltas));
-    for (const spectator of this.aggregate.players.filter((player) => player.role === "SPECTATOR")) {
-      const client = this.clients.get(spectator.id);
-      if (client && outcome.spectatorDeltas) client.privateEvents.push(...structuredClone(outcome.spectatorDeltas));
+    const answerViewerIds = new Set(this.aggregate.players.filter((player) => player.role === "SPECTATOR").map((player) => player.id));
+    if (this.session.gameMode !== "TEAM_BATTLE") {
+      const correctPlayerIds = new Set(
+        this.aggregate.questionResults
+          .filter((result) => result.questionIndex === this.session.currentQuestionIndex)
+          .map((result) => result.playerId),
+      );
+      for (const player of this.aggregate.players) {
+        if (player.role === "PLAYER" && player.id !== presenterId && correctPlayerIds.has(player.id)) answerViewerIds.add(player.id);
+      }
+    }
+    for (const viewerId of answerViewerIds) {
+      const client = this.clients.get(viewerId);
+      if (client && outcome.answerViewerDeltas) client.privateEvents.push(...structuredClone(outcome.answerViewerDeltas));
     }
     for (const delivery of outcome.playerDeltas) this.clients.get(delivery.playerId)?.privateEvents.push(structuredClone(delivery.delta));
+    for (const delivery of outcome.playerBackfillDeltas ?? []) this.clients.get(delivery.playerId)?.privateEvents.push(...structuredClone(delivery.deltas));
   }
 
   async act(actorId: string, name: string, payload: Record<string, unknown> = {}) {
@@ -405,6 +417,15 @@ class FullGameSimulator {
     }
   }
 
+  privatePayload(playerId: string) {
+    return JSON.stringify(this.clients.get(playerId)?.privateEvents ?? []);
+  }
+
+  clearPrivateEvents(playerId: string) {
+    const client = this.clients.get(playerId);
+    if (client) client.privateEvents.length = 0;
+  }
+
   leaderboard() {
     return this.authority.query("getLeaderboardForGameSession", []) as Array<{ playerId: string; score: number; correctCount: number }>;
   }
@@ -461,6 +482,48 @@ async function labelAndAdvance(sim: FullGameSimulator, label: string) {
   assert.equal(labeled.error, undefined);
   return await sim.act("host", "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: sim.session.currentQuestionIndex });
 }
+
+test("correct personal-mode players receive existing and future answer text until rejudged", async () => {
+  const sim = new FullGameSimulator({ mode: "ROUND_REVEAL", playerCount: 3, spectatorCount: 0, questionCount: 1 });
+  try {
+    await openRound(sim, 0);
+    const before = await sim.act("p1", "submitAnswer", { playerId: "p1", answerText: "before-correct" });
+    assert.equal(before.error, undefined);
+    const own = await sim.act("p0", "submitAnswer", { playerId: "p0", answerText: "own-answer" });
+    const ownAnswerId = (own.data as { buzzerAnswer: { id: string } }).buzzerAnswer.id;
+    assert.equal(sim.privatePayload("p0").includes("before-correct"), false);
+
+    sim.advanceTime(3_001);
+    await sim.act("host", "setAnswerJudgements", {
+      presenterPlayerId: "host",
+      judgements: [{ buzzerAnswerId: ownAnswerId, isCorrect: true }],
+    });
+    assert.equal(sim.privatePayload("p0").includes("before-correct"), true, "newly correct player did not receive prior answers");
+    assert.equal(sim.privatePayload("p1").includes("own-answer"), false, "uncorrect player received another answer");
+
+    sim.clearPrivateEvents("p0");
+    await sim.act("p2", "submitAnswer", { playerId: "p2", answerText: "after-correct" });
+    assert.equal(sim.privatePayload("p0").includes("after-correct"), true, "correct player did not receive a later answer");
+    assert.equal(sim.privatePayload("p1").includes("after-correct"), false, "uncorrect player received a later answer");
+
+    await sim.act("host", "setAnswerJudgements", {
+      presenterPlayerId: "host",
+      judgements: [{ buzzerAnswerId: ownAnswerId, isCorrect: false }],
+    });
+    sim.clearPrivateEvents("p0");
+    await sim.act("p1", "submitAnswer", { playerId: "p1", answerText: "after-revoke" });
+    assert.equal(sim.privatePayload("p0").includes("after-revoke"), false, "rejudged player kept receiving answer text");
+
+    await sim.act("host", "setAnswerJudgements", {
+      presenterPlayerId: "host",
+      judgements: [{ buzzerAnswerId: ownAnswerId, isCorrect: true }],
+    });
+    assert.equal(sim.privatePayload("p0").includes("after-revoke"), true, "re-corrected player did not receive a fresh backfill");
+    sim.assertPublicPayloadDoesNotContain("before-correct", "own-answer", "after-correct", "after-revoke");
+  } finally {
+    sim.dispose();
+  }
+});
 
 test("ROUND_REVEAL completes three questions with late join, spectator exclusion, and converged public state", async () => {
   const sim = new FullGameSimulator({ mode: "ROUND_REVEAL", playerCount: 10, spectatorCount: 2, questionCount: 3 });
