@@ -1781,6 +1781,7 @@ export async function createRoom(playerId: string, nickname: string, options: Cr
         room_visibility: visibility,
         room_name: roomName,
         member_count: 1,
+        spectator_count: 0,
         public_activity_at: visibility === "PUBLIC" ? createdAt : null,
         created_at: createdAt,
         updated_at: createdAt,
@@ -1865,6 +1866,7 @@ async function updateRoomAggregate(
     .update({
       ...roomUpdates,
       member_count: players.length,
+      spectator_count: players.filter((player) => player.role === "SPECTATOR").length,
       room_state_json: roomStateJson,
       room_state_revision: currentRevision + 1,
     })

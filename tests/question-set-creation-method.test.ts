@@ -77,7 +77,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0021") {
+function applyMigrations(db: DatabaseSync, through = "0022") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -394,6 +394,44 @@ test("public activity migration upgrades existing public rooms transactionally w
     ],
   );
   assert.equal(db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND sql LIKE '%public_activity_at%'").get().count, 0);
+});
+
+test("spectator count migration backfills public room manifests transactionally without an index", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0021");
+  const publicState = JSON.stringify({
+    schema: 1,
+    players: [
+      { id: "host", nickname: "Host", role: "PLAYER", joined_at: "2026-08-10T01:00:00.000Z" },
+      { id: "viewer-1", nickname: "Viewer 1", role: "SPECTATOR", joined_at: "2026-08-10T01:01:00.000Z" },
+      { id: "viewer-2", nickname: "Viewer 2", role: "SPECTATOR", joined_at: "2026-08-10T01:02:00.000Z" },
+    ],
+  });
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,room_visibility,room_state_version,room_state_json) VALUES(?,?,?,?,?,?)")
+    .run("public-spectators", "PUB022", "host", "PUBLIC", 1, publicState);
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,room_visibility,room_state_version,room_state_json) VALUES(?,?,?,?,?,?)")
+    .run("private-spectators", "PRI022", "host", "PRIVATE", 1, publicState);
+  const migration = readFileSync(join(migrationsDirectory, "0022_public_room_spectator_count.sql"), "utf8");
+
+  db.exec("BEGIN");
+  try {
+    db.exec(migration);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='spectator_count'").get().count, 0);
+
+  db.exec(migration);
+  assert.deepEqual(
+    db.prepare("SELECT id,spectator_count FROM rooms ORDER BY id").all().map((row) => ({ ...row })),
+    [
+      { id: "private-spectators", spectator_count: 0 },
+      { id: "public-spectators", spectator_count: 2 },
+    ],
+  );
+  assert.throws(() => db.prepare("UPDATE rooms SET spectator_count=51 WHERE id='public-spectators'").run(), /CHECK constraint failed/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND sql LIKE '%spectator_count%' ").get().count, 0);
 });
 
 test("public room creation uses an optional trimmed name and piggybacks member counts", async () => {

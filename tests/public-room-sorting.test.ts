@@ -13,7 +13,7 @@ function room(
   updatedAt: string,
   name = id,
 ): PublicRoomSummary {
-  return { id, code: id, name, status, memberCount, gameMode, questionSource, updatedAt, capacity: 50, isMemberCountApproximate: false, createdAt: updatedAt };
+  return { id, code: id, name, status, memberCount, spectatorCount: 0, gameMode, questionSource, updatedAt, capacity: 50, isMemberCountApproximate: false, createdAt: updatedAt };
 }
 
 const rooms = [

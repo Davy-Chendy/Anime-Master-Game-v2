@@ -181,7 +181,7 @@ export default function PublicRoomsPage() {
               <SortableHeader activeColumn={sortKey} className="w-[20%]" column="name" direction={sortDirection} label="房间名" onSort={changeSort} />
               <SortableHeader activeColumn={sortKey} className="w-[14%]" column="status" direction={sortDirection} label="状态" onSort={changeSort} />
               <SortableHeader activeColumn={sortKey} className="w-[20%]" column="mode" direction={sortDirection} label="游戏模式" onSort={changeSort} />
-              <SortableHeader activeColumn={sortKey} className="w-[9%]" column="people" direction={sortDirection} label="人数" onSort={changeSort} />
+              <SortableHeader activeColumn={sortKey} className="w-[9%] text-center" column="people" direction={sortDirection} label="人数" onSort={changeSort} />
               <SortableHeader activeColumn={sortKey} className="w-[16%]" column="source" direction={sortDirection} label="题目来源" onSort={changeSort} />
               <SortableHeader activeColumn={sortKey} className="w-[13%]" column="activity" direction={sortDirection} label="最近活跃" onSort={changeSort} />
               <th className="w-[8%] px-4 py-3 text-right text-sm font-semibold text-slate-600" scope="col">操作</th>
@@ -218,7 +218,10 @@ export default function PublicRoomsPage() {
                     </div>
                   </td>
                   <td className="whitespace-nowrap px-4 py-4 text-sm font-semibold text-slate-800">{GAME_MODE_LABELS[room.gameMode]}</td>
-                  <td className="whitespace-nowrap px-4 py-4 text-sm font-semibold text-slate-800">{room.isMemberCountApproximate ? "约 " : ""}{room.memberCount}/{room.capacity}</td>
+                  <td className="whitespace-nowrap px-4 py-4 text-center text-sm font-semibold text-slate-800">
+                    {room.isMemberCountApproximate ? "约 " : ""}{room.memberCount}/{room.capacity}
+                    {room.spectatorCount > 0 ? <span className="mt-0.5 block text-xs font-medium text-slate-500">（观战：{room.spectatorCount}）</span> : null}
+                  </td>
                   <td className="whitespace-nowrap px-4 py-4 text-sm font-semibold text-slate-800">{room.questionSource ? SOURCE_LABELS[room.questionSource] : "暂未准备"}</td>
                   <td className="whitespace-nowrap px-4 py-4 text-sm text-slate-700">{formatRelativeActivity(room.updatedAt)}</td>
                   <td className="px-4 py-4 text-right">

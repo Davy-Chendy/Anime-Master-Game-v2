@@ -99,6 +99,7 @@ export type DbRoom = {
   room_visibility?: RoomVisibility | null;
   room_name?: string | null;
   member_count?: number | null;
+  spectator_count?: number | null;
   prepared_question_source?: RoomQuestionSource | null;
   public_activity_at?: string | null;
   lobby_game_mode?: GameMode | null;
@@ -125,6 +126,7 @@ export type PublicRoomSummary = {
   status: RoomStatus;
   gameMode: GameMode;
   memberCount: number;
+  spectatorCount: number;
   capacity: number;
   isMemberCountApproximate: boolean;
   questionSource: RoomQuestionSource | null;

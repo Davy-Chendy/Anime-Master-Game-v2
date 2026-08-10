@@ -1244,7 +1244,9 @@ function GameResultPanel({
   currentGameId,
   playerId,
   isHost,
+  isDissolving,
   isReturningToLobby,
+  onDissolveRoom,
   onReturnToLobby,
   onError,
 }: {
@@ -1252,7 +1254,9 @@ function GameResultPanel({
   currentGameId?: string | null;
   playerId: string;
   isHost: boolean;
+  isDissolving: boolean;
   isReturningToLobby: boolean;
+  onDissolveRoom: () => void;
   onReturnToLobby: () => void;
   onError: (message: string) => void;
 }) {
@@ -1602,8 +1606,8 @@ function GameResultPanel({
         <Panel title="操作">
           <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
             <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
-            <p className="mt-1 text-sm text-[var(--muted)]">
-              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局" : "房主返回大厅后即可开始下一局"}
+            <p className={`mt-1 text-sm ${isHost ? "font-medium text-slate-950" : "text-[var(--muted)]"}`}>
+              {isHost ? "看完排行榜后，建议解散当前房间并重开，避免离线玩家残留。" : "房主返回大厅后即可开始下一局"}
             </p>
           </div>
           <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1616,9 +1620,14 @@ function GameResultPanel({
               浏览题库
             </Button>
             {isHost ? (
-              <Button className="sm:ml-auto" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-                {isReturningToLobby ? "返回中…" : "回到房间大厅"}
-              </Button>
+              <div className="flex flex-col gap-3 sm:ml-auto sm:flex-row">
+                <Button type="button" onClick={onDissolveRoom} disabled={isDissolving || isReturningToLobby}>
+                  {isDissolving ? "解散中…" : "解散房间"}
+                </Button>
+                <Button type="button" onClick={onReturnToLobby} disabled={isDissolving || isReturningToLobby}>
+                  {isReturningToLobby ? "返回中…" : "返回大厅"}
+                </Button>
+              </div>
             ) : (
               <p className="text-sm font-medium text-[var(--muted)] sm:ml-auto">等待房主操作</p>
             )}
@@ -2894,7 +2903,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           currentGameId={room.currentGameId}
           playerId={playerId}
           isHost={isHost}
+          isDissolving={isDissolving}
           isReturningToLobby={isReturningToLobby}
+          onDissolveRoom={handleDissolveRoom}
           onReturnToLobby={handleReturnToLobby}
           onError={setError}
         />

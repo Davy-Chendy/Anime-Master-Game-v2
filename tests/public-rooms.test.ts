@@ -11,6 +11,7 @@ type Row = {
   game_status: Status;
   lobby_game_mode: "ROUND_REVEAL";
   member_count: number;
+  spectator_count: number;
   prepared_question_source: "MANUAL" | null;
   created_at: string;
   activity_at: string;
@@ -32,6 +33,7 @@ function room(
   updatedAt: string,
   memberCount = 1,
   questionSource: Row["prepared_question_source"] = status === "LOBBY" ? null : "MANUAL",
+  spectatorCount = 0,
 ): Row {
   return {
     id,
@@ -40,6 +42,7 @@ function room(
     game_status: status,
     lobby_game_mode: "ROUND_REVEAL",
     member_count: memberCount,
+    spectator_count: spectatorCount,
     prepared_question_source: questionSource,
     created_at: updatedAt,
     activity_at: updatedAt,
@@ -88,7 +91,7 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
 test("public room directory filters every status by authoritative two-hour activity", async () => {
   const rows = [
     room("playing", "PLAYING", "2026-08-09T07:00:00Z", 3),
-    room("setup-ready", "QUESTION_SETUP", "2026-08-09T09:45:00Z", 2),
+    room("setup-ready", "QUESTION_SETUP", "2026-08-09T09:45:00Z", 2, "MANUAL", 1),
     room("setup-preparing", "QUESTION_SETUP", "2026-08-09T09:44:00Z", 2, null),
     room("lobby-fresh", "LOBBY", "2026-08-09T09:40:00Z"),
     room("lobby-boundary", "LOBBY", "2026-08-09T08:00:00Z"),
@@ -100,6 +103,7 @@ test("public room directory filters every status by authoritative two-hour activ
     "room:playing": Response.json({
       status: "PLAYING",
       memberCount: 12,
+      spectatorCount: 3,
       updatedAt: "2026-08-09T09:50:00Z",
       currentQuestionIndex: 6,
       questionCount: 30,
@@ -107,6 +111,7 @@ test("public room directory filters every status by authoritative two-hour activ
     "room:result": Response.json({
       status: "GAME_RESULT",
       memberCount: 6,
+      spectatorCount: 2,
       updatedAt: "2026-08-09T09:55:00Z",
       currentQuestionIndex: 29,
       questionCount: 30,
@@ -118,10 +123,12 @@ test("public room directory filters every status by authoritative two-hour activ
   assert.equal(page.nextCursor, null);
   assert.deepEqual(fetchedTopics.sort(), ["room:playing", "room:result"]);
   assert.equal(page.rooms[0].memberCount, 12);
+  assert.equal(page.rooms[0].spectatorCount, 3);
   assert.equal(page.rooms[0].isMemberCountApproximate, false);
   assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:50:00Z");
   assert.equal(page.rooms[0].currentQuestionIndex, 6);
   assert.equal(page.rooms[0].questionCount, 30);
+  assert.equal(page.rooms.find((room) => room.id === "setup-ready")?.spectatorCount, 1);
   assert.equal(page.rooms[5].updatedAt, "2026-08-09T09:55:00Z");
   assert.equal(boundQueries[0][1], "2026-08-09T08:00:00.000Z");
   assert.equal(boundQueries[0].at(-1), 21);
@@ -149,9 +156,11 @@ test("public room directory falls back safely when presence is unavailable or in
   assert.deepEqual(page.rooms.map(({ id }) => id), ["playing-error-fresh", "playing-invalid-fresh"]);
   assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:45:00Z");
   assert.equal(page.rooms[0].memberCount, 3);
+  assert.equal(page.rooms[0].spectatorCount, 0);
   assert.equal(page.rooms[0].isMemberCountApproximate, true);
   assert.equal(page.rooms[1].updatedAt, "2026-08-09T09:40:00Z");
   assert.equal(page.rooms[1].memberCount, 8);
+  assert.equal(page.rooms[1].spectatorCount, 0);
   assert.equal(page.rooms[1].isMemberCountApproximate, false);
   assert.equal(page.rooms[1].currentQuestionIndex, null);
   assert.equal(page.rooms[1].questionCount, null);

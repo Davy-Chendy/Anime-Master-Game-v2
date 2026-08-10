@@ -2434,6 +2434,7 @@ type PublicRoomRow = {
   game_status: RoomStatus;
   lobby_game_mode: GameMode | null;
   member_count: number | null;
+  spectator_count: number | null;
   prepared_question_source: RoomQuestionSource | null;
   created_at: string;
   activity_at: string;
@@ -2534,7 +2535,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
   bindings.push(PUBLIC_ROOM_QUERY_LIMIT);
   const result = await env.DB.prepare(`WITH ranked_rooms AS (
       SELECT
-        id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,
+        id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,prepared_question_source,created_at,
         COALESCE(public_activity_at,updated_at) AS activity_at,
         CASE
           WHEN game_status='PLAYING' THEN 0
@@ -2547,7 +2548,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       WHERE room_visibility='PUBLIC' AND runtime_generation=?
         AND (game_status IN ('PLAYING','GAME_RESULT') OR COALESCE(public_activity_at,updated_at)>=?)
     )
-    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,activity_at,status_rank
+    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,prepared_question_source,created_at,activity_at,status_rank
     FROM ranked_rooms
     ${cursorClause}
     ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC
@@ -2564,6 +2565,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       status: room.game_status,
       gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
       memberCount: Math.max(0, Math.min(50, Number(room.member_count) || 0)),
+      spectatorCount: Math.max(0, Math.min(50, Number(room.spectator_count) || 0)),
       capacity: 50,
       isMemberCountApproximate: room.game_status === "PLAYING" || room.game_status === "GAME_RESULT",
       questionSource: room.prepared_question_source ?? null,
@@ -2587,6 +2589,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       const presence = await response.json<{
         status?: RoomStatus;
         memberCount?: number;
+        spectatorCount?: number;
         updatedAt?: string;
         currentQuestionIndex?: number;
         questionCount?: number;
@@ -2604,6 +2607,9 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
         ...room,
         status: presence.status ?? room.status,
         memberCount: Math.max(0, Math.min(room.capacity, Math.floor(presence.memberCount))),
+        spectatorCount: typeof presence.spectatorCount === "number"
+          ? Math.max(0, Math.min(room.capacity, Math.floor(presence.spectatorCount)))
+          : room.spectatorCount,
         isMemberCountApproximate: false,
         updatedAt: presenceUpdatedAt,
         currentQuestionIndex: hasValidProgress ? Number(presence.currentQuestionIndex) : null,
@@ -3230,6 +3236,7 @@ export class RoomDurableObjectV3 {
       return Response.json({
         status: aggregate.room.status,
         memberCount: aggregate.players.length,
+        spectatorCount: aggregate.players.filter((player) => player.role === "SPECTATOR").length,
         updatedAt: new Date(aggregate.lastPublicActivityAtMs).toISOString(),
         currentQuestionIndex: aggregate.gameSession?.currentQuestionIndex ?? null,
         questionCount: aggregate.questions.length,

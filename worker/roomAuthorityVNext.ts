@@ -1999,7 +1999,7 @@ export class RoomAuthorityVNext {
           if (game.projectionVersion === 3) {
             if (!game.room?.id) throw new Error("room state projection is missing room data");
             statements.push(this.d1.prepare(`UPDATE rooms SET
-              host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,
+              host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,spectator_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,
               room_state_version=?,room_state_revision=room_state_revision+1,room_state_json=?,public_activity_at=?,updated_at=?
               WHERE id=? AND runtime_generation=?`).bind(
               game.room.hostPlayerId,
@@ -2009,6 +2009,7 @@ export class RoomAuthorityVNext {
               game.room.preparedQuestionSetId ?? null,
               game.room.preparedQuestionSource ?? null,
               game.players.length,
+              game.players.filter((player) => player.role === "SPECTATOR").length,
               game.room.teamAssignmentMode ?? "AUTO",
               JSON.stringify(game.room.teamAssignments ?? {}),
               ROOM_STATE_MANIFEST_VERSION,
@@ -2024,7 +2025,7 @@ export class RoomAuthorityVNext {
               joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt,
               lastSeenAt: player.lastSeenAt ?? nowIso(),
             }));
-            if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,public_activity_at=?,updated_at=? WHERE id=?").bind(
+            if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,spectator_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,public_activity_at=?,updated_at=? WHERE id=?").bind(
               game.room.hostPlayerId,
               game.room.status,
               game.room.currentPresenterPlayerId ?? null,
@@ -2032,6 +2033,7 @@ export class RoomAuthorityVNext {
               game.room.preparedQuestionSetId ?? null,
               game.room.preparedQuestionSource ?? null,
               game.players.length,
+              game.players.filter((player) => player.role === "SPECTATOR").length,
               game.room.teamAssignmentMode ?? "AUTO",
               JSON.stringify(game.room.teamAssignments ?? {}),
               publicActivityAt,
