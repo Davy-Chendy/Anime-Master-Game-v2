@@ -5,6 +5,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import worker, {
+  cleanupExpiredRooms,
   cleanupUnreferencedR2Objects,
   expandCleanupQuestionSetImageRows,
   type Env,
@@ -97,7 +98,7 @@ function createCleanupTestEnv(options: CleanupTestEnvOptions = {}) {
       },
     },
     IMAGE_BUCKET: {
-      async delete(key: string) { deletedKeys.push(key); },
+      async delete(keys: string | string[]) { deletedKeys.push(...(Array.isArray(keys) ? keys : [keys])); },
       async list() { return { objects: [], truncated: false, delimitedPrefixes: [] }; },
     },
     R2_IMAGE_PREFIX: "question-images",
@@ -118,6 +119,51 @@ function createListedR2Object(key: string, uploaded: Date) {
     storageClass: "Standard",
     writeHttpMetadata() {},
   } as R2Object;
+}
+
+function insertLegacyOrphanQuestionSets(
+  sqlite: DatabaseSync,
+  totalImageCount: number,
+  publicBaseUrl: string,
+  updatedAt: string,
+) {
+  const insertQuestionSet = sqlite.prepare(`INSERT INTO question_sets(
+    id,title,created_by_player_id,is_public,image_count,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?)`);
+  const insertQuestion = sqlite.prepare(
+    "INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)",
+  );
+  const setIds: string[] = [];
+  const keyToQuestionSetId = new Map<string, string>();
+
+  for (let imageIndex = 0; imageIndex < totalImageCount;) {
+    const setIndex = setIds.length;
+    const questionSetId = `bulk-set-${setIndex.toString().padStart(4, "0")}`;
+    const imageCount = Math.min(30, totalImageCount - imageIndex);
+    setIds.push(questionSetId);
+    insertQuestionSet.run(
+      questionSetId,
+      `Bulk ${setIndex}`,
+      "host",
+      0,
+      imageCount,
+      updatedAt,
+      updatedAt,
+    );
+
+    for (let orderIndex = 0; orderIndex < imageCount; orderIndex += 1, imageIndex += 1) {
+      const key = `question-images/bulk-${imageIndex.toString().padStart(5, "0")}.webp`;
+      keyToQuestionSetId.set(key, questionSetId);
+      insertQuestion.run(
+        `bulk-question-${imageIndex.toString().padStart(5, "0")}`,
+        questionSetId,
+        `${publicBaseUrl}/${key}`,
+        orderIndex,
+      );
+    }
+  }
+
+  return { keyToQuestionSetId, setIds };
 }
 
 test("10 MB final-image policy accepts the boundary and rejects one extra byte", () => {
@@ -252,7 +298,77 @@ test("cleanup avoids D1 LIKE limits and preserves an image referenced by another
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='active-set'").get().count, 1);
 });
 
-test("R2 reconciliation paginates, protects current and recent images, and deletes at most 1000 old orphans", async () => {
+test("expired-room cleanup deletes more than 1000 associated images in bounded R2 batches", async () => {
+  const publicBaseUrl = "https://assets.example.com";
+  const { env, sqlite } = createCleanupTestEnv({ publicBaseUrl });
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const expiredAt = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+  const { setIds } = insertLegacyOrphanQuestionSets(sqlite, 2001, publicBaseUrl, expiredAt);
+  const deletedBatches: string[][] = [];
+  env.IMAGE_BUCKET = {
+    async list() { return { objects: [], truncated: false, delimitedPrefixes: [] }; },
+    async delete(keys: string | string[]) {
+      deletedBatches.push(Array.isArray(keys) ? keys : [keys]);
+    },
+  } as R2Bucket;
+
+  const summary = await cleanupExpiredRooms(env, now);
+
+  assert.deepEqual(deletedBatches.map((batch) => batch.length), [1000, 1000, 1]);
+  assert.equal(summary.deletedR2KeyCount, 2001);
+  assert.equal(summary.deleteBatchCount, 3);
+  assert.equal(summary.failedR2KeyCount, 0);
+  assert.equal(summary.deferredR2KeyCount, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets").get().count, 0);
+  assert.equal(setIds.length, 67);
+});
+
+test("expired-room cleanup preserves every question set touched by a failed R2 batch", async () => {
+  const publicBaseUrl = "https://assets.example.com";
+  const { env, sqlite } = createCleanupTestEnv({ publicBaseUrl });
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const expiredAt = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+  const seeded = insertLegacyOrphanQuestionSets(sqlite, 3000, publicBaseUrl, expiredAt);
+  const failedKeys = new Set<string>();
+  let deleteAttempt = 0;
+  env.IMAGE_BUCKET = {
+    async list() { return { objects: [], truncated: false, delimitedPrefixes: [] }; },
+    async delete(keys: string | string[]) {
+      deleteAttempt += 1;
+      const keyBatch = Array.isArray(keys) ? keys : [keys];
+      if (deleteAttempt === 2) {
+        for (const key of keyBatch) failedKeys.add(key);
+        throw new Error("temporary batch failure");
+      }
+    },
+  } as R2Bucket;
+
+  const errors: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  let summary: Awaited<ReturnType<typeof cleanupExpiredRooms>>;
+  try {
+    summary = await cleanupExpiredRooms(env, now);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  const affectedSetIds = new Set(
+    Array.from(failedKeys, (key) => seeded.keyToQuestionSetId.get(key)).filter((id): id is string => Boolean(id)),
+  );
+  const remainingSetIds = new Set(
+    (sqlite.prepare("SELECT id FROM question_sets").all() as Array<{ id: string }>).map((row) => row.id),
+  );
+  assert.equal(deleteAttempt, 3);
+  assert.equal(summary.deletedR2KeyCount, 2000);
+  assert.equal(summary.failedR2KeyCount, 1000);
+  assert.equal(summary.deferredR2KeyCount, 0);
+  assert.deepEqual(remainingSetIds, affectedSetIds);
+  assert.equal(errors.filter((entry) => entry.includes('"event":"expired_room_r2_delete_failed"')).length, 1);
+  assert.equal(errors[0]?.includes('"batchR2KeyCount":1000'), true);
+});
+
+test("R2 reconciliation paginates, protects referenced and recent images, and deletes all current old orphans", async () => {
   const publicBaseUrl = "https://assets.example.com";
   const { env, sqlite } = createCleanupTestEnv({ publicBaseUrl });
   const now = Date.UTC(2026, 7, 4, 0, 0, 0);
@@ -262,7 +378,7 @@ test("R2 reconciliation paginates, protects current and recent images, and delet
   const manifestKey = "question-images/referenced-manifest.webp";
   const recentKey = "question-images/recent-orphan.webp";
   const oldOrphanKeys = Array.from(
-    { length: 1001 },
+    { length: 2501 },
     (_, index) => `question-images/old-orphan-${index.toString().padStart(4, "0")}.webp`,
   );
   const manifestJson = encodeQuestionSetManifest([{
@@ -310,14 +426,90 @@ test("R2 reconciliation paginates, protects current and recent images, and delet
 
   const summary = await cleanupUnreferencedR2Objects(env, now);
 
-  assert.equal(listCalls, 3);
-  assert.equal(summary.deletedR2KeyCount, 1000);
-  assert.equal(deletedBatches.length, 1);
-  assert.equal(deletedBatches[0].length, 1000);
-  assert.equal(deletedBatches[0].includes(legacyKey), false);
-  assert.equal(deletedBatches[0].includes(manifestKey), false);
-  assert.equal(deletedBatches[0].includes(recentKey), false);
-  assert.equal(oldOrphanKeys.filter((key) => deletedBatches[0].includes(key)).length, 1000);
+  const deletedKeys = deletedBatches.flat();
+  assert.equal(listCalls, 7);
+  assert.equal(summary.deletedR2KeyCount, 2501);
+  assert.equal(summary.deleteBatchCount, 3);
+  assert.deepEqual(deletedBatches.map((batch) => batch.length), [1000, 1000, 501]);
+  assert.equal(deletedKeys.includes(legacyKey), false);
+  assert.equal(deletedKeys.includes(manifestKey), false);
+  assert.equal(deletedKeys.includes(recentKey), false);
+  assert.equal(oldOrphanKeys.filter((key) => deletedKeys.includes(key)).length, 2501);
+});
+
+test("R2 reconciliation caps one run at 10000 keys and keeps every delete call at 1000", async () => {
+  const { env } = createCleanupTestEnv();
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const oldUploaded = new Date(now - 4 * 24 * 60 * 60 * 1000);
+  const listedObjects = Array.from(
+    { length: 10001 },
+    (_, index) => createListedR2Object(
+      `question-images/capped-orphan-${index.toString().padStart(5, "0")}.webp`,
+      oldUploaded,
+    ),
+  );
+  const deletedBatches: string[][] = [];
+  let listCalls = 0;
+  env.IMAGE_BUCKET = {
+    async list(options = {}) {
+      listCalls += 1;
+      const start = options.cursor ? Number(options.cursor) : 0;
+      const end = Math.min(start + 1000, listedObjects.length);
+      return end < listedObjects.length
+        ? { objects: listedObjects.slice(start, end), truncated: true, cursor: String(end), delimitedPrefixes: [] }
+        : { objects: listedObjects.slice(start, end), truncated: false, delimitedPrefixes: [] };
+    },
+    async delete(keys: string | string[]) {
+      deletedBatches.push(Array.isArray(keys) ? keys : [keys]);
+    },
+  } as R2Bucket;
+
+  const summary = await cleanupUnreferencedR2Objects(env, now);
+
+  assert.equal(listCalls, 10);
+  assert.equal(summary.deletedR2KeyCount, 10000);
+  assert.equal(summary.deleteBatchCount, 10);
+  assert.equal(summary.listingStoppedAtDeleteLimit, true);
+  assert.equal(deletedBatches.length, 10);
+  assert.equal(deletedBatches.every((batch) => batch.length === 1000), true);
+  assert.equal(deletedBatches.flat().includes(listedObjects[10000].key), false);
+});
+
+test("scheduled cleanup runs R2 reconciliation after expired-room cleanup fails", async () => {
+  const { env } = createCleanupTestEnv();
+  const originalDb = env.DB;
+  let failNextPrepare = true;
+  env.DB = new Proxy(originalDb, {
+    get(target, property, receiver) {
+      if (property !== "prepare") return Reflect.get(target, property, receiver);
+      return (sql: string) => {
+        if (failNextPrepare) {
+          failNextPrepare = false;
+          throw new Error("temporary expired-room query failure");
+        }
+        return target.prepare(sql);
+      };
+    },
+  });
+  let listCalls = 0;
+  env.IMAGE_BUCKET = {
+    async list() {
+      listCalls += 1;
+      return { objects: [], truncated: false, delimitedPrefixes: [] };
+    },
+    async delete() {},
+  } as R2Bucket;
+  const errors: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  try {
+    await worker.scheduled({} as ScheduledController, env);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(listCalls, 1);
+  assert.equal(errors.filter((entry) => entry.includes('"event":"expired_room_cleanup_failed"')).length, 1);
 });
 
 test("scheduled cleanup isolates R2 reconciliation failures and retries on the next run", async () => {

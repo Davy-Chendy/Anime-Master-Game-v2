@@ -196,7 +196,8 @@ const ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN = 100;
 const ROOM_CLEANUP_SQL_CHUNK_SIZE = 50;
 const R2_ORPHAN_CLEANUP_MIN_AGE_MS = 72 * 60 * 60 * 1000;
 const R2_ORPHAN_CLEANUP_LIST_LIMIT = 1000;
-const R2_ORPHAN_CLEANUP_MAX_DELETE_PER_RUN = 1000;
+const R2_DELETE_MAX_KEYS_PER_CALL = 1000;
+const R2_CLEANUP_MAX_DELETE_PER_RUN = 10_000;
 const RPC_LOG_ID_MAX_LENGTH = 160;
 const RPC_LOG_NAME_MAX_LENGTH = 120;
 const RPC_LOG_ERROR_MAX_LENGTH = 4000;
@@ -2352,6 +2353,30 @@ function chunkArray<T>(items: T[], size: number) {
   return chunks;
 }
 
+async function deleteR2KeysInBatches(
+  bucket: R2Bucket,
+  keys: string[],
+  onBatchFailure?: (error: unknown, failedKeys: string[]) => void,
+) {
+  const failedR2Keys = new Set<string>();
+  let deletedR2KeyCount = 0;
+  let successfulBatchCount = 0;
+
+  for (const keyBatch of chunkArray(keys, R2_DELETE_MAX_KEYS_PER_CALL)) {
+    try {
+      await bucket.delete(keyBatch);
+      deletedR2KeyCount += keyBatch.length;
+      successfulBatchCount += 1;
+    } catch (error) {
+      if (!onBatchFailure) throw error;
+      for (const key of keyBatch) failedR2Keys.add(key);
+      onBatchFailure(error, keyBatch);
+    }
+  }
+
+  return { deletedR2KeyCount, failedR2Keys, successfulBatchCount };
+}
+
 function placeholders(count: number) {
   return Array.from({ length: count }, () => "?").join(", ");
 }
@@ -2846,6 +2871,7 @@ export async function cleanupUnreferencedR2Objects(env: Env, now = Date.now()) {
   const cutoffMs = now - R2_ORPHAN_CLEANUP_MIN_AGE_MS;
   const keysToDelete: string[] = [];
   let listedObjectCount = 0;
+  let listingStoppedAtDeleteLimit = false;
   let cursor: string | undefined;
 
   do {
@@ -2857,25 +2883,29 @@ export async function cleanupUnreferencedR2Objects(env: Env, now = Date.now()) {
     listedObjectCount += listed.objects.length;
 
     for (const object of listed.objects) {
-      if (keysToDelete.length >= R2_ORPHAN_CLEANUP_MAX_DELETE_PER_RUN) break;
+      if (keysToDelete.length >= R2_CLEANUP_MAX_DELETE_PER_RUN) break;
       if (object.uploaded.getTime() > cutoffMs || referencedKeys.has(object.key)) continue;
       keysToDelete.push(object.key);
     }
 
-    if (keysToDelete.length >= R2_ORPHAN_CLEANUP_MAX_DELETE_PER_RUN || !listed.truncated) break;
+    if (keysToDelete.length >= R2_CLEANUP_MAX_DELETE_PER_RUN) {
+      listingStoppedAtDeleteLimit = true;
+      break;
+    }
+    if (!listed.truncated) break;
     cursor = listed.cursor;
   } while (cursor);
 
-  if (keysToDelete.length > 0) {
-    await env.IMAGE_BUCKET.delete(keysToDelete);
-  }
+  const deleteResult = await deleteR2KeysInBatches(env.IMAGE_BUCKET, keysToDelete);
 
   const summary = {
     event: "unreferenced_r2_cleanup_completed",
     cutoffIso: new Date(cutoffMs).toISOString(),
     referencedR2KeyCount: referencedKeys.size,
     listedObjectCount,
-    deletedR2KeyCount: keysToDelete.length,
+    deletedR2KeyCount: deleteResult.deletedR2KeyCount,
+    deleteBatchCount: deleteResult.successfulBatchCount,
+    listingStoppedAtDeleteLimit,
   };
   console.info(JSON.stringify(summary));
   return summary;
@@ -2908,7 +2938,7 @@ async function deleteUnreferencedQuestionSets(env: Env, questionSetIds: string[]
   return deletedQuestionSetIds;
 }
 
-async function cleanupExpiredRooms(env: Env, now = Date.now()) {
+export async function cleanupExpiredRooms(env: Env, now = Date.now()) {
   if (!env.IMAGE_BUCKET) {
     throw new Error("自动清理失败：缺少 R2 存储绑定。");
   }
@@ -2962,21 +2992,19 @@ async function cleanupExpiredRooms(env: Env, now = Date.now()) {
     }
   }
 
-  const failedR2Keys = new Set<string>();
-  let deletedR2KeyCount = 0;
-  for (const key of candidateKeys) {
-    if (protectedKeys.has(key)) {
-      continue;
-    }
-
-    try {
-      await env.IMAGE_BUCKET.delete(key);
-      deletedR2KeyCount += 1;
-    } catch (error) {
-      failedR2Keys.add(key);
-      logAuxiliaryFailure("expired_room_r2_delete_failed", error, { key });
-    }
-  }
+  const allKeysToDelete = Array.from(candidateKeys).filter((key) => !protectedKeys.has(key));
+  const keysToDelete = allKeysToDelete.slice(0, R2_CLEANUP_MAX_DELETE_PER_RUN);
+  const deferredR2Keys = new Set(allKeysToDelete.slice(R2_CLEANUP_MAX_DELETE_PER_RUN));
+  const { deletedR2KeyCount, failedR2Keys, successfulBatchCount } = await deleteR2KeysInBatches(
+    env.IMAGE_BUCKET,
+    keysToDelete,
+    (error, failedKeys) => {
+      logAuxiliaryFailure("expired_room_r2_delete_failed", error, {
+        batchR2KeyCount: failedKeys.length,
+        sampleKey: failedKeys[0] ?? null,
+      });
+    },
+  );
 
   const deletableQuestionSetIds = Array.from(candidateQuestionSetIds).filter((questionSetId) => {
     const keys = questionSetKeys.get(questionSetId);
@@ -2984,7 +3012,7 @@ async function cleanupExpiredRooms(env: Env, now = Date.now()) {
       return true;
     }
 
-    return !Array.from(keys).some((key) => failedR2Keys.has(key));
+    return !Array.from(keys).some((key) => failedR2Keys.has(key) || deferredR2Keys.has(key));
   });
   const deletedQuestionSetIds = await deleteUnreferencedQuestionSets(env, deletableQuestionSetIds);
   const summary = {
@@ -2996,8 +3024,10 @@ async function cleanupExpiredRooms(env: Env, now = Date.now()) {
     deletedQuestionSetCount: deletedQuestionSetIds.length,
     candidateR2KeyCount: candidateKeys.size,
     deletedR2KeyCount,
+    deleteBatchCount: successfulBatchCount,
     protectedR2KeyCount: protectedKeys.size,
     failedR2KeyCount: failedR2Keys.size,
+    deferredR2KeyCount: deferredR2Keys.size,
   };
 
   console.info(JSON.stringify(summary));
@@ -5417,7 +5447,11 @@ export class RoomDurableObject {
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await cleanupExpiredRooms(env);
+    try {
+      await cleanupExpiredRooms(env);
+    } catch (error) {
+      logAuxiliaryFailure("expired_room_cleanup_failed", error);
+    }
     try {
       await cleanupUnreferencedR2Objects(env);
     } catch (error) {
