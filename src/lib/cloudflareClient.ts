@@ -2,6 +2,11 @@
 
 import type { GameResultSnapshot, RoundSnapshot } from "@/types/game";
 import type { RealtimeDelta } from "@/types/game";
+import {
+  ROOM_CHAT_MAX_TEXT_BYTES,
+  ROOM_CHAT_MAX_TEXT_CODE_POINTS,
+  type RoomChatServerEvent,
+} from "@/types/chat";
 import { clearAuthorityOutboxTopic, commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, syncAuthoritySequence, type AuthorityOutboxItem } from "@/lib/authorityOutbox";
 import { ROOM_VERSION_EXPIRED_ERROR_CODE, ROOM_VERSION_EXPIRED_EVENT } from "@/lib/roomRuntime";
 
@@ -38,6 +43,7 @@ type AuthoritySequenceHint = { gameId: string; actorId: string; committedSeq: nu
 type TopicState = {
   socket: WebSocket | null;
   listeners: Set<(message: ChangeMessage) => void>;
+  chatListeners: Set<(event: RoomChatServerEvent) => void>;
   connectListeners: Set<() => void>;
   pending: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: number; actionId?: string }>;
   reconnectTimer: number | null;
@@ -231,6 +237,7 @@ function getTopicState(topic: string) {
     state = {
       socket: null,
       listeners: new Set(),
+      chatListeners: new Set(),
       connectListeners: new Set(),
       pending: new Map(),
       reconnectTimer: null,
@@ -255,7 +262,7 @@ function getReconnectDelayMs(state: TopicState) {
 }
 
 function cleanupTopicStateIfIdle(topic: string, state: TopicState) {
-  if (state.listeners.size > 0 || state.pending.size > 0 || state.connectListeners.size > 0) {
+  if (hasTopicConsumers(state)) {
     return;
   }
 
@@ -290,6 +297,20 @@ function notifyChangeListeners(state: TopicState, message: ChangeMessage) {
       listener(message);
     } catch (error) {
       console.error("Realtime change listener failed.", error);
+    }
+  }
+}
+
+function hasTopicConsumers(state: TopicState) {
+  return state.listeners.size > 0 || state.chatListeners.size > 0 || state.pending.size > 0 || state.connectListeners.size > 0;
+}
+
+function notifyChatListeners(state: TopicState, event: RoomChatServerEvent) {
+  for (const listener of Array.from(state.chatListeners)) {
+    try {
+      listener(event);
+    } catch (error) {
+      console.error("Room chat listener failed.", error);
     }
   }
 }
@@ -381,7 +402,7 @@ function installRecoveryListeners() {
   recoveryListenersInstalled = true;
   const recover = () => {
     for (const [topic, state] of topicStates) {
-      if (state.listeners.size === 0 && state.pending.size === 0) continue;
+      if (!hasTopicConsumers(state)) continue;
       const socket = ensureSocket(topic);
       if (socket.readyState === WebSocket.OPEN) void state.readyPromise.then(() => drainAuthorityOutbox(topic, state, socket));
     }
@@ -391,13 +412,13 @@ function installRecoveryListeners() {
 }
 
 function scheduleReconnect(topic: string, state: TopicState) {
-  if (state.terminalErrorCode || state.listeners.size === 0 || state.reconnectTimer !== null) {
+  if (state.terminalErrorCode || !hasTopicConsumers(state) || state.reconnectTimer !== null) {
     return;
   }
 
   state.reconnectTimer = window.setTimeout(() => {
     state.reconnectTimer = null;
-    if (state.listeners.size > 0) {
+    if (hasTopicConsumers(state)) {
       ensureSocket(topic);
     }
   }, getReconnectDelayMs(state));
@@ -435,7 +456,7 @@ function ensureSocket(topic: string) {
   };
 
   socket.onmessage = (event) => {
-    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | ActionReceivedMessage | CheckpointCommittedMessage | RoomExpiredMessage | { type?: string; authorityVersion?: 1 | 2; gameId?: string; committedSeqByActor?: Record<string, number> };
+    let message: ChangeMessage | ActionResultMessage | ActionAcceptedMessage | ActionReceivedMessage | CheckpointCommittedMessage | RoomExpiredMessage | RoomChatServerEvent | { type?: string; authorityVersion?: 1 | 2; gameId?: string; committedSeqByActor?: Record<string, number> };
 
     try {
       message = JSON.parse(String(event.data)) as ChangeMessage | ActionResultMessage | { type?: string };
@@ -456,6 +477,11 @@ function ensureSocket(topic: string) {
       state.pending.clear();
       void clearAuthorityOutboxTopic(topic).catch((error) => console.error("Expired room Outbox cleanup failed.", error));
       window.dispatchEvent(new CustomEvent(ROOM_VERSION_EXPIRED_EVENT, { detail: { topic, message: expired.message } }));
+      return;
+    }
+
+    if (message.type === "chat_message" || message.type === "chat_error") {
+      notifyChatListeners(state, message as RoomChatServerEvent);
       return;
     }
 
@@ -730,6 +756,42 @@ export function subscribeRealtimeTopic(
     }
     cleanupTopicStateIfIdle(topic, state);
   };
+}
+
+export function subscribeRoomChat(
+  topic: string,
+  listener: (event: RoomChatServerEvent) => void,
+  options: { playerId?: string } = {},
+) {
+  const state = getTopicState(topic);
+  setTopicPlayerId(topic, options.playerId);
+  state.chatListeners.add(listener);
+  ensureSocket(topic);
+
+  return () => {
+    state.chatListeners.delete(listener);
+    cleanupTopicStateIfIdle(topic, state);
+  };
+}
+
+export async function sendRoomChatMessage(topic: string, text: string) {
+  const normalizedText = text.trim();
+  if (!normalizedText) throw new Error("请输入聊天内容。");
+  if (Array.from(normalizedText).length > ROOM_CHAT_MAX_TEXT_CODE_POINTS) {
+    throw new Error(`聊天内容不能超过 ${ROOM_CHAT_MAX_TEXT_CODE_POINTS} 个字符。`);
+  }
+  if (new TextEncoder().encode(normalizedText).byteLength > ROOM_CHAT_MAX_TEXT_BYTES) {
+    throw new Error("聊天内容包含的字符过多，请缩短后重试。");
+  }
+
+  const state = getTopicState(topic);
+  const socket = await waitForSocketOpen(topic, ensureSocket(topic));
+  await state.readyPromise;
+  socket.send(JSON.stringify({
+    type: "chat_send",
+    clientMessageId: crypto.randomUUID(),
+    text: normalizedText,
+  }));
 }
 
 export function bindGameSessionRealtimeTopic(gameSessionId: string | null | undefined, topic: string | null | undefined, questionIndex = 0) {

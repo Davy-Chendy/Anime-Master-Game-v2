@@ -59,6 +59,7 @@ type ImageRevealGameProps = {
   playerId: string;
   isPresenter: boolean;
   isSpectator?: boolean;
+  roomChat?: ReactNode;
   footerActions?: ReactNode;
   onError: (message: string) => void;
   onRoomUpdated?: (room: Room) => void;
@@ -1251,6 +1252,7 @@ export function ImageRevealGame({
   playerId,
   isPresenter,
   isSpectator = false,
+  roomChat,
   footerActions,
   onError,
   onRoomUpdated,
@@ -5176,20 +5178,23 @@ export function ImageRevealGame({
         {actionPanel}
       </div>
 
-      {!isTeamBattleMode || footerActions ? (
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      {!isTeamBattleMode || roomChat || footerActions ? (
+        <div className="grid items-center gap-3 lg:grid-cols-6">
           {!isTeamBattleMode ? (
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={!previousQuestion}
-              title={previousQuestion ? `回顾第 ${previousQuestionIndex! + 1} 题` : "暂无上题"}
-              onClick={handleOpenPreviousQuestionReview}
-            >
-              回顾上题
-            </Button>
+            <div className="lg:col-span-1">
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!previousQuestion}
+                title={previousQuestion ? `回顾第 ${previousQuestionIndex! + 1} 题` : "暂无上题"}
+                onClick={handleOpenPreviousQuestionReview}
+              >
+                回顾上题
+              </Button>
+            </div>
           ) : null}
-          {footerActions ? <div className="ml-auto flex flex-wrap items-center justify-end gap-3">{footerActions}</div> : null}
+          {roomChat ? <div className="min-w-0 lg:col-span-4 lg:col-start-2">{roomChat}</div> : null}
+          {footerActions ? <div className="flex flex-wrap items-center justify-end gap-3 lg:col-span-1 lg:col-start-6">{footerActions}</div> : null}
         </div>
       ) : null}
 

@@ -18,6 +18,7 @@ import {
 } from "./roomRuntimeV3";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
 import { getManifestImageUrls } from "./questionSetManifest";
+import { RoomChatRateLimiter, tryHandleRoomChatMessage } from "./roomChat";
 import {
   isR2ImageUploadTooLarge,
   R2_IMAGE_UPLOAD_MAX_BYTES,
@@ -3001,6 +3002,7 @@ export class RoomDurableObjectV3 {
   private readonly roundSnapshotCacheGeneration = new Map<string, number>();
   private roundSnapshotCacheEpoch = 0;
   private readonly roomPlayerCountByTopic = new Map<string, number>();
+  private readonly roomChatRateLimiter = new RoomChatRateLimiter();
   private actionQueue: Promise<void> = Promise.resolve();
   private r2UploadQueue: Promise<void> = Promise.resolve();
   private lastRecentActionCacheSweepAt = 0;
@@ -3555,6 +3557,12 @@ export class RoomDurableObjectV3 {
       this.expireRetiredSocket(socket);
       return;
     }
+    if (tryHandleRoomChatMessage({
+      socket,
+      message,
+      sockets: this.state.getWebSockets(),
+      rateLimiter: this.roomChatRateLimiter,
+    })) return;
     const receivedAtMs = Math.max(Date.now(), this.lastActionReceivedAtMs + 1);
     this.lastActionReceivedAtMs = receivedAtMs;
     this.sendActionAccepted(socket, message);

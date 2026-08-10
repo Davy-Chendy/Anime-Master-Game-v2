@@ -8,8 +8,10 @@ import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
+import { RoomChatBar, useRoomChat } from "@/components/RoomChat";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, isRoomVersionExpiredError, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
+import { clearAllRoomChatMessages, clearRoomChatMessages } from "@/lib/roomChat";
 import { GAME_MODE_LABELS } from "@/lib/gameModeLabels";
 import { ROOM_VERSION_EXPIRED_EVENT, ROOM_VERSION_EXPIRED_MESSAGE } from "@/lib/roomRuntime";
 import {
@@ -1143,6 +1145,7 @@ function LobbyMainPanel({
   isStartingGame,
   isUpdatingSettings,
   isCancelingRound,
+  roomChat,
   onSettingsChange,
   onOpenPresenterPicker,
   onStartGame,
@@ -1155,6 +1158,7 @@ function LobbyMainPanel({
   isStartingGame: boolean;
   isUpdatingSettings: boolean;
   isCancelingRound: boolean;
+  roomChat?: ReactNode;
   onSettingsChange: (settings: GameSettings) => void;
   onOpenPresenterPicker: () => void;
   onStartGame: () => void;
@@ -1175,7 +1179,7 @@ function LobbyMainPanel({
   })();
 
   return (
-    <Panel className="h-full" title="房间大厅">
+    <Panel title="房间大厅">
       <div className="rounded-md border border-rose-100 bg-rose-50 px-5 py-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -1222,6 +1226,8 @@ function LobbyMainPanel({
       <div className="mt-5">
         <GameSettingsPanel settings={settings} canEdit={canEditSettings} onChange={onSettingsChange} />
       </div>
+
+      {roomChat ? <div className="relative z-20 mt-5 border-t border-[var(--line)] pt-5">{roomChat}</div> : null}
     </Panel>
   );
 }
@@ -1979,6 +1985,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         if (isMounted) {
           if (isRoomVersionExpiredError(caughtError)) {
             clearLocalRoomSession();
+            clearAllRoomChatMessages();
             setRoomExpired(true);
             setRoom(null);
             setError("");
@@ -2005,6 +2012,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       const detail = (event as CustomEvent<{ topic?: string }>).detail;
       if (room?.id && detail?.topic !== `room:${room.id}`) return;
       clearLocalRoomSession();
+      const expiredRoomId = detail?.topic?.startsWith("room:") ? detail.topic.slice("room:".length) : room?.id;
+      if (expiredRoomId) clearRoomChatMessages(expiredRoomId);
+      else clearAllRoomChatMessages();
       setRoomExpired(true);
       setRoom(null);
       setError("");
@@ -2020,6 +2030,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       return;
     }
 
+    const activeRoomId = room.id;
     let isActive = true;
 
     function markRoomDissolved() {
@@ -2028,6 +2039,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
 
       clearLocalRoomSession();
+      clearRoomChatMessages(activeRoomId);
       setRoom(null);
       setError("房间已被房主解散");
     }
@@ -2038,6 +2050,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
 
       clearLocalRoomSession();
+      clearRoomChatMessages(activeRoomId);
       setRoom(null);
       router.push("/?roomNotice=kicked");
     }
@@ -2253,6 +2266,11 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     () => room?.players.find((player) => player.id === playerId) ?? null,
     [playerId, room],
   );
+  const roomChat = useRoomChat({
+    roomId: currentPlayer ? room?.id : null,
+    playerId,
+    players: room?.players ?? [],
+  });
 
   const isHost = Boolean(currentPlayer?.isHost);
   const isCurrentSpectator = currentPlayer?.role === "SPECTATOR";
@@ -2284,6 +2302,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     try {
       await leaveRoom(room.id, playerId);
       clearLocalRoomSession();
+      clearRoomChatMessages(room.id);
       router.push("/");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "退出房间失败，请稍后重试");
@@ -2309,6 +2328,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     try {
       await dissolveRoom(room.id, playerId);
       clearLocalRoomSession();
+      clearRoomChatMessages(room.id);
       router.push("/");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "解散房间失败，请稍后重试");
@@ -2639,6 +2659,12 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         </div>
       ) : null}
 
+      {!roomExpired && room?.status !== "PLAYING" && currentPlayer && !shouldShowLobby ? (
+        <div className="relative z-20 mb-5">
+          <RoomChatBar controller={roomChat} playerId={playerId} />
+        </div>
+      ) : null}
+
       {error ? (
         <div className="fixed left-1/2 top-4 z-50 w-[calc(100vw-24px)] max-w-xl -translate-x-1/2 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 shadow-lg">
           {error}
@@ -2747,6 +2773,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             playerId={playerId}
             isPresenter={isCurrentPresenter}
             isSpectator={isCurrentSpectator}
+            roomChat={<RoomChatBar controller={roomChat} playerId={playerId} />}
             footerActions={
               isHost ? (
                 <>
@@ -2783,8 +2810,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           />
         </main>
       ) : shouldShowLobby ? (
-        <div className="grid items-stretch gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="h-full">
+        <div className="grid items-start gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+          <aside>
             <PlayerList
               players={room.players}
               playerId={playerId}
@@ -2831,6 +2858,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             isStartingGame={isStartingGame}
             isUpdatingSettings={isUpdatingSettings}
             isCancelingRound={isCancelingRound}
+            roomChat={<RoomChatBar compactMessageCount={1} controller={roomChat} playerId={playerId} />}
             onSettingsChange={handleGameSettingsChange}
             onOpenPresenterPicker={() => setIsPresenterPickerOpen(true)}
             onStartGame={handleStartGame}
