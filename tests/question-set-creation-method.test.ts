@@ -77,7 +77,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0020") {
+function applyMigrations(db: DatabaseSync, through = "0021") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -367,6 +367,35 @@ test("public room migration preserves old rooms as private and validates catalog
   assert.throws(() => db.prepare("UPDATE rooms SET member_count=51 WHERE id='old-room'").run(), /CHECK constraint failed/);
 });
 
+test("public activity migration upgrades existing public rooms transactionally without an activity index", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0020");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,room_visibility,updated_at) VALUES(?,?,?,?,?)")
+    .run("public-old", "PUB021", "host", "PUBLIC", "2026-08-10T01:00:00.000Z");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,room_visibility,updated_at) VALUES(?,?,?,?,?)")
+    .run("private-old", "PRI021", "host", "PRIVATE", "2026-08-10T02:00:00.000Z");
+  const migration = readFileSync(join(migrationsDirectory, "0021_public_room_activity.sql"), "utf8");
+
+  db.exec("BEGIN");
+  try {
+    db.exec(migration);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='public_activity_at'").get().count, 0);
+
+  db.exec(migration);
+  assert.deepEqual(
+    db.prepare("SELECT id,public_activity_at FROM rooms ORDER BY id").all().map((row) => ({ ...row })),
+    [
+      { id: "private-old", public_activity_at: null },
+      { id: "public-old", public_activity_at: "2026-08-10T01:00:00.000Z" },
+    ],
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND sql LIKE '%public_activity_at%'").get().count, 0);
+});
+
 test("public room creation uses an optional trimmed name and piggybacks member counts", async () => {
   const db = new DatabaseAdapter();
   applyMigrations(db.sqlite);
@@ -381,10 +410,15 @@ test("public room creation uses an optional trimmed name and piggybacks member c
     assert.equal(fallback.memberCount, 1);
     const custom = await createRoom("custom-host", "Bob", { visibility: "PUBLIC", name: "  周末动画局  " });
     assert.equal(custom.name, "周末动画局");
+    const fixedActivity = "2026-08-10T00:00:00.000Z";
+    db.sqlite.prepare("UPDATE rooms SET public_activity_at=? WHERE id=?").run(fixedActivity, custom.id);
     const joined = await joinRoom(custom.code, "guest", "Guest");
     assert.equal(joined.error, null);
     assert.equal(joined.room?.memberCount, 2);
     assert.equal(db.sqlite.prepare("SELECT member_count FROM rooms WHERE id=?").get(custom.id).member_count, 2);
+    assert.equal(db.sqlite.prepare("SELECT public_activity_at FROM rooms WHERE id=?").get(custom.id).public_activity_at, fixedActivity);
+    await selectPresenterForRound(custom.id!, "custom-host", "custom-host");
+    assert.notEqual(db.sqlite.prepare("SELECT public_activity_at FROM rooms WHERE id=?").get(custom.id).public_activity_at, fixedActivity);
     await assert.rejects(() => createRoom("long-name-host", "Host", { visibility: "PUBLIC", name: "x".repeat(41) }), /40/);
   });
 });

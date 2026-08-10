@@ -158,6 +158,7 @@ export type VNextAggregate = {
   publicStateVersion: number;
   checkpointGeneration: number;
   lastCheckpointAtMs: number;
+  lastPublicActivityAtMs: number;
 };
 
 export type VNextInitializingStart = {
@@ -222,6 +223,7 @@ type LegacyProjectionGame = {
   gameSession?: GameSession;
   scores: PlayerScore[];
   questionResults: QuestionResult[];
+  publicActivityAt?: string;
 };
 
 type ArchiveProjectionGameV2 = {
@@ -235,6 +237,7 @@ type ArchiveProjectionGameV2 = {
   dirtyQuestionLabelIds?: string[];
   gameSession?: GameSession;
   archive: GameResultArchive;
+  publicActivityAt?: string;
 };
 
 type ArchiveProjectionGameV3 = Omit<ArchiveProjectionGameV2, "projectionVersion" | "archive"> & {
@@ -494,6 +497,7 @@ export class RoomAuthorityVNext {
       publicStateVersion: 0,
       checkpointGeneration: 0,
       lastCheckpointAtMs: Date.now(),
+      lastPublicActivityAtMs: Date.now(),
     };
     this.writeActive(aggregate);
     this.aggregate = aggregate;
@@ -550,6 +554,7 @@ export class RoomAuthorityVNext {
       scoreBaseline: {},
       startParams: undefined,
       lastCheckpointAtMs: Date.now(),
+      lastPublicActivityAtMs: Date.now(),
     };
     this.writeActive(aggregate);
     this.aggregate = aggregate;
@@ -839,6 +844,9 @@ export class RoomAuthorityVNext {
       case "cancelCurrentRound": outcome = this.cancelCurrentRound(action); break;
       case "returnRoomToLobby": outcome = this.returnRoomToLobby(action); break;
       default: throw new TerminalMutationError(`authority vNext 不支持操作 ${action.name}。`);
+    }
+    if (this.advancesPublicActivity(action.name, outcome)) {
+      aggregate.lastPublicActivityAtMs = action.serverReceivedAtMs;
     }
     aggregate.seenSeqByActor[action.actorId] = action.clientSeq;
     if (outcome.publicDeltas.length > 0) aggregate.publicStateVersion += 1;
@@ -1987,11 +1995,12 @@ export class RoomAuthorityVNext {
         if (game.dissolved) {
           statements.push(this.d1.prepare("DELETE FROM rooms WHERE id=?").bind(game.roomId));
         } else {
+          const publicActivityAt = game.publicActivityAt ?? game.gameSession?.endedAt ?? nowIso();
           if (game.projectionVersion === 3) {
             if (!game.room?.id) throw new Error("room state projection is missing room data");
             statements.push(this.d1.prepare(`UPDATE rooms SET
               host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,
-              room_state_version=?,room_state_revision=room_state_revision+1,room_state_json=?,updated_at=?
+              room_state_version=?,room_state_revision=room_state_revision+1,room_state_json=?,public_activity_at=?,updated_at=?
               WHERE id=? AND runtime_generation=?`).bind(
               game.room.hostPlayerId,
               game.room.status,
@@ -2004,6 +2013,7 @@ export class RoomAuthorityVNext {
               JSON.stringify(game.room.teamAssignments ?? {}),
               ROOM_STATE_MANIFEST_VERSION,
               encodeRoomState(game.roomId, game.room.hostPlayerId, game.players),
+              publicActivityAt,
               nowIso(),
               game.room.id,
               CURRENT_ROOM_RUNTIME_GENERATION,
@@ -2014,7 +2024,7 @@ export class RoomAuthorityVNext {
               joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt,
               lastSeenAt: player.lastSeenAt ?? nowIso(),
             }));
-            if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,updated_at=? WHERE id=?").bind(
+            if (game.room?.id) statements.push(this.d1.prepare("UPDATE rooms SET host_player_id=?,game_status=?,current_presenter_player_id=?,current_game_id=?,prepared_question_set_id=?,prepared_question_source=?,member_count=?,lobby_team_assignment_mode=?,lobby_team_assignments=?,public_activity_at=?,updated_at=? WHERE id=?").bind(
               game.room.hostPlayerId,
               game.room.status,
               game.room.currentPresenterPlayerId ?? null,
@@ -2024,6 +2034,7 @@ export class RoomAuthorityVNext {
               game.players.length,
               game.room.teamAssignmentMode ?? "AUTO",
               JSON.stringify(game.room.teamAssignments ?? {}),
+              publicActivityAt,
               nowIso(),
               game.room.id,
             ));
@@ -2132,6 +2143,7 @@ export class RoomAuthorityVNext {
       questionSetManifestVersion: aggregate.questionSetManifestVersion ?? null,
       dirtyQuestionLabelIds: aggregate.dirtyQuestionLabelIds ?? [],
       gameSession: aggregate.gameSession,
+      publicActivityAt: nowIso(aggregate.lastPublicActivityAtMs),
       ...(!aggregate.resultArchiveSuppressed
         ? { archive: this.createGameResultArchive(aggregate) }
         : {}),
@@ -2167,6 +2179,7 @@ export class RoomAuthorityVNext {
     const parsed = JSON.parse(row.state_json) as VNextAggregate;
     if (parsed.authorityVersion !== 2 || parsed.schemaVersion !== 1) throw new Error("authority vNext active_game 版本不兼容。");
     parsed.publicStateVersion ??= 0;
+    parsed.lastPublicActivityAtMs ??= parsed.lastCheckpointAtMs;
     if (!Array.isArray(parsed.dirtyQuestionLabelIds)) {
       parsed.dirtyQuestionLabelIds = parsed.questions
         .filter((question) => question.labelText?.trim())
@@ -2677,6 +2690,23 @@ export class RoomAuthorityVNext {
     this.dirtyActionCount += 1;
     this.dirtyGeneration += 1;
     if (this.aggregate) this.aggregate.stateVersion += 1;
+  }
+
+  private advancesPublicActivity(name: string, outcome: VNextMutationOutcome) {
+    if (
+      name === "joinRoom" ||
+      name === "leaveRoom" ||
+      name === "kickPlayerFromRoom" ||
+      name === "updatePlayerRole" ||
+      name === "dissolveRoom" ||
+      name === "updateQuestionLabel" ||
+      name === "submitTeamBattleRevealVote" ||
+      name === "submitTeamBattleGuessVote"
+    ) {
+      return false;
+    }
+    if (name === "cancelCurrentRound" || name === "returnRoomToLobby") return true;
+    return outcome.forceCheckpoint === "phase-boundary" || outcome.forceCheckpoint === "game-end";
   }
 
   private rememberAction(actionId: string, outcome: VNextMutationOutcome) {

@@ -100,6 +100,7 @@ export type DbRoom = {
   room_name?: string | null;
   member_count?: number | null;
   prepared_question_source?: RoomQuestionSource | null;
+  public_activity_at?: string | null;
   lobby_game_mode?: GameMode | null;
   lobby_max_reveal_rounds?: number | null;
   lobby_round_seconds?: number | null;

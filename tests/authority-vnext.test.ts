@@ -105,7 +105,7 @@ class SqliteProjectionD1 {
   constructor() {
     this.db.exec(`
       PRAGMA foreign_keys=ON;
-      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_presenter_player_id TEXT,current_game_id TEXT,prepared_question_set_id TEXT,prepared_question_source TEXT,member_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
+      CREATE TABLE rooms(id TEXT PRIMARY KEY,room_code TEXT NOT NULL UNIQUE,host_player_id TEXT NOT NULL,game_status TEXT NOT NULL,current_presenter_player_id TEXT,current_game_id TEXT,prepared_question_set_id TEXT,prepared_question_source TEXT,member_count INTEGER NOT NULL DEFAULT 0,public_activity_at TEXT,updated_at TEXT NOT NULL,lobby_team_assignment_mode TEXT NOT NULL DEFAULT 'AUTO',lobby_team_assignments TEXT NOT NULL DEFAULT '{}',runtime_generation INTEGER,room_state_version INTEGER,room_state_revision INTEGER NOT NULL DEFAULT 0,room_state_json TEXT);
       CREATE TABLE players(id TEXT PRIMARY KEY,room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,nickname TEXT NOT NULL,is_host INTEGER NOT NULL,joined_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,role TEXT NOT NULL);
       CREATE UNIQUE INDEX players_room_nickname_unique ON players(room_id,lower(nickname));
       CREATE INDEX players_room_id_idx ON players(room_id);
@@ -2404,6 +2404,7 @@ test("TEAM_BATTLE shortens to five seconds after all submit without extending on
     revealVoteSeconds: 15, guessVoteSeconds: 50, voteDeadlineAt: new Date(16_000).toISOString(), revealVotes: {}, guessVotes: {}, previousTurnAction: null, pendingGuess: null, teamScores: { red: 0, blue: 0 },
   };
   aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "REVEAL_VOTE:1", runAtMs: 16_000 };
+  aggregate.lastPublicActivityAtMs = 500;
   const p0 = socketFor(state, "p0");
   const p1 = socketFor(state, "p1");
 
@@ -2415,6 +2416,7 @@ test("TEAM_BATTLE shortens to five seconds after all submit without extending on
   assert.equal(completed.forceCheckpoint, "phase-boundary");
   assert.equal(aggregate.gameSession!.teamBattleState.voteDeadlineAt, new Date(7_000).toISOString());
   assert.equal(authority.getDeadline()?.runAtMs, 7_000);
+  assert.equal(aggregate.lastPublicActivityAtMs, 500, "shortening a deadline within the same phase must not renew public activity");
 
   const edited = authority.handleMutation(p0, envelope("p0", 2, "submitTeamBattleRevealVote", { playerId: "p0", selectedBlocks: [2], revealBlockCount: 45 }), 6_999);
   assert.equal(edited.error, undefined);
@@ -2701,6 +2703,34 @@ test("initializing cutover survives restart with its idempotency parameters", as
   const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
   await restored.restoreFromStorage();
   assert.deepEqual(restored.getInitializingStart(), { roomId: "r1", gameId: "g1", startParams: { startRequestId: "g1", presenterPlayerId: "host", authorityVersion: 2 } });
+});
+
+test("public activity advances on gameplay phases but not membership or persistence-only checkpoints", async () => {
+  const { state, authority } = createAuthority(1);
+  const aggregate = authority.getAggregate()!;
+  aggregate.lastPublicActivityAtMs = 500;
+
+  const joined = authority.handleMutation(null, envelope("late", 1, "joinRoom", { nickname: "Late", role: "PLAYER" }), 1_000);
+  assert.equal(joined.error, undefined);
+  await authority.forceCheckpoint("phase-boundary");
+  assert.equal(authority.getAggregate()?.lastPublicActivityAtMs, 500, "membership must not renew public activity even when it is checkpointed");
+
+  const opened = authority.handleMutation(null, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [0] }), 2_000);
+  assert.equal(opened.forceCheckpoint, "phase-boundary");
+  assert.equal(authority.getAggregate()?.lastPublicActivityAtMs, 2_000);
+  await authority.forceCheckpoint(opened.forceCheckpoint);
+
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.equal(restored.getAggregate()?.lastPublicActivityAtMs, 2_000, "gameplay activity must survive hibernation restore");
+
+  const stored = JSON.parse(String(state.storage.sql.db.prepare("SELECT state_json FROM authority_vnext_active_game WHERE id=1").get().state_json)) as Record<string, unknown>;
+  const storedCheckpointAt = Number(stored.lastCheckpointAtMs);
+  delete stored.lastPublicActivityAtMs;
+  state.storage.sql.db.prepare("UPDATE authority_vnext_active_game SET state_json=? WHERE id=1").run(JSON.stringify(stored));
+  const legacyRestored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await legacyRestored.restoreFromStorage({ persistRepairs: false });
+  assert.equal(legacyRestored.getAggregate()?.lastPublicActivityAtMs, storedCheckpointAt, "old aggregates must fall back to their persisted checkpoint time");
 });
 
 test("aborting a rejected initializing start removes only the matching persisted journal", async () => {

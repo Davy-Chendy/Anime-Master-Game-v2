@@ -13,6 +13,7 @@ type Row = {
   member_count: number;
   prepared_question_source: "MANUAL" | null;
   created_at: string;
+  activity_at: string;
   updated_at: string;
   status_rank: number;
 };
@@ -41,6 +42,7 @@ function room(
     member_count: memberCount,
     prepared_question_source: questionSource,
     created_at: updatedAt,
+    activity_at: updatedAt,
     updated_at: updatedAt,
     status_rank: statusRank(status, questionSource),
   };
@@ -54,9 +56,9 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
     DB: {
       prepare(sql: string) {
         assert.match(sql, /room_visibility='PUBLIC'/);
-        assert.match(sql, /game_status IN \('PLAYING','GAME_RESULT'\) OR updated_at>=\?/);
+        assert.match(sql, /game_status IN \('PLAYING','GAME_RESULT'\) OR COALESCE\(public_activity_at,updated_at\)>=\?/);
         assert.match(sql, /game_status='QUESTION_SETUP' AND prepared_question_source IS NOT NULL/);
-        assert.match(sql, /ORDER BY status_rank ASC, updated_at DESC, created_at DESC, id DESC/);
+        assert.match(sql, /ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC/);
         assert.doesNotMatch(sql, /SELECT\s+\*/i);
         return {
           bind(...values: unknown[]) {
@@ -83,13 +85,15 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
   return { env, fetchedTopics, boundQueries };
 }
 
-test("public room directory filters every status by authoritative thirty-minute activity", async () => {
+test("public room directory filters every status by authoritative two-hour activity", async () => {
   const rows = [
     room("playing", "PLAYING", "2026-08-09T07:00:00Z", 3),
     room("setup-ready", "QUESTION_SETUP", "2026-08-09T09:45:00Z", 2),
     room("setup-preparing", "QUESTION_SETUP", "2026-08-09T09:44:00Z", 2, null),
     room("lobby-fresh", "LOBBY", "2026-08-09T09:40:00Z"),
-    room("lobby-stale", "LOBBY", "2026-08-09T09:20:00Z"),
+    room("lobby-boundary", "LOBBY", "2026-08-09T08:00:00Z"),
+    room("lobby-stale", "LOBBY", "2026-08-09T07:59:59Z"),
+    { ...room("lobby-membership-churn", "LOBBY", "2026-08-09T09:59:00Z"), activity_at: "2026-08-09T07:00:00Z" },
     room("result", "GAME_RESULT", "2026-08-09T08:00:00Z", 4),
   ];
   const { env, fetchedTopics, boundQueries } = createEnv([rows], {
@@ -110,7 +114,7 @@ test("public room directory filters every status by authoritative thirty-minute 
   });
 
   const page = await listPublicRooms(env, null, NOW);
-  assert.deepEqual(page.rooms.map(({ id }) => id), ["playing", "setup-ready", "setup-preparing", "lobby-fresh", "result"]);
+  assert.deepEqual(page.rooms.map(({ id }) => id), ["playing", "setup-ready", "setup-preparing", "lobby-fresh", "lobby-boundary", "result"]);
   assert.equal(page.nextCursor, null);
   assert.deepEqual(fetchedTopics.sort(), ["room:playing", "room:result"]);
   assert.equal(page.rooms[0].memberCount, 12);
@@ -118,8 +122,8 @@ test("public room directory filters every status by authoritative thirty-minute 
   assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:50:00Z");
   assert.equal(page.rooms[0].currentQuestionIndex, 6);
   assert.equal(page.rooms[0].questionCount, 30);
-  assert.equal(page.rooms[4].updatedAt, "2026-08-09T09:55:00Z");
-  assert.equal(boundQueries[0][1], "2026-08-09T09:30:00.000Z");
+  assert.equal(page.rooms[5].updatedAt, "2026-08-09T09:55:00Z");
+  assert.equal(boundQueries[0][1], "2026-08-09T08:00:00.000Z");
   assert.equal(boundQueries[0].at(-1), 21);
 });
 
@@ -127,7 +131,7 @@ test("public room directory falls back safely when presence is unavailable or in
   const rows = [
     room("playing-error-fresh", "PLAYING", "2026-08-09T09:45:00Z", 3),
     room("playing-invalid-fresh", "PLAYING", "2026-08-09T09:40:00Z", 4),
-    room("playing-error-stale", "PLAYING", "2026-08-09T09:00:00Z", 5),
+    room("playing-error-stale", "PLAYING", "2026-08-09T07:59:59Z", 5),
   ];
   const { env } = createEnv([rows], {
     "room:playing-error-fresh": new Error("temporary failure"),
@@ -184,5 +188,13 @@ test("public room directory uses an opaque cursor to load additional bounded pag
 test("public room directory rejects malformed cursors without querying storage", async () => {
   const { env, boundQueries } = createEnv([[]], {});
   await assert.rejects(() => listPublicRooms(env, "not-a-cursor", NOW), /公开房间游标无效/);
+  const previousOrderingCursor = Buffer.from(JSON.stringify({
+    version: 2,
+    statusRank: 0,
+    updatedAt: "2026-08-09T09:00:00.000Z",
+    createdAt: "2026-08-09T08:00:00.000Z",
+    id: "old-ordering",
+  })).toString("base64url");
+  await assert.rejects(() => listPublicRooms(env, previousOrderingCursor, NOW), /公开房间游标无效/);
   assert.equal(boundQueries.length, 0);
 });

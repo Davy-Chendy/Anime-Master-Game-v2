@@ -2436,12 +2436,12 @@ type PublicRoomRow = {
   member_count: number | null;
   prepared_question_source: RoomQuestionSource | null;
   created_at: string;
-  updated_at: string;
+  activity_at: string;
   status_rank: number;
 };
 
 type PublicRoomCursor = {
-  version: 2;
+  version: 3;
   statusRank: number;
   updatedAt: string;
   createdAt: string;
@@ -2455,15 +2455,15 @@ type PublicRoomPage = {
 
 const PUBLIC_ROOM_PAGE_SIZE = 20;
 const PUBLIC_ROOM_QUERY_LIMIT = PUBLIC_ROOM_PAGE_SIZE + 1;
-const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 30 * 60 * 1000;
+const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000;
 const PUBLIC_ROOM_PRESENCE_CONCURRENCY = 5;
 const PUBLIC_ROOM_PRESENCE_TIMEOUT_MS = 800;
 
 function encodePublicRoomCursor(room: PublicRoomRow) {
   return btoa(JSON.stringify({
-    version: 2,
+    version: 3,
     statusRank: room.status_rank,
-    updatedAt: room.updated_at,
+    updatedAt: room.activity_at,
     createdAt: room.created_at,
     id: room.id,
   } satisfies PublicRoomCursor)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -2476,7 +2476,7 @@ function decodePublicRoomCursor(value: string | null | undefined): PublicRoomCur
     const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
     const parsed = JSON.parse(atob(base64)) as Partial<PublicRoomCursor>;
     if (
-      parsed.version !== 2 ||
+      parsed.version !== 3 ||
       !Number.isInteger(parsed.statusRank) ||
       Number(parsed.statusRank) < 0 ||
       Number(parsed.statusRank) > 4 ||
@@ -2490,7 +2490,7 @@ function decodePublicRoomCursor(value: string | null | undefined): PublicRoomCur
       throw new Error("invalid cursor payload");
     }
     return {
-      version: 2,
+      version: 3,
       statusRank: Number(parsed.statusRank),
       updatedAt: parsed.updatedAt,
       createdAt: parsed.createdAt,
@@ -2519,9 +2519,9 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
   const cutoffIso = new Date(now - PUBLIC_ROOM_ACTIVITY_WINDOW_MS).toISOString();
   const cursorClause = cursor ? `WHERE
       status_rank > ? OR
-      (status_rank = ? AND updated_at < ?) OR
-      (status_rank = ? AND updated_at = ? AND created_at < ?) OR
-      (status_rank = ? AND updated_at = ? AND created_at = ? AND id < ?)` : "";
+      (status_rank = ? AND activity_at < ?) OR
+      (status_rank = ? AND activity_at = ? AND created_at < ?) OR
+      (status_rank = ? AND activity_at = ? AND created_at = ? AND id < ?)` : "";
   const bindings: Array<string | number> = [CURRENT_ROOM_RUNTIME_GENERATION, cutoffIso];
   if (cursor) {
     bindings.push(
@@ -2534,7 +2534,8 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
   bindings.push(PUBLIC_ROOM_QUERY_LIMIT);
   const result = await env.DB.prepare(`WITH ranked_rooms AS (
       SELECT
-        id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,updated_at,
+        id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,
+        COALESCE(public_activity_at,updated_at) AS activity_at,
         CASE
           WHEN game_status='PLAYING' THEN 0
           WHEN game_status='QUESTION_SETUP' AND prepared_question_source IS NOT NULL THEN 1
@@ -2544,12 +2545,12 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
         END AS status_rank
       FROM rooms
       WHERE room_visibility='PUBLIC' AND runtime_generation=?
-        AND (game_status IN ('PLAYING','GAME_RESULT') OR updated_at>=?)
+        AND (game_status IN ('PLAYING','GAME_RESULT') OR COALESCE(public_activity_at,updated_at)>=?)
     )
-    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,updated_at,status_rank
+    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,prepared_question_source,created_at,activity_at,status_rank
     FROM ranked_rooms
     ${cursorClause}
-    ORDER BY status_rank ASC, updated_at DESC, created_at DESC, id DESC
+    ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC
     LIMIT ?`)
     .bind(...bindings)
     .all<PublicRoomRow>();
@@ -2569,7 +2570,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       currentQuestionIndex: null,
       questionCount: null,
       createdAt: room.created_at,
-      updatedAt: room.updated_at,
+      updatedAt: room.activity_at,
     }));
 
   const enrichedRooms = await mapWithConcurrency(rooms, PUBLIC_ROOM_PRESENCE_CONCURRENCY, async (room) => {
@@ -3229,7 +3230,7 @@ export class RoomDurableObjectV3 {
       return Response.json({
         status: aggregate.room.status,
         memberCount: aggregate.players.length,
-        updatedAt: new Date(aggregate.lastCheckpointAtMs).toISOString(),
+        updatedAt: new Date(aggregate.lastPublicActivityAtMs).toISOString(),
         currentQuestionIndex: aggregate.gameSession?.currentQuestionIndex ?? null,
         questionCount: aggregate.questions.length,
       });

@@ -1781,6 +1781,7 @@ export async function createRoom(playerId: string, nickname: string, options: Cr
         room_visibility: visibility,
         room_name: roomName,
         member_count: 1,
+        public_activity_at: visibility === "PUBLIC" ? createdAt : null,
         created_at: createdAt,
         updated_at: createdAt,
       })
@@ -2244,6 +2245,7 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
       prepared_question_set_id: null,
       prepared_question_source: null,
       lobby_team_assignments: JSON.stringify(nextAssignments),
+      public_activity_at: new Date().toISOString(),
   });
 
   return toRoom(room);
@@ -2284,6 +2286,7 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
       prepared_question_set_id: null,
       prepared_question_source: null,
       game_status: "LOBBY",
+      public_activity_at: new Date().toISOString(),
     })
     .eq("id", roomId)
     .eq("host_player_id", hostPlayerId)
@@ -2312,6 +2315,7 @@ export async function cancelPresenterSetup(roomId: string, presenterPlayerId: st
       prepared_question_set_id: null,
       prepared_question_source: null,
       game_status: "LOBBY",
+      public_activity_at: new Date().toISOString(),
     })
     .eq("id", roomId)
     .eq("current_presenter_player_id", presenterPlayerId)
@@ -2668,6 +2672,7 @@ export async function prepareQuestionSetForStart(params: {
     .update({
       prepared_question_set_id: params.questionSetId,
       prepared_question_source: preparedQuestionSource,
+      public_activity_at: new Date().toISOString(),
     })
     .eq("id", params.roomId)
     .eq("current_presenter_player_id", params.presenterPlayerId)
@@ -2757,7 +2762,7 @@ export async function updateRoomGameSettings(params: {
 
   const { data: room, error } = await d1
     .from("rooms")
-    .update(roomUpdates)
+    .update({ ...roomUpdates, public_activity_at: new Date().toISOString() })
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)
     .eq("game_status", currentRoom.game_status)
@@ -3121,6 +3126,7 @@ export async function startGameWithQuestionSet(params: {
       current_game_id: gameSession.id,
       prepared_question_set_id: null,
       game_status: "PLAYING",
+      public_activity_at: new Date().toISOString(),
     })
     .eq("id", params.roomId)
     .eq("host_player_id", params.hostPlayerId)
@@ -6172,6 +6178,7 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     .from("rooms")
     .update({
       game_status: "GAME_RESULT",
+      public_activity_at: endedGameSession.ended_at ?? new Date().toISOString(),
     })
     .eq("id", endedGameSession.room_id)
     .eq("current_game_id", endedGameSession.id)
@@ -6781,6 +6788,7 @@ export async function endCurrentGameEarly(params: {
     .from("rooms")
     .update({
       game_status: "GAME_RESULT",
+      public_activity_at: endedAt,
     })
     .eq("id", currentGameSession.room_id)
     .eq("current_game_id", currentGameSession.id)
@@ -6809,6 +6817,7 @@ export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
       prepared_question_source: null,
       lobby_team_assignments: "{}",
       game_status: "LOBBY",
+      public_activity_at: new Date().toISOString(),
     })
     .eq("id", roomId)
     .eq("host_player_id", hostPlayerId)

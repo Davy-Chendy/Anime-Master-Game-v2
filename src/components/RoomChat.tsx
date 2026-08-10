@@ -15,7 +15,7 @@ import type { Player } from "@/types/game";
 export type RoomChatDisplayMode = "closed" | "compact" | "expanded";
 
 const ROOM_CHAT_PANEL_HEIGHT_STORAGE_KEY = "anime-master:room-chat-panel-height";
-const ROOM_CHAT_PANEL_MIN_HEIGHT = 140;
+const ROOM_CHAT_PANEL_MIN_HEIGHT = 92;
 const ROOM_CHAT_PANEL_DEFAULT_HEIGHT = 240;
 
 export function clampRoomChatPanelHeight(height: number, viewportHeight = 800) {
@@ -231,7 +231,7 @@ export function RoomChatBar({
       {controller.mode === "expanded" ? (
         <section
           aria-label="房间聊天记录"
-          className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 flex w-full flex-col overflow-hidden rounded-lg border border-slate-200/80 bg-[oklch(0.985_0.002_250_/_0.96)] shadow-[0_12px_36px_rgba(23,32,51,0.12)] sm:max-w-[560px]"
+          className="absolute bottom-16 left-0 z-30 flex w-[calc(100%_-_4rem)] flex-col overflow-hidden rounded-lg border border-slate-200/80 bg-[oklch(0.985_0.002_250_/_0.96)] shadow-[0_12px_36px_rgba(23,32,51,0.12)] sm:bottom-0 sm:w-[calc(57.5%_-_4.25rem)]"
           style={{ height: controller.panelHeight }}
         >
           <div
@@ -280,9 +280,19 @@ export function RoomChatBar({
             显示记录
             {controller.unreadCount > 0 ? <span className="grid min-w-6 place-items-center rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-bold text-rose-700">{controller.unreadCount === 99 ? "99+" : controller.unreadCount}</span> : null}
           </button>
+        ) : isExpanded ? (
+          <div className="pointer-events-none relative z-40 flex h-14 min-w-0 items-center justify-end">
+            <button
+              className="pointer-events-auto h-10 rounded-md border border-slate-200/80 bg-[oklch(0.985_0.002_250_/_0.96)] px-2.5 text-base font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+              type="button"
+              onClick={() => controller.setMode("compact")}
+            >
+              收起
+            </button>
+          </div>
         ) : (
           <div className="flex h-14 min-w-0 overflow-hidden rounded-lg border border-[var(--line)] bg-slate-50/70 transition hover:border-slate-300 focus-within:ring-4 focus-within:ring-rose-100">
-            <button aria-label={isExpanded ? "收起聊天记录" : "展开聊天记录"} className="flex min-w-0 flex-1 items-stretch text-left focus-visible:outline-none" type="button" onClick={() => controller.setMode(isExpanded ? "compact" : "expanded")}>
+            <button aria-label="展开聊天记录" className="flex min-w-0 flex-1 items-stretch text-left focus-visible:outline-none" type="button" onClick={() => controller.setMode("expanded")}>
               {recentMessages.length > 0 ? recentMessages.map((message, index) => (
                 <span className={`flex min-w-0 flex-1 items-center px-3 text-base text-slate-700 ${index > 0 ? "border-l border-[var(--line)]" : ""}`} key={message.messageId}>
                   <span className="truncate"><span className="font-semibold">{message.nickname}：</span>{message.text}</span>
@@ -290,8 +300,8 @@ export function RoomChatBar({
               )) : <span className="flex min-w-0 flex-1 items-center px-3 text-base text-[var(--muted)]">还没有聊天消息</span>}
             </button>
             <div className="flex shrink-0 items-center gap-1 border-l border-[var(--line)] bg-white px-1.5">
-              <button className="h-10 rounded-md px-2.5 text-base font-semibold text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200" type="button" onClick={() => controller.setMode(isExpanded ? "compact" : "expanded")}>{isExpanded ? "收起" : "展开"}</button>
-              {!isExpanded ? <button className="h-10 rounded-md px-2.5 text-base font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200" type="button" onClick={() => controller.setMode("closed")}>隐藏</button> : null}
+              <button className="h-10 rounded-md px-2.5 text-base font-semibold text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200" type="button" onClick={() => controller.setMode("expanded")}>展开</button>
+              <button className="h-10 rounded-md px-2.5 text-base font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200" type="button" onClick={() => controller.setMode("closed")}>隐藏</button>
             </div>
           </div>
         )}

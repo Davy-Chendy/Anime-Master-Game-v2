@@ -182,7 +182,7 @@ test("session history loads, clears one room, clears all rooms, and tolerates da
 });
 
 test("expanded panel height stays within the viewport allowance", () => {
-  assert.equal(clampRoomChatPanelHeight(20, 800), 140);
+  assert.equal(clampRoomChatPanelHeight(20, 800), 92);
   assert.equal(clampRoomChatPanelHeight(240, 800), 240);
   assert.equal(clampRoomChatPanelHeight(900, 800), 400);
 });
