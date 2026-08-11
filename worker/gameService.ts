@@ -261,6 +261,10 @@ function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): 
     ),
     teamPresenterBlockEnabled:
       room.lobby_team_presenter_block_enabled === 1 || room.lobby_team_presenter_block_enabled === true,
+    spectatorQuestionPreviewEnabled:
+      room.lobby_spectator_question_preview_enabled !== 0 && room.lobby_spectator_question_preview_enabled !== false,
+    spectatorPlayerAnswersEnabled:
+      room.lobby_spectator_player_answers_enabled !== 0 && room.lobby_spectator_player_answers_enabled !== false,
     teamAssignmentMode: normalizeTeamAssignmentMode(room.lobby_team_assignment_mode),
     teamAssignments: sanitizeTeamAssignments(room, players),
     createdAt: room.created_at,
@@ -1774,6 +1778,8 @@ export async function createRoom(playerId: string, nickname: string, options: Cr
         lobby_team_reveal_vote_seconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
         lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
         lobby_team_presenter_block_enabled: 0,
+        lobby_spectator_question_preview_enabled: 1,
+        lobby_spectator_player_answers_enabled: 1,
         lobby_team_assignment_mode: "MANUAL",
         lobby_team_assignments: "{}",
         runtime_generation: CURRENT_ROOM_RUNTIME_GENERATION,
@@ -2759,6 +2765,8 @@ export async function updateRoomGameSettings(params: {
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
   teamPresenterBlockEnabled?: boolean;
+  spectatorQuestionPreviewEnabled?: boolean;
+  spectatorPlayerAnswersEnabled?: boolean;
   teamAssignmentMode?: TeamAssignmentMode;
 }) {
   assertD1Env();
@@ -2795,6 +2803,12 @@ export async function updateRoomGameSettings(params: {
   const teamPresenterBlockEnabled = params.teamPresenterBlockEnabled ?? (
     currentRoom.lobby_team_presenter_block_enabled === 1 || currentRoom.lobby_team_presenter_block_enabled === true
   );
+  const spectatorQuestionPreviewEnabled = params.spectatorQuestionPreviewEnabled ?? (
+    currentRoom.lobby_spectator_question_preview_enabled !== 0 && currentRoom.lobby_spectator_question_preview_enabled !== false
+  );
+  const spectatorPlayerAnswersEnabled = params.spectatorPlayerAnswersEnabled ?? (
+    currentRoom.lobby_spectator_player_answers_enabled !== 0 && currentRoom.lobby_spectator_player_answers_enabled !== false
+  );
   const teamAssignmentMode = normalizeTeamAssignmentMode(params.teamAssignmentMode ?? currentRoom.lobby_team_assignment_mode);
   const roomUpdates: Partial<DbRoom> = {
     lobby_game_mode: params.gameMode,
@@ -2804,6 +2818,8 @@ export async function updateRoomGameSettings(params: {
     lobby_team_reveal_vote_seconds: teamRevealVoteSeconds,
     lobby_team_guess_vote_seconds: teamGuessVoteSeconds,
     lobby_team_presenter_block_enabled: teamPresenterBlockEnabled ? 1 : 0,
+    lobby_spectator_question_preview_enabled: spectatorQuestionPreviewEnabled ? 1 : 0,
+    lobby_spectator_player_answers_enabled: spectatorPlayerAnswersEnabled ? 1 : 0,
     lobby_team_assignment_mode: teamAssignmentMode,
     ...(params.gameMode !== "TEAM_BATTLE" || teamAssignmentMode === "AUTO"
       ? { lobby_team_assignments: "{}" }

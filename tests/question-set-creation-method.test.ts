@@ -80,7 +80,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0023") {
+function applyMigrations(db: DatabaseSync, through = "0024") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -327,13 +327,17 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     assert.equal(room.teamRevealVoteSeconds, 25);
     assert.equal(room.teamGuessVoteSeconds, 50);
     assert.equal(room.teamPresenterBlockEnabled, false);
+    assert.equal(room.spectatorQuestionPreviewEnabled, true);
+    assert.equal(room.spectatorPlayerAnswersEnabled, true);
     assert.equal(room.teamAssignmentMode, "MANUAL");
 
-    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
+    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_spectator_question_preview_enabled, lobby_spectator_player_answers_enabled, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
       .get(room.id);
     assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
     assert.equal(stored.lobby_team_guess_vote_seconds, 50);
     assert.equal(stored.lobby_team_presenter_block_enabled, 0);
+    assert.equal(stored.lobby_spectator_question_preview_enabled, 1);
+    assert.equal(stored.lobby_spectator_player_answers_enabled, 1);
     assert.equal(stored.lobby_team_assignment_mode, "MANUAL");
     assert.equal(stored.runtime_generation, CURRENT_ROOM_RUNTIME_GENERATION);
     const aggregate = db.sqlite.prepare("SELECT * FROM rooms WHERE id=?").get(room.id);
@@ -356,6 +360,20 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     });
     assert.equal(Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes), changesBeforeNoOps);
     assert.equal(db.sqlite.prepare("SELECT room_state_revision FROM rooms WHERE id=?").get(room.id).room_state_revision, 0);
+
+    const restricted = await updateRoomGameSettings({
+      roomId: room.id,
+      hostPlayerId: "host-defaults",
+      gameMode: "ROUND_REVEAL",
+      spectatorQuestionPreviewEnabled: false,
+      spectatorPlayerAnswersEnabled: false,
+    });
+    assert.equal(restricted.spectatorQuestionPreviewEnabled, false);
+    assert.equal(restricted.spectatorPlayerAnswersEnabled, false);
+    assert.deepEqual({ ...db.sqlite.prepare("SELECT lobby_spectator_question_preview_enabled,lobby_spectator_player_answers_enabled FROM rooms WHERE id=?").get(room.id) }, {
+      lobby_spectator_question_preview_enabled: 0,
+      lobby_spectator_player_answers_enabled: 0,
+    });
   });
 });
 
@@ -456,6 +474,29 @@ test("room notice migration preserves existing rooms and enforces the storage bo
   assert.equal(db.prepare("SELECT room_notice FROM rooms WHERE id='notice-old'").get().room_notice, null);
   assert.throws(() => db.prepare("UPDATE rooms SET room_notice=? WHERE id='notice-old'").run("信".repeat(81)), /CHECK constraint failed/);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND sql LIKE '%room_notice%'").get().count, 0);
+});
+
+test("spectator visibility migration preserves existing rooms with compatible defaults", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0023");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id) VALUES(?,?,?)").run("spectator-old", "SPC024", "host");
+  const migration = readFileSync(join(migrationsDirectory, "0024_spectator_visibility_settings.sql"), "utf8");
+
+  db.exec("BEGIN");
+  try {
+    db.exec(migration);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_spectator_question_preview_enabled'").get().count, 0);
+
+  db.exec(migration);
+  const room = db.prepare("SELECT * FROM rooms WHERE id='spectator-old'").get();
+  assert.equal(room.lobby_spectator_question_preview_enabled, 1);
+  assert.equal(room.lobby_spectator_player_answers_enabled, 1);
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_spectator_question_preview_enabled=2 WHERE id='spectator-old'").run(), /CHECK constraint failed/);
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_spectator_player_answers_enabled=-1 WHERE id='spectator-old'").run(), /CHECK constraint failed/);
 });
 
 test("room notices are host-authoritative, recoverable, bounded, and emit only changed deltas", async () => {

@@ -123,6 +123,72 @@ type TeamBattleVoteAlarmState = {
 };
 
 type DeadlineKind = "auto-forfeit" | "team-battle-vote";
+const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+
+function isQuestionReviewingSession(session: GameSession) {
+  return session.gameMode === "TEAM_BATTLE"
+    ? session.teamBattleState?.phase === "REVIEW"
+    : !session.roundStartedAt && session.revealedBlocks.length >= 45;
+}
+
+export function projectSpectatorRoundSnapshot(snapshot: RoundSnapshot, playerAnswersEnabled: boolean) {
+  if (playerAnswersEnabled || isQuestionReviewingSession(snapshot.gameSession)) return snapshot;
+  const redactOrdinaryAnswer = (answer: Answer): Answer => ({
+    ...answer,
+    answerText: answer.answerText === FORFEIT_ANSWER_TEXT ? FORFEIT_ANSWER_TEXT : "",
+  });
+  const redactBuzzerAnswer = (answer: BuzzerAnswer): BuzzerAnswer => ({ ...answer, answerText: "" });
+  return {
+    ...snapshot,
+    answers: snapshot.answers.map(redactOrdinaryAnswer),
+    labelAnswers: snapshot.labelAnswers.map(redactOrdinaryAnswer),
+    buzzerAnswers: snapshot.buzzerAnswers.map(redactBuzzerAnswer),
+    labelBuzzerAnswers: snapshot.labelBuzzerAnswers.map(redactBuzzerAnswer),
+  };
+}
+
+export function projectSpectatorBootstrapSnapshot(
+  snapshot: GameBootstrapSnapshot,
+  questionPreviewEnabled: boolean,
+  playerAnswersEnabled: boolean,
+) {
+  if (isQuestionReviewingSession(snapshot.gameSession)) return snapshot;
+  return {
+    ...snapshot,
+    questions: questionPreviewEnabled
+      ? snapshot.questions
+      : snapshot.questions.map((question) => ({
+          ...question,
+          labelText: null,
+          labelSource: null,
+          labelSourceAnswerId: null,
+          labelUpdatedByPlayerId: null,
+          labelUpdatedAt: null,
+        })),
+    roundSnapshot: projectSpectatorRoundSnapshot(snapshot.roundSnapshot, playerAnswersEnabled),
+  };
+}
+
+export function getVNextAnswerViewerIds(aggregate: VNextAggregate | null) {
+  const presenterId = aggregate?.gameSession?.presenterPlayerId;
+  const answerViewerIds = new Set(aggregate?.players
+    .filter((player) => player.role === "SPECTATOR" && aggregate.room?.spectatorPlayerAnswersEnabled !== false)
+    .map((player) => player.id) ?? []);
+  const session = aggregate?.gameSession;
+  if (session && session.gameMode !== "TEAM_BATTLE") {
+    const correctPlayerIds = new Set(
+      aggregate?.questionResults
+        .filter((result) => result.questionIndex === session.currentQuestionIndex)
+        .map((result) => result.playerId) ?? [],
+    );
+    for (const player of aggregate?.players ?? []) {
+      if (player.role === "PLAYER" && player.id !== presenterId && correctPlayerIds.has(player.id)) {
+        answerViewerIds.add(player.id);
+      }
+    }
+  }
+  return answerViewerIds;
+}
 
 type DeadlineTransition =
   | { type: "noop" }
@@ -3721,6 +3787,29 @@ export class RoomDurableObjectV3 {
     return task;
   }
 
+  private getSpectatorProjection(playerId: string | undefined, gameSessionId: string) {
+    const aggregate = this.authorityVNext.getAggregate();
+    if (!playerId || !aggregate || aggregate.gameId !== gameSessionId) return null;
+    const player = aggregate.players.find((candidate) => candidate.id === playerId);
+    if (player?.role !== "SPECTATOR") return null;
+    return {
+      questionPreviewEnabled: aggregate.room?.spectatorQuestionPreviewEnabled !== false,
+      playerAnswersEnabled: aggregate.room?.spectatorPlayerAnswersEnabled !== false,
+    };
+  }
+
+  private projectRoundSnapshotForPlayer(snapshot: RoundSnapshot, playerId: string | undefined) {
+    const projection = this.getSpectatorProjection(playerId, snapshot.gameSession.id);
+    return projection ? projectSpectatorRoundSnapshot(snapshot, projection.playerAnswersEnabled) : snapshot;
+  }
+
+  private projectBootstrapSnapshotForPlayer(snapshot: GameBootstrapSnapshot, playerId: string | undefined) {
+    const projection = this.getSpectatorProjection(playerId, snapshot.gameSession.id);
+    return projection
+      ? projectSpectatorBootstrapSnapshot(snapshot, projection.questionPreviewEnabled, projection.playerAnswersEnabled)
+      : snapshot;
+  }
+
   private tryHandleWebSocketFastPath(socket: WebSocket, message: string | ArrayBuffer) {
     let payload: {
       type?: string;
@@ -3752,7 +3841,7 @@ export class RoomDurableObjectV3 {
       return false;
     }
 
-    const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
+    const socketAttachment = socket.deserializeAttachment() as VNextSocketAttachment | undefined;
     console.info(
       JSON.stringify({
         event: "snapshot_cache_fast_hit",
@@ -3761,11 +3850,16 @@ export class RoomDurableObjectV3 {
         topic: socketAttachment?.topic ?? null,
       }),
     );
+    const projectedSnapshot = payload.name === "getRoundSnapshot"
+      ? this.projectRoundSnapshotForPlayer(cachedSnapshot as RoundSnapshot, socketAttachment?.playerId)
+      : payload.name === "getGameBootstrapSnapshot"
+        ? this.projectBootstrapSnapshotForPlayer(cachedSnapshot as GameBootstrapSnapshot, socketAttachment?.playerId)
+        : cachedSnapshot;
     socket.send(
       JSON.stringify({
         type: "action_result",
         clientActionId: payload.clientActionId,
-        data: cachedSnapshot,
+        data: projectedSnapshot,
       }),
     );
     return true;
@@ -3824,7 +3918,12 @@ export class RoomDurableObjectV3 {
       }
 
       const snapshot = await snapshotPromise;
-      socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
+      const attachment = socket.deserializeAttachment() as VNextSocketAttachment | undefined;
+      socket.send(JSON.stringify({
+        type: "action_result",
+        clientActionId,
+        data: this.projectRoundSnapshotForPlayer(snapshot, attachment?.playerId),
+      }));
     } catch (error) {
       if (ownsInflightRead) {
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
@@ -3916,7 +4015,12 @@ export class RoomDurableObjectV3 {
       }
 
       const snapshot = await snapshotPromise;
-      socket.send(JSON.stringify({ type: "action_result", clientActionId, data: snapshot }));
+      const attachment = socket.deserializeAttachment() as VNextSocketAttachment | undefined;
+      socket.send(JSON.stringify({
+        type: "action_result",
+        clientActionId,
+        data: this.projectBootstrapSnapshotForPlayer(snapshot, attachment?.playerId),
+      }));
     } catch (error) {
       if (ownsInflightRead) {
         const socketAttachment = socket.deserializeAttachment() as { topic?: string } | undefined;
@@ -4227,23 +4331,12 @@ export class RoomDurableObjectV3 {
   }
 
   private sendVNextOutcome(name: string, outcome: VNextMutationOutcome) {
-    if (outcome.publicDeltas.length) this.sendVNextDeltas(name, outcome.publicDeltas, undefined, true);
+    if (outcome.publicDeltas.length) this.sendVNextPublicDeltas(name, outcome.publicDeltas);
     const aggregate = this.authorityVNext.getAggregate();
     const presenterId = aggregate?.gameSession?.presenterPlayerId;
     if (presenterId && outcome.presenterDeltas.length) this.sendVNextDeltas(name, outcome.presenterDeltas, new Set([presenterId]));
     if (outcome.answerViewerDeltas?.length) {
-      const answerViewerIds = new Set(aggregate?.players.filter((player) => player.role === "SPECTATOR").map((player) => player.id) ?? []);
-      const session = aggregate?.gameSession;
-      if (session && session.gameMode !== "TEAM_BATTLE") {
-        const correctPlayerIds = new Set(
-          aggregate?.questionResults
-            .filter((result) => result.questionIndex === session.currentQuestionIndex)
-            .map((result) => result.playerId) ?? [],
-        );
-        for (const player of aggregate?.players ?? []) {
-          if (player.role === "PLAYER" && player.id !== presenterId && correctPlayerIds.has(player.id)) answerViewerIds.add(player.id);
-        }
-      }
+      const answerViewerIds = getVNextAnswerViewerIds(aggregate);
       if (answerViewerIds.size) this.sendVNextDeltas(name, outcome.answerViewerDeltas, answerViewerIds);
     }
     const privateDeltasByPlayer = new Map<string, RealtimeDelta[]>();
@@ -4258,6 +4351,59 @@ export class RoomDurableObjectV3 {
       privateDeltasByPlayer.set(delivery.playerId, deltas);
     }
     for (const [playerId, deltas] of privateDeltasByPlayer) this.sendVNextDeltas(name, deltas, new Set([playerId]));
+    this.sendRestrictedSpectatorReviewData(name, outcome);
+  }
+
+  private sendVNextPublicDeltas(name: string, deltas: RealtimeDelta[]) {
+    const aggregate = this.authorityVNext.getAggregate();
+    const session = aggregate?.gameSession;
+    const restrictedSpectatorIds = new Set(
+      !session || isQuestionReviewingSession(session)
+        ? []
+        : aggregate?.players
+          .filter((player) => player.role === "SPECTATOR" && aggregate.room?.spectatorPlayerAnswersEnabled === false)
+          .map((player) => player.id) ?? [],
+    );
+    const containsRoundSnapshot = deltas.some((delta) => delta.scope === "game" && delta.type === "round_snapshot");
+    if (!containsRoundSnapshot || !restrictedSpectatorIds.size) {
+      this.sendVNextDeltas(name, deltas, undefined, true);
+      return;
+    }
+
+    this.sendVNextDeltas(name, deltas, undefined, true, restrictedSpectatorIds);
+    const playerId = restrictedSpectatorIds.values().next().value as string | undefined;
+    const projectedDeltas = deltas.map((delta) => delta.scope === "game" && delta.type === "round_snapshot"
+      ? { ...delta, snapshot: this.projectRoundSnapshotForPlayer(delta.snapshot, playerId) }
+      : delta);
+    this.sendVNextDeltas(name, projectedDeltas, restrictedSpectatorIds, true);
+  }
+
+  private sendRestrictedSpectatorReviewData(name: string, outcome: VNextMutationOutcome) {
+    if (outcome.forceCheckpoint !== "phase-boundary") return;
+    const aggregate = this.authorityVNext.getAggregate();
+    const session = aggregate?.gameSession;
+    const room = aggregate?.room;
+    if (!aggregate || !session || !room || !isQuestionReviewingSession(session)) return;
+
+    const restrictedQuestionViewerIds = new Set(
+      aggregate.players
+        .filter((player) => player.role === "SPECTATOR" && room.spectatorQuestionPreviewEnabled === false)
+        .map((player) => player.id),
+    );
+    const question = aggregate.questions[session.currentQuestionIndex];
+    if (question && restrictedQuestionViewerIds.size) {
+      this.sendVNextDeltas(name, [{ scope: "game", type: "question_label_updated", question }], restrictedQuestionViewerIds);
+    }
+
+    const restrictedAnswerViewerIds = new Set(
+      aggregate.players
+        .filter((player) => player.role === "SPECTATOR" && room.spectatorPlayerAnswersEnabled === false)
+        .map((player) => player.id),
+    );
+    if (restrictedAnswerViewerIds.size) {
+      const deltas = this.authorityVNext.getCurrentAnswerTextBackfillDeltas();
+      if (deltas.length) this.sendVNextDeltas(name, deltas, restrictedAnswerViewerIds);
+    }
   }
 
   private invalidateVNextSnapshotCaches(outcome: VNextMutationOutcome) {
@@ -4270,7 +4416,13 @@ export class RoomDurableObjectV3 {
     this.sendVNextDeltas(name, [delta], recipients, publicStream);
   }
 
-  private sendVNextDeltas(name: string, deltas: RealtimeDelta[], recipients?: Set<string>, publicStream = false) {
+  private sendVNextDeltas(
+    name: string,
+    deltas: RealtimeDelta[],
+    recipients?: Set<string>,
+    publicStream = false,
+    excludedRecipients?: Set<string>,
+  ) {
     const aggregate = this.authorityVNext.getAggregate();
     const payload = JSON.stringify({
       type: "change",
@@ -4282,10 +4434,11 @@ export class RoomDurableObjectV3 {
     });
     let sent = 0;
     for (const target of this.state.getWebSockets()) {
-      if (recipients) {
+      if (recipients || excludedRecipients) {
         let playerId: string | undefined;
         try { playerId = (target.deserializeAttachment() as VNextSocketAttachment | null)?.playerId; } catch { playerId = undefined; }
-        if (!playerId || !recipients.has(playerId)) continue;
+        if (recipients && (!playerId || !recipients.has(playerId))) continue;
+        if (playerId && excludedRecipients?.has(playerId)) continue;
       }
       try { target.send(payload); sent += 1; } catch { target.close(1011, "实时推送失败。"); }
     }

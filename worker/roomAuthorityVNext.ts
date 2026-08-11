@@ -683,6 +683,26 @@ export class RoomAuthorityVNext {
     return true;
   }
 
+  getCurrentAnswerTextBackfillDeltas() {
+    const aggregate = this.requireActiveOrEnded();
+    const session = aggregate.gameSession!;
+    if (session.gameMode === "TEAM_BATTLE") return [];
+    const answers = aggregate.buzzerAnswers
+      .filter((answer) => answer.questionIndex === session.currentQuestionIndex)
+      .sort(compareBuzzer);
+    const deltas: RealtimeDelta[] = [];
+    for (let index = 0; index < answers.length; index += ANSWER_TEXT_BACKFILL_CHUNK_SIZE) {
+      deltas.push({
+        scope: "game",
+        type: "answer_text_backfill",
+        gameSessionId: session.id,
+        questionIndex: session.currentQuestionIndex,
+        buzzerAnswers: clone(answers.slice(index, index + ANSWER_TEXT_BACKFILL_CHUNK_SIZE)),
+      });
+    }
+    return deltas;
+  }
+
   resetAfterFailedTransition() {
     this.aggregate = null;
     this.restored = false;

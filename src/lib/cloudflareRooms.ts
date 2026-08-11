@@ -223,6 +223,8 @@ export const updateRoomGameSettings = (params: {
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
   teamPresenterBlockEnabled?: boolean;
+  spectatorQuestionPreviewEnabled?: boolean;
+  spectatorPlayerAnswersEnabled?: boolean;
   teamAssignmentMode?: TeamAssignmentMode;
 }) => rpc<Room>("updateRoomGameSettings", params);
 

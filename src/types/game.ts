@@ -84,6 +84,8 @@ export type Room = {
   teamRevealVoteSeconds?: number;
   teamGuessVoteSeconds?: number;
   teamPresenterBlockEnabled?: boolean;
+  spectatorQuestionPreviewEnabled?: boolean;
+  spectatorPlayerAnswersEnabled?: boolean;
   teamAssignmentMode?: TeamAssignmentMode;
   teamAssignments?: Partial<Record<string, TeamBattleTeam>>;
   createdAt: number | string;
@@ -112,6 +114,8 @@ export type DbRoom = {
   lobby_team_reveal_vote_seconds?: number | null;
   lobby_team_guess_vote_seconds?: number | null;
   lobby_team_presenter_block_enabled?: number | boolean | null;
+  lobby_spectator_question_preview_enabled?: number | boolean | null;
+  lobby_spectator_player_answers_enabled?: number | boolean | null;
   lobby_team_assignment_mode?: TeamAssignmentMode | null;
   lobby_team_assignments?: unknown;
   runtime_generation?: number | null;

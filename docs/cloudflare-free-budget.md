@@ -91,6 +91,10 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 50人极端房间有1名出题人和49名答题玩家。如果每题49人最终都答对且都需要取得49份短答案正文，理论上限为每题2,401份、30题72,030份答案正文客户端副本；每天60局为4,321,800份。它们是现有连接上的出站投递，不折算为新的 DO 入站请求，但会消耗序列化、CPU/Duration和网络处理。实现必须对同一实时答案只序列化一次并复用接收者集合，backfill 单个 delta 最多携带2条答案，禁止逐玩家查询、构建完整 snapshot 或触发补拉。`test:authority-vnext` 继续断言50人×30题下单个 delta 小于1KiB，并把 backfill 字节计入报告；本功能不改变 DO/D1 写入模型，因此 `scripts/authority-write-budget.mjs` 无需调整。
 
+## 观战内容权限预算（2026-08-11）
+
+两个观战开关复用既有房间设置 mutation、Room DO WebSocket 和 snapshot inflight/cache，不新增 HTTP/RPC、D1 热路径读取、Alarm、checkpoint 或逐连接 snapshot 查询。受限观战快照从同一权威结果发送前投影；公开状态最多序列化一份普通 payload 和一份观战裁剪 payload。关闭查看回答会减少答题期间的正文投递；进入复盘时复用现有 `question_label_updated` 和最多2条答案的 `answer_text_backfill`，一次构建后发送给观战接收者集合。D1 与 DO 各增加两个有界布尔列，仅随既有房间设置行更新，不改变单局写入模型，`scripts/authority-write-budget.mjs` 无需调整。
+
 ## Question Set Manifest V2 预算（2026-07-31）
 
 本轮预算以 [`cloudflare-usage-history/2026-07-30.md`](cloudflare-usage-history/2026-07-30.md) 的完整生产窗口为依据，不把 SQL 语句数当作计费行数。该窗口 D1 共写入 3,795 行，其中题目创建 796 行、题集创建 146 行、结算逐题标签投影 810 行，三项合计 1,752 行，占 46.2%；孤儿私有题集候选查询读取 65,062 行，占当日 D1 读取 64.9%。

@@ -77,6 +77,8 @@ type GameSettings = {
   teamRevealVoteSeconds: number;
   teamGuessVoteSeconds: number;
   teamPresenterBlockEnabled: boolean;
+  spectatorQuestionPreviewEnabled: boolean;
+  spectatorPlayerAnswersEnabled: boolean;
   teamAssignmentMode: TeamAssignmentMode;
 };
 
@@ -88,6 +90,8 @@ const defaultGameSettings: GameSettings = {
   teamRevealVoteSeconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
   teamGuessVoteSeconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   teamPresenterBlockEnabled: false,
+  spectatorQuestionPreviewEnabled: true,
+  spectatorPlayerAnswersEnabled: true,
   teamAssignmentMode: "MANUAL",
 };
 
@@ -175,6 +179,8 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
       DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
     ),
     teamPresenterBlockEnabled: settings.teamPresenterBlockEnabled === true,
+    spectatorQuestionPreviewEnabled: settings.spectatorQuestionPreviewEnabled !== false,
+    spectatorPlayerAnswersEnabled: settings.spectatorPlayerAnswersEnabled !== false,
     teamAssignmentMode: settings.teamAssignmentMode === "AUTO" ? "AUTO" : "MANUAL",
   };
 }
@@ -188,6 +194,8 @@ function getRoomGameSettings(room: Room | null | undefined): GameSettings {
     teamRevealVoteSeconds: room?.teamRevealVoteSeconds,
     teamGuessVoteSeconds: room?.teamGuessVoteSeconds,
     teamPresenterBlockEnabled: room?.teamPresenterBlockEnabled,
+    spectatorQuestionPreviewEnabled: room?.spectatorQuestionPreviewEnabled,
+    spectatorPlayerAnswersEnabled: room?.spectatorPlayerAnswersEnabled,
     teamAssignmentMode: room?.teamAssignmentMode,
   });
 }
@@ -202,6 +210,8 @@ function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
     left.teamRevealVoteSeconds === right.teamRevealVoteSeconds &&
     left.teamGuessVoteSeconds === right.teamGuessVoteSeconds &&
     left.teamPresenterBlockEnabled === right.teamPresenterBlockEnabled &&
+    left.spectatorQuestionPreviewEnabled === right.spectatorQuestionPreviewEnabled &&
+    left.spectatorPlayerAnswersEnabled === right.spectatorPlayerAnswersEnabled &&
     left.teamAssignmentMode === right.teamAssignmentMode
   );
 }
@@ -1140,6 +1150,35 @@ function GameSettingsPanel({
             {settings.gameMode === "BUZZER_FIRST_CORRECT" ? "固定得分：首个答对 +1" : "固定得分：按答对名次递减，最低 1 分"}
           </div>
         )}
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+            <span>
+              <span className="block text-sm font-medium text-slate-900">允许观战提前看题</span>
+              <span className="mt-1 block text-xs text-[var(--muted)]">可看原图和正确答案</span>
+            </span>
+            <input
+              checked={settings.spectatorQuestionPreviewEnabled}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+              disabled={!canEdit}
+              type="checkbox"
+              onChange={(event) => onChange({ ...settings, spectatorQuestionPreviewEnabled: event.target.checked })}
+            />
+          </label>
+          <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+            <span>
+              <span className="block text-sm font-medium text-slate-900">允许观战查看回答</span>
+              <span className="mt-1 block text-xs text-[var(--muted)]">显示玩家提交内容</span>
+            </span>
+            <input
+              checked={settings.spectatorPlayerAnswersEnabled}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+              disabled={!canEdit}
+              type="checkbox"
+              onChange={(event) => onChange({ ...settings, spectatorPlayerAnswersEnabled: event.target.checked })}
+            />
+          </label>
+        </div>
       </details>
     </div>
   );
@@ -2600,6 +2639,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         teamRevealVoteSeconds: normalizedSettings.teamRevealVoteSeconds,
         teamGuessVoteSeconds: normalizedSettings.teamGuessVoteSeconds,
         teamPresenterBlockEnabled: normalizedSettings.teamPresenterBlockEnabled,
+        spectatorQuestionPreviewEnabled: normalizedSettings.spectatorQuestionPreviewEnabled,
+        spectatorPlayerAnswersEnabled: normalizedSettings.spectatorPlayerAnswersEnabled,
         teamAssignmentMode: normalizedSettings.teamAssignmentMode,
       });
 

@@ -2341,6 +2341,8 @@ export function ImageRevealGame({
   const isQuestionReviewing = isTeamBattleMode
     ? teamBattleState?.phase === "REVIEW"
     : !hasRoundStarted && visibleRevealedBlockCount === visibleBlockCount;
+  const canSpectatorPreviewQuestion = !isSpectator || room.spectatorQuestionPreviewEnabled !== false || isQuestionReviewing;
+  const canSpectatorViewPlayerAnswers = !isSpectator || room.spectatorPlayerAnswersEnabled !== false || isQuestionReviewing;
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
@@ -2898,8 +2900,20 @@ export function ImageRevealGame({
     Boolean(currentQuestion) &&
     !isQuestionReviewing &&
     !imageLoadFailed;
-  const canPreviewSpectatorOriginal = isSpectator && Boolean(currentQuestion) && !imageLoadFailed;
+  const canPreviewSpectatorOriginal = isSpectator && canSpectatorPreviewQuestion && Boolean(currentQuestion) && !imageLoadFailed;
   const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal || canPreviewSpectatorOriginal;
+
+  useEffect(() => {
+    if (!canSpectatorPreviewQuestion) {
+      setIsRevealPreviewOpen(false);
+      setIsSpectatorLabelOpen(false);
+    }
+  }, [canSpectatorPreviewQuestion]);
+
+  useEffect(() => {
+    if (!canSpectatorViewPlayerAnswers) setIsAnswerViewEnabled(false);
+  }, [canSpectatorViewPlayerAnswers]);
+
   const canPlayRoundPromptSound =
     !isPresenter &&
     !isSpectator &&
@@ -3106,7 +3120,11 @@ export function ImageRevealGame({
   let standardTaskDetail = "等待出题人打开图片";
   let standardTaskTone = "border-slate-200 bg-white";
   let spectatorTaskTitle = isQuestionReviewing ? "本题复盘" : "玩家视角";
-  let spectatorTaskDetail = isQuestionReviewing ? "等待切换下一题" : "可随时查看完整原图";
+  let spectatorTaskDetail = isQuestionReviewing
+    ? "等待切换下一题"
+    : room.spectatorQuestionPreviewEnabled === false
+      ? "跟随玩家视角"
+      : "可随时查看完整原图";
 
   if (!isTeamBattleMode) {
     if (isQuestionReviewing) {
@@ -4179,7 +4197,7 @@ export function ImageRevealGame({
     "--image-display-height": imageDisplayHeight ? `${imageDisplayHeight}px` : "78vh",
   } as CSSProperties;
   const canViewPlayerAnswers =
-    !isTeamBattleMode && (isSpectator || (!isPresenter && isCurrentPlayerCorrect));
+    !isTeamBattleMode && ((isSpectator && canSpectatorViewPlayerAnswers) || (!isPresenter && isCurrentPlayerCorrect));
   const showPlayerAnswersInScoreboard =
     canViewPlayerAnswers && isAnswerViewEnabled && !isScoreboardCompact;
 
@@ -4555,7 +4573,7 @@ export function ImageRevealGame({
             </div>
             <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{spectatorTaskTitle}</p>
             <p className="mt-1 text-sm font-medium text-[var(--muted)]">{spectatorTaskDetail}</p>
-            {!isTeamBattleMode && !isQuestionReviewing ? (
+            {!isTeamBattleMode && !isQuestionReviewing && canSpectatorPreviewQuestion ? (
               <p className="mt-3 hidden text-xs font-medium text-[var(--muted)] lg:block">按住 V 可临时查看原图</p>
             ) : null}
           </section>
@@ -4564,7 +4582,7 @@ export function ImageRevealGame({
 
           {!isQuestionReviewing || !isTeamBattleMode ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              {!isTeamBattleMode ? (
+              {!isTeamBattleMode && canSpectatorViewPlayerAnswers ? (
                 <>
                   <PlayerAnswerViewSwitch
                     enabled={isAnswerViewEnabled}
@@ -4576,7 +4594,7 @@ export function ImageRevealGame({
 
               <div className="flex items-center justify-between gap-3">
                 <p className="font-semibold text-slate-950">正确答案</p>
-                {!isQuestionReviewing ? (
+                {!isQuestionReviewing && canSpectatorPreviewQuestion ? (
                   <Button
                     className="h-9 min-w-16 px-3"
                     type="button"
@@ -4587,12 +4605,14 @@ export function ImageRevealGame({
                   </Button>
                 ) : null}
               </div>
-              {isQuestionReviewing || isSpectatorLabelOpen ? (
+              {isQuestionReviewing || (canSpectatorPreviewQuestion && isSpectatorLabelOpen) ? (
                 <p className="mt-3 min-h-6 break-words rounded-md bg-slate-50 px-3 py-2 font-semibold text-slate-950">
                   {currentQuestionLabel || "暂无"}
                 </p>
               ) : (
-                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">已隐藏</p>
+                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
+                  {canSpectatorPreviewQuestion ? "已隐藏" : "复盘后显示"}
+                </p>
               )}
             </section>
           ) : null}
@@ -5356,7 +5376,7 @@ export function ImageRevealGame({
           )
         : null}
 
-      {(isPresenter || isSpectator) && currentQuestion && isRevealPreviewOpen && canRenderPortal
+      {(isPresenter || isSpectator) && canHoldRevealPreview && currentQuestion && isRevealPreviewOpen && canRenderPortal
         ? createPortal(
             <div
               aria-label="原图预览"
