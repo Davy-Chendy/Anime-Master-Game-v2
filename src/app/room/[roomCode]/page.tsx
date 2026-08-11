@@ -1194,7 +1194,7 @@ function GameSettingsPanel({
           </div>
         )}
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div className={`mt-4 grid gap-3 ${settings.gameMode === "TEAM_BATTLE" ? "" : "sm:grid-cols-2"}`}>
           <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
             <span>
               <span className="block text-sm font-medium text-slate-900">允许观战提前看题</span>
@@ -1208,19 +1208,21 @@ function GameSettingsPanel({
               onChange={(event) => onChange({ ...settings, spectatorQuestionPreviewEnabled: event.target.checked })}
             />
           </label>
-          <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
-            <span>
-              <span className="block text-sm font-medium text-slate-900">允许观战查看回答</span>
-              <span className="mt-1 block text-xs text-[var(--muted)]">显示玩家提交内容</span>
-            </span>
-            <input
-              checked={settings.spectatorPlayerAnswersEnabled}
-              className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
-              disabled={!canEdit}
-              type="checkbox"
-              onChange={(event) => onChange({ ...settings, spectatorPlayerAnswersEnabled: event.target.checked })}
-            />
-          </label>
+          {settings.gameMode !== "TEAM_BATTLE" ? (
+            <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+              <span>
+                <span className="block text-sm font-medium text-slate-900">允许观战查看回答</span>
+                <span className="mt-1 block text-xs text-[var(--muted)]">显示玩家提交内容</span>
+              </span>
+              <input
+                checked={settings.spectatorPlayerAnswersEnabled}
+                className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+                disabled={!canEdit}
+                type="checkbox"
+                onChange={(event) => onChange({ ...settings, spectatorPlayerAnswersEnabled: event.target.checked })}
+              />
+            </label>
+          ) : null}
         </div>
       </details>
     </div>
