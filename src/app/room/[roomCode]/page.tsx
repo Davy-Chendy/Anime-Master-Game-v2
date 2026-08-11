@@ -2344,10 +2344,17 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     () => room?.players.find((player) => player.id === playerId) ?? null,
     [playerId, room],
   );
+  const teamChatAvailable = Boolean(
+    room?.status === "PLAYING" &&
+    room.gameMode === "TEAM_BATTLE" &&
+    currentPlayer?.role === "PLAYER" &&
+    room.currentPresenterPlayerId !== playerId
+  );
   const roomChat = useRoomChat({
     roomId: currentPlayer ? room?.id : null,
     playerId,
     players: room?.players ?? [],
+    teamChannelAvailable: teamChatAvailable,
   });
 
   const isHost = Boolean(currentPlayer?.isHost);

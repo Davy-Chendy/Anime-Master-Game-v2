@@ -46,6 +46,7 @@ import type {
   RoomQuestionSource,
   RoomStatus,
   GameMode,
+  TeamBattleTeam,
   RoundSnapshot,
 } from "../src/types/game";
 
@@ -3190,6 +3191,25 @@ export class RoomDurableObjectV3 {
     state.blockConcurrencyWhile(async () => this.runtime.initializeSchema());
   }
 
+  private resolveRoomChatTeamAudience(topic: string, playerId: string) {
+    const aggregate = this.authorityVNext.getAggregate();
+    if (
+      !aggregate ||
+      aggregate.roomId !== getRoomIdFromTopic(topic) ||
+      aggregate.room?.status !== "PLAYING" ||
+      aggregate.gameSession?.gameMode !== "TEAM_BATTLE"
+    ) return null;
+
+    const teams = aggregate.gameSession.teamBattleState?.teams;
+    if (!teams) return null;
+    const team: TeamBattleTeam | null = teams.red.includes(playerId)
+      ? "red"
+      : teams.blue.includes(playerId)
+        ? "blue"
+        : null;
+    return team ? { team, playerIds: new Set(teams[team]) } : null;
+  }
+
   private expireRetiredSocket(socket: WebSocket) {
     try {
       socket.send(JSON.stringify({
@@ -3730,6 +3750,7 @@ export class RoomDurableObjectV3 {
       message,
       sockets: this.state.getWebSockets(),
       rateLimiter: this.roomChatRateLimiter,
+      resolveTeamAudience: (topic, playerId) => this.resolveRoomChatTeamAudience(topic, playerId),
     })) return;
     const receivedAtMs = Math.max(Date.now(), this.lastActionReceivedAtMs + 1);
     this.lastActionReceivedAtMs = receivedAtMs;

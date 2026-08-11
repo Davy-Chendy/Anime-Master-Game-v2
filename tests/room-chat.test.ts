@@ -10,7 +10,7 @@ import {
   type StoredRoomChatMessage,
 } from "../src/lib/roomChat";
 import { ROOM_CHAT_MAX_MESSAGES } from "../src/types/chat";
-import { RoomChatRateLimiter, tryHandleRoomChatMessage } from "../worker/roomChat";
+import { RoomChatRateLimiter, tryHandleRoomChatMessage, type RoomChatTeamAudience } from "../worker/roomChat";
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -47,12 +47,15 @@ function sendChat(
   text: string,
   limiter = new RoomChatRateLimiter(),
   now = 1000,
+  channel?: "room" | "team",
+  resolveTeamAudience?: (topic: string, playerId: string) => RoomChatTeamAudience | null,
 ) {
   return tryHandleRoomChatMessage({
     socket: sender as unknown as WebSocket,
     sockets: sockets as unknown as WebSocket[],
-    message: JSON.stringify({ type: "chat_send", clientMessageId: `client-${now}`, text }),
+    message: JSON.stringify({ type: "chat_send", clientMessageId: `client-${now}`, channel, text }),
     rateLimiter: limiter,
+    resolveTeamAudience,
     now,
   });
 }
@@ -107,6 +110,14 @@ test("room chat validates identity, content length, and byte length", () => {
     rateLimiter: new RoomChatRateLimiter(),
   });
   assert.equal(JSON.parse(sender.sent.at(-1)!).code, "INVALID_MESSAGE");
+
+  tryHandleRoomChatMessage({
+    socket: sender as unknown as WebSocket,
+    sockets: [sender] as unknown as WebSocket[],
+    message: JSON.stringify({ type: "chat_send", clientMessageId: "client-channel", channel: "spectator", text: "无效频道" }),
+    rateLimiter: new RoomChatRateLimiter(),
+  });
+  assert.equal(JSON.parse(sender.sent.at(-1)!).code, "INVALID_MESSAGE");
 });
 
 test("room chat limits each socket to three messages per five seconds", () => {
@@ -129,10 +140,63 @@ test("one inbound message broadcasts once to all 50 same-room sockets only", () 
     const event = JSON.parse(target.sent[0]!);
     assert.equal(event.playerId, "player-0");
     assert.equal(event.topic, "room:one");
+    assert.equal(event.channel, "room");
     assert.equal(event.text, "大家好");
     assert.equal(event.sentAt, 1234);
   }
   assert.equal(otherRoom.sent.length, 0);
+});
+
+test("team chat in a 50-member room broadcasts only to every connection owned by the sender's current team", () => {
+  const red = Array.from({ length: 24 }, (_, index) => socket("room:one", `red-${index}`));
+  const blue = Array.from({ length: 24 }, (_, index) => socket("room:one", `blue-${index}`));
+  const redOneSecondTab = socket("room:one", "red-0");
+  const presenter = socket("room:one", "presenter");
+  const spectator = socket("room:one", "spectator");
+  const otherRoom = socket("room:two", "red-0");
+  const redPlayerIds = new Set(red.map((_, index) => `red-${index}`));
+
+  sendChat(
+    red[0]!,
+    [...red, ...blue, redOneSecondTab, presenter, spectator, otherRoom],
+    "只给红队",
+    new RoomChatRateLimiter(),
+    2000,
+    "team",
+    (topic, playerId) => topic === "room:one" && redPlayerIds.has(playerId)
+      ? { team: "red", playerIds: redPlayerIds }
+      : null,
+  );
+
+  for (const target of [...red, redOneSecondTab]) {
+    assert.equal(target.sent.length, 1);
+    const event = JSON.parse(target.sent[0]!);
+    assert.equal(event.channel, "team");
+    assert.equal(event.team, "red");
+    assert.equal(event.text, "只给红队");
+  }
+  for (const target of [...blue, presenter, spectator, otherRoom]) assert.equal(target.sent.length, 0);
+});
+
+test("presenters, spectators, and unassigned players cannot send team chat", () => {
+  for (const playerId of ["presenter", "spectator", "unassigned"]) {
+    const sender = socket("room:one", playerId);
+    sendChat(sender, [sender], "不能发送", new RoomChatRateLimiter(), 3000, "team", () => null);
+    const event = JSON.parse(sender.sent[0]!);
+    assert.equal(event.type, "chat_error");
+    assert.equal(event.code, "CHANNEL_UNAVAILABLE");
+  }
+});
+
+test("room and team channels share the same per-socket rate limit", () => {
+  const sender = socket("room:one", "red-1");
+  const limiter = new RoomChatRateLimiter();
+  const redAudience = () => ({ team: "red" as const, playerIds: new Set(["red-1"]) });
+  sendChat(sender, [sender], "房间一", limiter, 1000, "room", redAudience);
+  sendChat(sender, [sender], "队内一", limiter, 1001, "team", redAudience);
+  sendChat(sender, [sender], "房间二", limiter, 1002, "room", redAudience);
+  sendChat(sender, [sender], "队内二", limiter, 1003, "team", redAudience);
+  assert.equal(JSON.parse(sender.sent.at(-1)!).code, "RATE_LIMITED");
 });
 
 test("a newly connected socket receives no history but receives future messages", () => {
@@ -167,9 +231,14 @@ test("session history deduplicates and retains the latest 100 messages", () => {
 
 test("session history loads, clears one room, clears all rooms, and tolerates damaged JSON", () => {
   const storage = new MemoryStorage();
-  saveRoomChatMessages("one", [stored(1), stored(2)], storage);
+  const teamMessage = { ...stored(2), channel: "team" as const, team: "red" as const };
+  saveRoomChatMessages("one", [stored(1), teamMessage], storage);
   saveRoomChatMessages("two", [stored(3)], storage);
-  assert.equal(loadRoomChatMessages("one", storage).length, 2);
+  const loaded = loadRoomChatMessages("one", storage);
+  assert.equal(loaded.length, 2);
+  assert.equal(loaded[0]?.channel, undefined);
+  assert.equal(loaded[1]?.channel, "team");
+  assert.equal(loaded[1]?.team, "red");
   clearRoomChatMessages("one", storage);
   assert.deepEqual(loadRoomChatMessages("one", storage), []);
   assert.equal(loadRoomChatMessages("two", storage).length, 1);

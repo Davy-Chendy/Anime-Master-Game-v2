@@ -4,9 +4,11 @@ import {
   ROOM_CHAT_MAX_TEXT_CODE_POINTS,
   type RoomChatErrorCode,
   type RoomChatErrorMessage,
+  type RoomChatChannel,
   type RoomChatMessage,
   type RoomChatSendMessage,
 } from "../src/types/chat";
+import type { TeamBattleTeam } from "../src/types/game";
 
 type RoomChatSocketAttachment = {
   topic?: string;
@@ -16,6 +18,11 @@ type RoomChatSocketAttachment = {
 type RateWindow = {
   startedAt: number;
   count: number;
+};
+
+export type RoomChatTeamAudience = {
+  team: TeamBattleTeam;
+  playerIds: ReadonlySet<string>;
 };
 
 const CHAT_MESSAGE_TYPE_PATTERN = /"type"\s*:\s*"chat_send"/;
@@ -80,9 +87,10 @@ function parseSendMessage(text: string): RoomChatSendMessage | null {
     typeof candidate.clientMessageId !== "string" ||
     candidate.clientMessageId.length < 1 ||
     candidate.clientMessageId.length > 100 ||
+    (candidate.channel !== undefined && candidate.channel !== "room" && candidate.channel !== "team") ||
     typeof candidate.text !== "string"
   ) return null;
-  return { type: "chat_send", clientMessageId: candidate.clientMessageId, text: candidate.text };
+  return { type: "chat_send", clientMessageId: candidate.clientMessageId, channel: candidate.channel, text: candidate.text };
 }
 
 export function tryHandleRoomChatMessage(options: {
@@ -90,6 +98,7 @@ export function tryHandleRoomChatMessage(options: {
   message: string | ArrayBuffer;
   sockets: readonly WebSocket[];
   rateLimiter: RoomChatRateLimiter;
+  resolveTeamAudience?: (topic: string, playerId: string) => RoomChatTeamAudience | null;
   now?: number;
 }) {
   const text = asText(options.message);
@@ -130,18 +139,29 @@ export function tryHandleRoomChatMessage(options: {
     return true;
   }
 
+  const channel: RoomChatChannel = parsed.channel ?? "room";
+  const teamAudience = channel === "team" ? options.resolveTeamAudience?.(topic, playerId) ?? null : null;
+  if (channel === "team" && !teamAudience) {
+    sendError(options.socket, "CHANNEL_UNAVAILABLE", "当前身份不能发送队内消息。", parsed.clientMessageId);
+    return true;
+  }
+
   const outgoing: RoomChatMessage = {
     type: "chat_message",
     messageId: crypto.randomUUID(),
     clientMessageId: parsed.clientMessageId,
     topic,
     playerId,
+    channel,
+    ...(teamAudience ? { team: teamAudience.team } : {}),
     text: normalizedText,
     sentAt: now,
   };
   const payload = JSON.stringify(outgoing);
   for (const target of options.sockets) {
-    if (safeAttachment(target)?.topic !== topic) continue;
+    const targetAttachment = safeAttachment(target);
+    if (targetAttachment?.topic !== topic) continue;
+    if (teamAudience && (!targetAttachment.playerId || !teamAudience.playerIds.has(targetAttachment.playerId))) continue;
     try {
       target.send(payload);
     } catch {

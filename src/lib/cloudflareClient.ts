@@ -5,6 +5,7 @@ import type { RealtimeDelta } from "@/types/game";
 import {
   ROOM_CHAT_MAX_TEXT_BYTES,
   ROOM_CHAT_MAX_TEXT_CODE_POINTS,
+  type RoomChatChannel,
   type RoomChatServerEvent,
 } from "@/types/chat";
 import { clearAuthorityOutboxTopic, commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, syncAuthoritySequence, type AuthorityOutboxItem } from "@/lib/authorityOutbox";
@@ -759,7 +760,7 @@ export function subscribeRoomChat(
   };
 }
 
-export async function sendRoomChatMessage(topic: string, text: string) {
+export async function sendRoomChatMessage(topic: string, text: string, channel: RoomChatChannel = "room") {
   const normalizedText = text.trim();
   if (!normalizedText) throw new Error("请输入聊天内容。");
   if (Array.from(normalizedText).length > ROOM_CHAT_MAX_TEXT_CODE_POINTS) {
@@ -775,6 +776,7 @@ export async function sendRoomChatMessage(topic: string, text: string) {
   socket.send(JSON.stringify({
     type: "chat_send",
     clientMessageId: crypto.randomUUID(),
+    channel,
     text: normalizedText,
   }));
 }

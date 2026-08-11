@@ -9,8 +9,8 @@ import {
   saveRoomChatMessages,
   type StoredRoomChatMessage,
 } from "@/lib/roomChat";
-import { ROOM_CHAT_MAX_TEXT_CODE_POINTS } from "@/types/chat";
-import type { Player } from "@/types/game";
+import { ROOM_CHAT_MAX_TEXT_CODE_POINTS, type RoomChatChannel } from "@/types/chat";
+import type { Player, TeamBattleTeam } from "@/types/game";
 
 export type RoomChatDisplayMode = "closed" | "compact" | "expanded";
 
@@ -50,7 +50,10 @@ export type RoomChatController = {
   unreadCount: number;
   panelHeight: number;
   error: string;
+  channel: RoomChatChannel;
+  teamChannelAvailable: boolean;
   send: (text: string) => Promise<void>;
+  setChannel: (channel: RoomChatChannel) => void;
   setMode: (mode: RoomChatDisplayMode) => void;
   setPanelHeight: (height: number) => void;
   commitPanelHeight: (height: number) => void;
@@ -61,13 +64,15 @@ export function useRoomChat(options: {
   roomId?: string | null;
   playerId: string;
   players: readonly Player[];
+  teamChannelAvailable?: boolean;
 }): RoomChatController {
-  const { roomId, playerId, players } = options;
+  const { roomId, playerId, players, teamChannelAvailable = false } = options;
   const [messages, setMessages] = useState<StoredRoomChatMessage[]>([]);
   const [mode, setDisplayMode] = useState<RoomChatDisplayMode>("compact");
   const [unreadCount, setUnreadCount] = useState(0);
   const [panelHeight, setPanelHeightState] = useState(loadPanelHeight);
   const [error, setError] = useState("");
+  const [channel, setChannelState] = useState<RoomChatChannel>("room");
   const playersRef = useRef(players);
   const modeRef = useRef(mode);
   playersRef.current = players;
@@ -80,6 +85,10 @@ export function useRoomChat(options: {
   }, [roomId]);
 
   useEffect(() => {
+    setChannelState(teamChannelAvailable ? "team" : "room");
+  }, [roomId, teamChannelAvailable]);
+
+  useEffect(() => {
     if (!roomId || !playerId) return;
     const topic = `room:${roomId}`;
     return subscribeRoomChat(topic, (event) => {
@@ -89,7 +98,7 @@ export function useRoomChat(options: {
       }
       if (event.topic !== topic) return;
       const nickname = playersRef.current.find((player) => player.id === event.playerId)?.nickname ?? "已离开玩家";
-      const stored: StoredRoomChatMessage = { ...event, nickname };
+      const stored: StoredRoomChatMessage = { ...event, channel: event.channel ?? "room", nickname };
       setMessages((current) => {
         const next = appendRoomChatMessage(current, stored);
         saveRoomChatMessages(roomId, next);
@@ -113,8 +122,12 @@ export function useRoomChat(options: {
   const send = useCallback(async (text: string) => {
     if (!roomId) throw new Error("聊天房间尚未就绪。");
     setError("");
-    await sendRoomChatMessage(`room:${roomId}`, text);
-  }, [roomId]);
+    await sendRoomChatMessage(`room:${roomId}`, text, channel);
+  }, [channel, roomId]);
+
+  const setChannel = useCallback((nextChannel: RoomChatChannel) => {
+    setChannelState(nextChannel === "team" && !teamChannelAvailable ? "room" : nextChannel);
+  }, [teamChannelAvailable]);
 
   const setPanelHeight = useCallback((height: number) => {
     const viewportHeight = typeof window === "undefined" ? 800 : window.innerHeight;
@@ -134,7 +147,10 @@ export function useRoomChat(options: {
     unreadCount,
     panelHeight,
     error,
+    channel,
+    teamChannelAvailable,
     send,
+    setChannel,
     setMode,
     setPanelHeight,
     commitPanelHeight,
@@ -144,6 +160,20 @@ export function useRoomChat(options: {
 
 function formatMessageTime(timestamp: number) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(timestamp);
+}
+
+function RoomChatChannelLabel({ channel, team }: { channel?: RoomChatChannel; team?: TeamBattleTeam }) {
+  const isTeam = channel === "team";
+  const tone = !isTeam
+    ? "bg-slate-200 text-slate-700"
+    : team === "red"
+      ? "bg-red-100 text-red-800"
+      : "bg-sky-100 text-sky-800";
+  return (
+    <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-bold ${tone}`}>
+      {isTeam ? "队内" : "房间"}
+    </span>
+  );
 }
 
 export function RoomChatBar({
@@ -256,6 +286,7 @@ export function RoomChatBar({
           >
             {controller.messages.length > 0 ? controller.messages.map((message) => (
               <div className="flex min-w-0 items-baseline gap-2 px-3 py-1 text-base leading-6 transition hover:bg-[oklch(0.955_0.003_250_/_0.72)]" key={message.messageId} title={`${message.nickname}：${message.text}`}>
+                <RoomChatChannelLabel channel={message.channel} team={message.team} />
                 <span className={`max-w-28 shrink-0 truncate font-semibold ${message.playerId === playerId ? "text-rose-700" : "text-slate-700"}`}>{message.nickname}：</span>
                 <span className="min-w-0 flex-1 truncate text-slate-950">{message.text}</span>
                 <time className="shrink-0 text-sm tabular-nums text-[var(--muted)]">{formatMessageTime(message.sentAt)}</time>
@@ -297,7 +328,10 @@ export function RoomChatBar({
             <button aria-label="展开聊天记录" className="flex min-w-0 flex-1 items-stretch text-left focus-visible:outline-none" type="button" onClick={() => controller.setMode("expanded")}>
               {recentMessages.length > 0 ? recentMessages.map((message, index) => (
                 <span className={`flex min-w-0 flex-1 items-center px-3 text-base text-slate-700 ${index > 0 ? "border-l border-[var(--line)]" : ""}`} key={message.messageId}>
-                  <span className="truncate"><span className="font-semibold">{message.nickname}：</span>{message.text}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <RoomChatChannelLabel channel={message.channel} team={message.team} />
+                    <span className="truncate"><span className="font-semibold">{message.nickname}：</span>{message.text}</span>
+                  </span>
                 </span>
               )) : <span className="flex min-w-0 flex-1 items-center px-3 text-base text-[var(--muted)]">还没有聊天消息</span>}
             </button>
@@ -309,8 +343,23 @@ export function RoomChatBar({
         )}
 
         <form className="flex h-14 min-w-0 items-center rounded-lg border border-[var(--line)] bg-white p-1 transition focus-within:border-[var(--primary)] focus-within:ring-4 focus-within:ring-rose-100" onSubmit={handleSubmit} onKeyDown={(event) => event.stopPropagation()}>
+          {controller.teamChannelAvailable ? (
+            <div className="flex shrink-0 rounded-md bg-slate-100 p-0.5" aria-label="聊天频道" role="group">
+              {(["team", "room"] as const).map((channel) => (
+                <button
+                  aria-pressed={controller.channel === channel}
+                  className={`h-9 rounded px-2 text-sm font-semibold transition ${controller.channel === channel ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
+                  key={channel}
+                  type="button"
+                  onClick={() => controller.setChannel(channel)}
+                >
+                  {channel === "team" ? "队内" : "房间"}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <input
-            aria-label="房间聊天内容"
+            aria-label={controller.channel === "team" ? "队内聊天内容" : "房间聊天内容"}
             className="h-12 min-w-0 flex-1 border-0 bg-transparent px-3 text-base outline-none placeholder:text-slate-400"
             name="roomChatText"
             placeholder="输入消息"

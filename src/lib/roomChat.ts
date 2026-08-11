@@ -24,6 +24,8 @@ function isStoredMessage(value: unknown): value is StoredRoomChatMessage {
     typeof message.clientMessageId === "string" &&
     typeof message.topic === "string" &&
     typeof message.playerId === "string" &&
+    (message.channel === undefined || message.channel === "room" || message.channel === "team") &&
+    (message.team === undefined || message.team === "red" || message.team === "blue") &&
     typeof message.nickname === "string" &&
     typeof message.text === "string" &&
     typeof message.sentAt === "number" &&

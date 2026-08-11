@@ -3123,7 +3123,7 @@ export function ImageRevealGame({
   let spectatorTaskDetail = isQuestionReviewing
     ? "等待切换下一题"
     : room.spectatorQuestionPreviewEnabled === false
-      ? "跟随玩家视角"
+      ? "房主已关闭提前看题"
       : "可随时查看完整原图";
 
   if (!isTeamBattleMode) {
@@ -4582,14 +4582,21 @@ export function ImageRevealGame({
 
           {!isQuestionReviewing || !isTeamBattleMode ? (
             <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              {!isTeamBattleMode && canSpectatorViewPlayerAnswers ? (
-                <>
-                  <PlayerAnswerViewSwitch
-                    enabled={isAnswerViewEnabled}
-                    onToggle={() => setIsAnswerViewEnabled((isEnabled) => !isEnabled)}
-                  />
-                  <div className="my-3 h-px bg-[var(--line)]" />
-                </>
+              {!isTeamBattleMode ? (
+                canSpectatorViewPlayerAnswers ? (
+                  <>
+                    <PlayerAnswerViewSwitch
+                      enabled={isAnswerViewEnabled}
+                      onToggle={() => setIsAnswerViewEnabled((isEnabled) => !isEnabled)}
+                    />
+                    <div className="my-3 h-px bg-[var(--line)]" />
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium text-[var(--muted)]">房主已关闭查看回答</p>
+                    <div className="my-3 h-px bg-[var(--line)]" />
+                  </>
+                )
               ) : null}
 
               <div className="flex items-center justify-between gap-3">
