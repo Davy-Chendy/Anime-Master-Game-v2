@@ -325,6 +325,20 @@ export function isBuzzerAnswerReadyForJudging(
   return getBuzzerAnswerStabilityDelayMs(answer, nowMs) === 0;
 }
 
+export function getRoundActionProgress(
+  participantIds: readonly string[],
+  actedPlayerIds: ReadonlySet<string>,
+) {
+  const submittedCount = participantIds.filter((playerId) => actedPlayerIds.has(playerId)).length;
+  const totalCount = participantIds.length;
+
+  return {
+    submittedCount,
+    totalCount,
+    progress: totalCount > 0 ? (submittedCount / totalCount) * 100 : 0,
+  };
+}
+
 function getTeamName(team: TeamBattleTeam) {
   return team === "red" ? "红队" : "蓝队";
 }
@@ -3096,14 +3110,13 @@ export function ImageRevealGame({
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? `${rankedNextScore} 分`
         : `${displayScore} 分`;
-  const rawStandardSubmittedCount = isBuzzerMode
-    ? eligibleGuesserIds.filter((guesserId) => buzzerActionPlayerSet.has(guesserId)).length
-    : eligibleGuesserIds.filter((guesserId) => currentRoundAnswerPlayerSet.has(guesserId)).length;
-  const standardSubmittedCount = isRoundEnded
-    ? Math.max(rawStandardSubmittedCount, activeGuesserIds.length)
-    : rawStandardSubmittedCount;
-  const standardTotalCount = Math.max(activeGuesserIds.length, standardSubmittedCount);
-  const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
+  const standardActionProgress = getRoundActionProgress(
+    currentRoundParticipantIds,
+    isBuzzerMode ? buzzerActionPlayerSet : currentRoundAnswerPlayerSet,
+  );
+  const standardSubmittedCount = standardActionProgress.submittedCount;
+  const standardTotalCount = standardActionProgress.totalCount;
+  const standardProgress = standardActionProgress.progress;
   const isBuzzerSettleToReview =
     isBuzzerMode &&
     (currentRound >= maxRevealRounds ||

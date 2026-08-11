@@ -10,7 +10,7 @@ import { decodeQuestionSetManifest, encodeQuestionSetManifest } from "../worker/
 import { decodeRoomState, encodeRoomState } from "../worker/roomStateManifest";
 import { removePlayerFromTeamBattleState } from "../worker/gameService";
 import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
-import { getBuzzerAnswerStabilityDelayMs, getRemainingSeconds, isBuzzerAnswerReadyForJudging, isGameSessionPositionStale, shouldAcceptServerClock } from "../src/components/ImageRevealGame";
+import { getBuzzerAnswerStabilityDelayMs, getRemainingSeconds, getRoundActionProgress, isBuzzerAnswerReadyForJudging, isGameSessionPositionStale, shouldAcceptServerClock } from "../src/components/ImageRevealGame";
 import type { DbQuestionSet, GameBootstrapSnapshot, GameSession, Player, Question, QuestionSet, Room } from "../src/types/game";
 
 class Cursor<T extends Record<string, unknown>> {
@@ -2129,6 +2129,22 @@ test("legacy journal recovery does not switch teams while TEAM_BATTLE waits on a
   assert.equal(recovered.activeTeam, "red");
   assert.deepEqual(recovered.previousTurnAction, { team: "red", type: "skip" });
   assert.equal(recovered.voteDeadlineAt, null);
+});
+
+test("personal-mode progress keeps current-round correct players in the denominator", () => {
+  const participants = ["p0", "p1", "p2", "p3", "p4", "p5", "p6"];
+  const beforeForfeit = getRoundActionProgress(participants, new Set(["p0", "p1", "p2", "p3", "p4", "p5"]));
+
+  assert.deepEqual(beforeForfeit, { submittedCount: 6, totalCount: 7, progress: (6 / 7) * 100 });
+
+  const afterForfeit = getRoundActionProgress(participants, new Set(participants));
+  assert.deepEqual(afterForfeit, { submittedCount: 7, totalCount: 7, progress: 100 });
+});
+
+test("personal-mode progress does not synthesize submissions at the client deadline", () => {
+  const progress = getRoundActionProgress(["p0", "p1", "p2"], new Set(["p0", "p1"]));
+
+  assert.deepEqual(progress, { submittedCount: 2, totalCount: 3, progress: (2 / 3) * 100 });
 });
 
 test("legacy journal recovery preserves the correct TEAM_BATTLE guess proposer", () => {
