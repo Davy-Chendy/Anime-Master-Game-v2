@@ -51,6 +51,7 @@ export type RoomChatController = {
   panelHeight: number;
   error: string;
   channel: RoomChatChannel;
+  channelLabelsVisible: boolean;
   teamChannelAvailable: boolean;
   send: (text: string) => Promise<void>;
   setChannel: (channel: RoomChatChannel) => void;
@@ -64,9 +65,10 @@ export function useRoomChat(options: {
   roomId?: string | null;
   playerId: string;
   players: readonly Player[];
+  channelLabelsVisible?: boolean;
   teamChannelAvailable?: boolean;
 }): RoomChatController {
-  const { roomId, playerId, players, teamChannelAvailable = false } = options;
+  const { roomId, playerId, players, channelLabelsVisible = false, teamChannelAvailable = false } = options;
   const [messages, setMessages] = useState<StoredRoomChatMessage[]>([]);
   const [mode, setDisplayMode] = useState<RoomChatDisplayMode>("compact");
   const [unreadCount, setUnreadCount] = useState(0);
@@ -148,6 +150,7 @@ export function useRoomChat(options: {
     panelHeight,
     error,
     channel,
+    channelLabelsVisible,
     teamChannelAvailable,
     send,
     setChannel,
@@ -171,7 +174,7 @@ function RoomChatChannelLabel({ channel, team }: { channel?: RoomChatChannel; te
       : "bg-sky-100 text-sky-800";
   return (
     <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-bold ${tone}`}>
-      {isTeam ? "队内" : "房间"}
+      {isTeam ? (team === "red" ? "红队" : team === "blue" ? "蓝队" : "队内") : "房间"}
     </span>
   );
 }
@@ -286,9 +289,11 @@ export function RoomChatBar({
           >
             {controller.messages.length > 0 ? controller.messages.map((message) => (
               <div className="flex min-w-0 items-baseline gap-2 px-3 py-1 text-base leading-6 transition hover:bg-[oklch(0.955_0.003_250_/_0.72)]" key={message.messageId} title={`${message.nickname}：${message.text}`}>
-                <RoomChatChannelLabel channel={message.channel} team={message.team} />
-                <span className={`max-w-28 shrink-0 truncate font-semibold ${message.playerId === playerId ? "text-rose-700" : "text-slate-700"}`}>{message.nickname}：</span>
-                <span className="min-w-0 flex-1 break-words whitespace-normal text-slate-950">{message.text}</span>
+                {controller.channelLabelsVisible ? <RoomChatChannelLabel channel={message.channel} team={message.team} /> : null}
+                <span className="min-w-0 flex-1 break-words whitespace-normal text-slate-950">
+                  <span className={`font-semibold ${message.playerId === playerId ? "text-rose-700" : "text-slate-700"}`}>{message.nickname}：</span>
+                  {message.text}
+                </span>
                 <time className="shrink-0 text-sm tabular-nums text-[var(--muted)]">{formatMessageTime(message.sentAt)}</time>
               </div>
             )) : (
@@ -329,7 +334,7 @@ export function RoomChatBar({
               {recentMessages.length > 0 ? recentMessages.map((message, index) => (
                 <span className={`flex min-w-0 flex-1 items-center px-3 text-base text-slate-700 ${index > 0 ? "border-l border-[var(--line)]" : ""}`} key={message.messageId}>
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <RoomChatChannelLabel channel={message.channel} team={message.team} />
+                    {controller.channelLabelsVisible ? <RoomChatChannelLabel channel={message.channel} team={message.team} /> : null}
                     <span className="truncate"><span className="font-semibold">{message.nickname}：</span>{message.text}</span>
                   </span>
                 </span>

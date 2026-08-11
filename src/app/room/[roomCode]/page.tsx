@@ -2344,9 +2344,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     () => room?.players.find((player) => player.id === playerId) ?? null,
     [playerId, room],
   );
+  const isTeamChatContext = room?.status === "PLAYING" && room.gameMode === "TEAM_BATTLE";
   const teamChatAvailable = Boolean(
-    room?.status === "PLAYING" &&
-    room.gameMode === "TEAM_BATTLE" &&
+    isTeamChatContext &&
     currentPlayer?.role === "PLAYER" &&
     room.currentPresenterPlayerId !== playerId
   );
@@ -2354,6 +2354,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     roomId: currentPlayer ? room?.id : null,
     playerId,
     players: room?.players ?? [],
+    channelLabelsVisible: isTeamChatContext,
     teamChannelAvailable: teamChatAvailable,
   });
 
