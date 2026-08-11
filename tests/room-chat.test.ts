@@ -9,7 +9,7 @@ import {
   saveRoomChatMessages,
   type StoredRoomChatMessage,
 } from "../src/lib/roomChat";
-import { ROOM_CHAT_MAX_MESSAGES } from "../src/types/chat";
+import { ROOM_CHAT_MAX_MESSAGES, ROOM_CHAT_MAX_TEXT_CODE_POINTS } from "../src/types/chat";
 import { RoomChatRateLimiter, tryHandleRoomChatMessage, type RoomChatTeamAudience } from "../worker/roomChat";
 
 class MemoryStorage implements Storage {
@@ -93,9 +93,9 @@ test("room chat validates identity, content length, and byte length", () => {
   const sender = socket();
   sendChat(sender, [sender], "   ");
   assert.equal(JSON.parse(sender.sent.at(-1)!).code, "INVALID_MESSAGE");
-  sendChat(sender, [sender], "a".repeat(201));
+  sendChat(sender, [sender], "a".repeat(ROOM_CHAT_MAX_TEXT_CODE_POINTS + 1));
   assert.equal(JSON.parse(sender.sent.at(-1)!).code, "INVALID_MESSAGE");
-  sendChat(sender, [sender], "界".repeat(200));
+  sendChat(sender, [sender], "界".repeat(ROOM_CHAT_MAX_TEXT_CODE_POINTS));
   assert.equal(JSON.parse(sender.sent.at(-1)!).type, "chat_message");
 
   const oversizedEnvelope = JSON.stringify({

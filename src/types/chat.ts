@@ -1,7 +1,7 @@
 import type { TeamBattleTeam } from "./game";
 
 export const ROOM_CHAT_MAX_MESSAGES = 100;
-export const ROOM_CHAT_MAX_TEXT_CODE_POINTS = 200;
+export const ROOM_CHAT_MAX_TEXT_CODE_POINTS = 50;
 export const ROOM_CHAT_MAX_TEXT_BYTES = 1024;
 export const ROOM_CHAT_MAX_ENVELOPE_BYTES = 2048;
 

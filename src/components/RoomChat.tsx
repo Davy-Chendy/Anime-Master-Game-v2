@@ -288,7 +288,7 @@ export function RoomChatBar({
               <div className="flex min-w-0 items-baseline gap-2 px-3 py-1 text-base leading-6 transition hover:bg-[oklch(0.955_0.003_250_/_0.72)]" key={message.messageId} title={`${message.nickname}：${message.text}`}>
                 <RoomChatChannelLabel channel={message.channel} team={message.team} />
                 <span className={`max-w-28 shrink-0 truncate font-semibold ${message.playerId === playerId ? "text-rose-700" : "text-slate-700"}`}>{message.nickname}：</span>
-                <span className="min-w-0 flex-1 truncate text-slate-950">{message.text}</span>
+                <span className="min-w-0 flex-1 break-words whitespace-normal text-slate-950">{message.text}</span>
                 <time className="shrink-0 text-sm tabular-nums text-[var(--muted)]">{formatMessageTime(message.sentAt)}</time>
               </div>
             )) : (
