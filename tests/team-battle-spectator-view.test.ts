@@ -43,3 +43,22 @@ test("team battle review renders the correct guess proposer in the visible revie
     "expected the proposer to render in the shared review panel reached by every TEAM_BATTLE viewer",
   );
 });
+
+test("team battle can open the shared previous-question review", () => {
+  const source = readFileSync(new URL("../src/components/ImageRevealGame.tsx", import.meta.url), "utf8");
+  const handlerStart = source.indexOf("function handleOpenPreviousQuestionReview");
+  const handlerEnd = source.indexOf("\n  }", handlerStart);
+  const footerStart = source.indexOf('<div className="grid items-center gap-3 lg:grid-cols-6">');
+  const reviewButton = source.indexOf("回顾上题", footerStart);
+
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, "expected the previous-question review handler");
+  assert.ok(
+    !source.slice(handlerStart, handlerEnd).includes("isTeamBattleMode"),
+    "expected the previous-question review handler to allow TEAM_BATTLE",
+  );
+  assert.ok(footerStart >= 0 && reviewButton > footerStart, "expected the shared footer to render the review button");
+  assert.ok(
+    !source.slice(footerStart, reviewButton).includes("!isTeamBattleMode"),
+    "expected the review button to render in TEAM_BATTLE",
+  );
+});
