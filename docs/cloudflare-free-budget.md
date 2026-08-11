@@ -4,14 +4,14 @@
 
 本项目按 Cloudflare Free 方案设计。本文件记录当前官方额度、项目自己的安全预算和修改时的审查规则，避免功能正确但因请求或存储放大而无法运行。
 
-官方额度会变化。以下数字核对于 **2026-07-28**；修改计量链路或引用具体额度前，应重新查询文末官方链接。额度通常由账号共享，不能假设每个房间、DO 或数据库各有一份。
+官方额度会变化。以下数字核对于 **2026-08-11**；修改计量链路或引用具体额度前，应重新查询文末官方链接。额度通常由账号共享，不能假设每个房间、DO 或数据库各有一份。
 
 ## 当前官方 Free 额度
 
 | 组件 | Free 额度 | 计量提醒 |
 | --- | ---: | --- |
 | Workers | 100,000 动态请求/天 | 每次调用最多 10ms CPU；静态资源不进入 Worker 时不计动态请求 |
-| Durable Objects 请求 | 100,000/天 | 包含连接、RPC、Alarm；入站 WebSocket 消息按 20:1 折算，出站消息和协议 ping 不收费 |
+| Durable Objects 请求 | 100,000/天 | 包含连接、RPC、Alarm；入站 WebSocket 消息按 20:1 计入 request billing，出站消息和协议 ping 不收费 |
 | Durable Objects Duration | 13,000 GB-s/天 | Hibernation 可停止空闲 WebSocket DO 的 duration 计量 |
 | DO SQLite 行读取 | 5,000,000 行/天 | 扫描行按实际读取计量 |
 | DO SQLite 行写入 | 100,000 行/天 | INSERT/UPDATE/DELETE 及索引维护都可能计入 |
@@ -24,6 +24,8 @@
 | Pages | 500 次构建/月 | Free 同时 1 个构建，单次最长 20 分钟 |
 
 R2、Images、Pages 是月额度，不应强行换算成“每日重置”。Pages Functions 和 `/api/*` 仍按 Workers 请求计量。
+
+**DO 计量口径提醒：** 官方 pricing 文档明确说明，入站 WebSocket 消息按 20:1 计入 Durable Objects request billing；例如 100 万条消息按 5 万次 DO 请求计算。该折算不改变 Analytics 中的原始 invocation，因此日报必须同时保留原始量和计费当量，但 Free 100,000/天请求包含量应使用计费当量判断。若超额邮件、Dashboard Usage 与 GraphQL 计费估算不一致，不得仅凭原始 invocation 断定 DO 越额，应取得账户最终计量或向 Cloudflare Support 核实。
 
 ## 当前极端单局基线
 
@@ -182,11 +184,11 @@ JSONL/图片链接导入先在 Worker 中抓取并写入 R2，再把已准备图
 - 客户端忽略与上次已提交内容完全相同的重复提交；服务端把相同投票识别为 no-op，不增加 dirty action。
 - 除全员首次提交完成触发的单次5秒确认期外，投票修改不得调用 `setAlarm()`，避免频繁修改造成 Alarm 反复重排和额外存储写入。
 
-团队倒计时上线后应按单局记录并复核：投票 mutation 数、DO 请求折算、Alarm 设置/执行/重试次数、checkpoint 次数及 changed rows、最大 active game/Attachment 体积、广播次数/字节和最终 D1 写入。若一局开销明显高于预算基线，再决定是否启用上述提交合并，或增加最大团队回合数等游戏规则限制。
+团队倒计时上线后应按单局记录并复核：投票 mutation 数、DO 原始请求和请求折算、Alarm 设置/执行/重试次数、checkpoint 次数及 changed rows、最大 active game/Attachment 体积、广播次数/字节和最终 D1 写入。若一局开销明显高于预算基线，再决定是否启用上述提交合并，或增加最大团队回合数等游戏规则限制。
 
 当前计量模型为：出题人禁选是默认关闭的高级设置。默认路径在题目建立时直接设置首个选格 Alarm，不产生额外入站 mutation、广播或 checkpoint；开启后每题禁选只在出题人确认时产生1个 WebSocket mutation、1次小状态广播和1行 phase-boundary checkpoint，不设置独立 Alarm，也不写 D1。首个选格 Alarm 延后到禁选完成时设置，因此不增加投票阶段的 Alarm 总数。每个投票阶段设置并执行一个 Alarm；若全员提前提交且剩余超过5秒，该阶段先增加一次1行 active-game checkpoint，再最多额外 `setAlarm()` 一次，后续修改不再重排。deadline 阶段边界仍强制 checkpoint，游戏中 D1 写入保持0。若一道题发生 R 次选格和 G 次猜测，其中 C 次猜测以“不猜”或猜错继续游戏（`C ≤ G`），则 Alarm 执行与 deadline checkpoint 均约为 `R + G` 次，另有 C 次出题人回合确认 mutation/checkpoint；开启禁选时再各加1次。全员均提前完成时，Alarm 设置最多为 `2 × (R + G)`，默认阶段 checkpoint 最多为 `2 × (R + G) + C`，开启禁选时再加1。回合结算本身不设置 Alarm；仅出题人的 `advanceTeamBattleTurn` 产生1次小广播，50名玩家不会形成入站请求放大。
 
-为吸收本地运行时及平台可能出现的 Alarm 短暂触发抖动，每个团队投票阶段在 deadline 过去1秒仍未收到阶段广播时，只允许出题人客户端发送一次 `finalizeTeamBattleVote` 兜底 mutation；普通玩家不会共同触发，Room DO 仍复核出题人身份和权威 deadline。兜底成功时它替代本阶段尚未执行的 Alarm 完成同一次 phase-boundary checkpoint，并把物理 Alarm 重排到下一阶段，因此不增加 D1、阶段 checkpoint 或 Alarm 执行；最坏只增加 `R + G` 条入站 WebSocket 消息。按一题10次选格+10次猜测为20条，50人不会放大；若极端按30题均达到该回合数，则每局最多600条、每天60局36,000条，按20:1折算约1,800个 DO 请求，占日硬额度1.8%。Alarm 在1秒内正常执行时兜底不会发送。
+为吸收本地运行时及平台可能出现的 Alarm 短暂触发抖动，每个团队投票阶段在 deadline 过去1秒仍未收到阶段广播时，只允许出题人客户端发送一次 `finalizeTeamBattleVote` 兜底 mutation；普通玩家不会共同触发，Room DO 仍复核出题人身份和权威 deadline。兜底成功时它替代本阶段尚未执行的 Alarm 完成同一次 phase-boundary checkpoint，并把物理 Alarm 重排到下一阶段，因此不增加 D1、阶段 checkpoint 或 Alarm 执行；最坏只增加 `R + G` 条入站 WebSocket 消息。按一题10次选格+10次猜测为20条，50人不会放大；若极端按30题均达到该回合数，则每局最多600条、每天60局36,000条，按20:1折算约1,800个 DO 请求，占日额度1.8%。Alarm 在1秒内正常执行时兜底不会发送。
 
 按团队模式50人×30题估算，默认关闭禁选时上述额外开销均为0。开启后禁选阶段额外产生30个入站 mutation、30次小广播和30行 DO SQLite checkpoint，WebSocket 入站按20:1折算约1.5个 DO 请求；不增加 D1、图片转换或 Alarm 执行。每天60局均开启时增加1,800个入站 mutation、1,800次小广播和1,800行 DO SQLite，折算约90个 DO 请求，DO SQLite 日硬额度占比1.8%。重连只恢复已 checkpoint 的禁选结果；Outbox 重放由 actionId/clientSeq 幂等去重，不会重复应用或新增无界写入。
 

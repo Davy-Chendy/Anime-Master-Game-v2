@@ -9,6 +9,9 @@ import {
 } from "@/types/chat";
 import { clearAuthorityOutboxTopic, commitAuthorityOutbox, discardSupersededAuthorityOutbox, enqueueAuthorityMutation, listAuthorityOutbox, syncAuthoritySequence, type AuthorityOutboxItem } from "@/lib/authorityOutbox";
 import { ROOM_VERSION_EXPIRED_ERROR_CODE, ROOM_VERSION_EXPIRED_EVENT } from "@/lib/roomRuntime";
+import { GameRpcError, readGameRpcResponse } from "@/lib/gameRpcResponse";
+
+export { GameRpcError } from "@/lib/gameRpcResponse";
 
 type ChangeMessage = {
   type: "change";
@@ -60,17 +63,6 @@ type TopicState = {
   resolveReady?: () => void;
   terminalErrorCode: string | null;
 };
-
-export class GameRpcError extends Error {
-  constructor(
-    message: string,
-    public readonly code?: string,
-    public readonly status?: number,
-  ) {
-    super(message);
-    this.name = "GameRpcError";
-  }
-}
 
 export function isRoomVersionExpiredError(error: unknown) {
   return error instanceof GameRpcError && error.code === ROOM_VERSION_EXPIRED_ERROR_CODE;
@@ -638,15 +630,7 @@ async function httpRpc<T>(name: string, args: unknown[]) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, args }),
   });
-  const payload = await response.json().catch(() => null) as {
-    data?: T;
-    error?: string;
-    code?: string;
-    authoritySequence?: AuthoritySequenceHint;
-  } | null;
-  if (!payload) {
-    throw new GameRpcError("游戏服务响应异常，请稍后重试。", "INVALID_RESPONSE", response.status);
-  }
+  const payload = await readGameRpcResponse<T>(response);
   const hint = payload.authoritySequence;
   if (hint && hint.gameId && hint.actorId && Number.isInteger(hint.committedSeq) && hint.committedSeq >= 0) {
     await syncAuthoritySequence(hint.gameId, hint.actorId, hint.committedSeq);
