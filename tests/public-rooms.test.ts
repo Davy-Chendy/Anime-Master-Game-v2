@@ -12,6 +12,8 @@ type Row = {
   lobby_game_mode: "ROUND_REVEAL";
   member_count: number;
   spectator_count: number;
+  lobby_player_capacity: number;
+  lobby_spectator_capacity: number;
   prepared_question_source: "MANUAL" | null;
   created_at: string;
   activity_at: string;
@@ -31,7 +33,7 @@ function room(
   id: string,
   status: Status,
   updatedAt: string,
-  memberCount = 1,
+  playerCount = 1,
   questionSource: Row["prepared_question_source"] = status === "LOBBY" ? null : "MANUAL",
   spectatorCount = 0,
 ): Row {
@@ -41,8 +43,10 @@ function room(
     room_name: id,
     game_status: status,
     lobby_game_mode: "ROUND_REVEAL",
-    member_count: memberCount,
+    member_count: playerCount,
     spectator_count: spectatorCount,
+    lobby_player_capacity: 50,
+    lobby_spectator_capacity: 50,
     prepared_question_source: questionSource,
     created_at: updatedAt,
     activity_at: updatedAt,
@@ -109,7 +113,7 @@ function createResponseCache() {
 
 test("public room directory filters every status by authoritative one-hour activity", async () => {
   const rows = [
-    room("playing", "PLAYING", "2026-08-09T07:00:00Z", 3),
+    { ...room("playing", "PLAYING", "2026-08-09T07:00:00Z", 3), lobby_player_capacity: 10 },
     room("setup-ready", "QUESTION_SETUP", "2026-08-09T09:45:00Z", 2, "MANUAL", 1),
     room("setup-preparing", "QUESTION_SETUP", "2026-08-09T09:44:00Z", 2, null),
     room("lobby-fresh", "LOBBY", "2026-08-09T09:40:00Z"),
@@ -121,15 +125,17 @@ test("public room directory filters every status by authoritative one-hour activ
   const { env, fetchedTopics, boundQueries } = createEnv([rows], {
     "room:playing": Response.json({
       status: "PLAYING",
-      memberCount: 12,
+      playerCount: 12,
       spectatorCount: 3,
+      playerCapacity: 20,
+      spectatorCapacity: 30,
       updatedAt: "2026-08-09T09:50:00Z",
       currentQuestionIndex: 6,
       questionCount: 30,
     }),
     "room:result": Response.json({
       status: "GAME_RESULT",
-      memberCount: 6,
+      playerCount: 6,
       spectatorCount: 2,
       updatedAt: "2026-08-09T09:55:00Z",
       currentQuestionIndex: 29,
@@ -141,9 +147,11 @@ test("public room directory filters every status by authoritative one-hour activ
   assert.deepEqual(page.rooms.map(({ id }) => id), ["playing", "setup-ready", "setup-preparing", "lobby-fresh", "lobby-boundary", "result"]);
   assert.equal(page.nextCursor, null);
   assert.deepEqual(fetchedTopics.sort(), ["room:playing", "room:result"]);
-  assert.equal(page.rooms[0].memberCount, 12);
+  assert.equal(page.rooms[0].playerCount, 12);
   assert.equal(page.rooms[0].spectatorCount, 3);
-  assert.equal(page.rooms[0].isMemberCountApproximate, false);
+  assert.equal(page.rooms[0].playerCapacity, 20);
+  assert.equal(page.rooms[0].spectatorCapacity, 30);
+  assert.equal(page.rooms[0].isCountApproximate, false);
   assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:50:00Z");
   assert.equal(page.rooms[0].currentQuestionIndex, 6);
   assert.equal(page.rooms[0].questionCount, 30);
@@ -163,7 +171,7 @@ test("public room directory falls back safely when presence is unavailable or in
     "room:playing-error-fresh": new Error("temporary failure"),
     "room:playing-invalid-fresh": Response.json({
       status: "PLAYING",
-      memberCount: 8,
+      playerCount: 8,
       updatedAt: "not-a-time",
       currentQuestionIndex: 30,
       questionCount: 30,
@@ -174,13 +182,13 @@ test("public room directory falls back safely when presence is unavailable or in
   const page = await listPublicRooms(env, null, NOW);
   assert.deepEqual(page.rooms.map(({ id }) => id), ["playing-error-fresh", "playing-invalid-fresh"]);
   assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:45:00Z");
-  assert.equal(page.rooms[0].memberCount, 3);
+  assert.equal(page.rooms[0].playerCount, 3);
   assert.equal(page.rooms[0].spectatorCount, 0);
-  assert.equal(page.rooms[0].isMemberCountApproximate, true);
+  assert.equal(page.rooms[0].isCountApproximate, true);
   assert.equal(page.rooms[1].updatedAt, "2026-08-09T09:40:00Z");
-  assert.equal(page.rooms[1].memberCount, 8);
+  assert.equal(page.rooms[1].playerCount, 8);
   assert.equal(page.rooms[1].spectatorCount, 0);
-  assert.equal(page.rooms[1].isMemberCountApproximate, false);
+  assert.equal(page.rooms[1].isCountApproximate, false);
   assert.equal(page.rooms[1].currentQuestionIndex, null);
   assert.equal(page.rooms[1].questionCount, null);
 });
@@ -234,7 +242,7 @@ test("public room directory caches a complete successful response for sixty seco
   ], {
     "room:playing-cache": Response.json({
       status: "PLAYING",
-      memberCount: 7,
+      playerCount: 7,
       spectatorCount: 2,
       updatedAt: freshAt,
       currentQuestionIndex: 2,
@@ -266,7 +274,7 @@ test("public room directory caches a complete successful response for sixty seco
   assert.equal(matchedKeys.length, 2);
   assert.equal(writtenKeys.length, 1);
   assert.equal(matchedKeys[0], matchedKeys[1], "irrelevant query parameters and Origin must not fragment the shared cache");
-  assert.match(matchedKeys[0], /cacheVersion=1/);
+  assert.match(matchedKeys[0], /cacheVersion=2/);
   assert.match(matchedKeys[0], /runtimeGeneration=/);
   assert.equal(entries.get(writtenKeys[0])?.headers.get("cache-control"), "public, max-age=60");
 });

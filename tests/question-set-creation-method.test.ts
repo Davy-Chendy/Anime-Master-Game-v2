@@ -80,7 +80,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0024") {
+function applyMigrations(db: DatabaseSync, through = "0025") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -227,6 +227,20 @@ test("room-state manifest is room-scoped and rejects corruption", () => {
     role: "PLAYER" as const, joined_at: joined, last_seen_at: joined,
   }));
   assert.throws(() => encodeRoomState("room-a", "p0", fiftyOne), /玩家数量无效/);
+  const fiftyPlayersAndFiftySpectators = Array.from({ length: 100 }, (_, index) => ({
+    id: `m${index}`, room_id: "room-a", nickname: `M${index}`, is_host: index === 0,
+    role: (index < 50 ? "PLAYER" : "SPECTATOR") as "PLAYER" | "SPECTATOR",
+    joined_at: joined, last_seen_at: joined,
+  }));
+  assert.doesNotThrow(() => encodeRoomState("room-a", "m0", fiftyPlayersAndFiftySpectators));
+  assert.equal(decodeRoomState({
+    id: "room-a", host_player_id: "m0", room_state_version: 1,
+    room_state_json: encodeRoomState("room-a", "m0", fiftyPlayersAndFiftySpectators),
+  }).length, 100);
+  assert.throws(() => encodeRoomState("room-a", "m0", [
+    ...fiftyPlayersAndFiftySpectators,
+    { ...fiftyPlayersAndFiftySpectators[99], id: "s51", nickname: "S51" },
+  ]), /观战人数无效/);
   assert.throws(() => encodeRoomState("room-a", "p0", [fiftyOne[0], { ...fiftyOne[1], nickname: " p0 " }]), /重复玩家昵称/);
 });
 
@@ -329,15 +343,19 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     assert.equal(room.teamPresenterBlockEnabled, false);
     assert.equal(room.spectatorQuestionPreviewEnabled, true);
     assert.equal(room.spectatorPlayerAnswersEnabled, true);
+    assert.equal(room.playerCapacity, 50);
+    assert.equal(room.spectatorCapacity, 50);
     assert.equal(room.teamAssignmentMode, "MANUAL");
 
-    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_spectator_question_preview_enabled, lobby_spectator_player_answers_enabled, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
+    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_spectator_question_preview_enabled, lobby_spectator_player_answers_enabled, lobby_player_capacity, lobby_spectator_capacity, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
       .get(room.id);
     assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
     assert.equal(stored.lobby_team_guess_vote_seconds, 50);
     assert.equal(stored.lobby_team_presenter_block_enabled, 0);
     assert.equal(stored.lobby_spectator_question_preview_enabled, 1);
     assert.equal(stored.lobby_spectator_player_answers_enabled, 1);
+    assert.equal(stored.lobby_player_capacity, 50);
+    assert.equal(stored.lobby_spectator_capacity, 50);
     assert.equal(stored.lobby_team_assignment_mode, "MANUAL");
     assert.equal(stored.runtime_generation, CURRENT_ROOM_RUNTIME_GENERATION);
     const aggregate = db.sqlite.prepare("SELECT * FROM rooms WHERE id=?").get(room.id);
@@ -499,6 +517,46 @@ test("spectator visibility migration preserves existing rooms with compatible de
   assert.throws(() => db.prepare("UPDATE rooms SET lobby_spectator_player_answers_enabled=-1 WHERE id='spectator-old'").run(), /CHECK constraint failed/);
 });
 
+test("room role-capacity migration backfills player counts and enforces independent bounds", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0024");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,member_count,spectator_count) VALUES(?,?,?,?,?)")
+    .run("capacity-old", "CAP025", "host", 5, 2);
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id,member_count,spectator_count,room_state_json) VALUES(?,?,?,?,?,?)")
+    .run("capacity-private", "CAPPRV", "private-host", 3, 0, JSON.stringify({
+      schema: 1,
+      players: [
+        { id: "private-host", nickname: "Private Host", role: "PLAYER", joined_at: "2026-08-01T00:00:00.000Z" },
+        { id: "private-player", nickname: "Private Player", role: "PLAYER", joined_at: "2026-08-01T00:00:01.000Z" },
+        { id: "private-spectator", nickname: "Private Spectator", role: "SPECTATOR", joined_at: "2026-08-01T00:00:02.000Z" },
+      ],
+    }));
+  const migration = readFileSync(join(migrationsDirectory, "0025_room_role_capacities.sql"), "utf8");
+
+  db.exec("BEGIN");
+  try {
+    db.exec(migration);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_player_capacity'").get().count, 0);
+
+  db.exec(migration);
+  assert.deepEqual({ ...db.prepare("SELECT member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity FROM rooms WHERE id='capacity-old'").get() }, {
+    member_count: 3,
+    spectator_count: 2,
+    lobby_player_capacity: 50,
+    lobby_spectator_capacity: 50,
+  });
+  assert.deepEqual({ ...db.prepare("SELECT member_count,spectator_count FROM rooms WHERE id='capacity-private'").get() }, {
+    member_count: 2,
+    spectator_count: 1,
+  });
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_player_capacity=0 WHERE id='capacity-old'").run(), /CHECK constraint failed/);
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_spectator_capacity=51 WHERE id='capacity-old'").run(), /CHECK constraint failed/);
+});
+
 test("room notices are host-authoritative, recoverable, bounded, and emit only changed deltas", async () => {
   const db = new DatabaseAdapter();
   applyMigrations(db.sqlite);
@@ -567,19 +625,76 @@ test("public room creation uses an optional trimmed name and piggybacks member c
     const fallback = await createRoom("public-host", "  Alice  ", { visibility: "PUBLIC", name: "   " });
     assert.equal(fallback.visibility, "PUBLIC");
     assert.equal(fallback.name, "Alice的房间");
-    assert.equal(fallback.memberCount, 1);
+    assert.equal(fallback.playerCount, 1);
+    assert.equal(fallback.playerCapacity, 50);
+    assert.equal(fallback.spectatorCapacity, 50);
     const custom = await createRoom("custom-host", "Bob", { visibility: "PUBLIC", name: "  周末动画局  " });
     assert.equal(custom.name, "周末动画局");
     const fixedActivity = "2026-08-10T00:00:00.000Z";
     db.sqlite.prepare("UPDATE rooms SET public_activity_at=? WHERE id=?").run(fixedActivity, custom.id);
     const joined = await joinRoom(custom.code, "guest", "Guest");
     assert.equal(joined.error, null);
-    assert.equal(joined.room?.memberCount, 2);
+    assert.equal(joined.room?.playerCount, 2);
     assert.equal(db.sqlite.prepare("SELECT member_count FROM rooms WHERE id=?").get(custom.id).member_count, 2);
     assert.equal(db.sqlite.prepare("SELECT public_activity_at FROM rooms WHERE id=?").get(custom.id).public_activity_at, fixedActivity);
     await selectPresenterForRound(custom.id!, "custom-host", "custom-host");
     assert.notEqual(db.sqlite.prepare("SELECT public_activity_at FROM rooms WHERE id=?").get(custom.id).public_activity_at, fixedActivity);
     await assert.rejects(() => createRoom("long-name-host", "Host", { visibility: "PUBLIC", name: "x".repeat(41) }), /40/);
+  });
+});
+
+test("room capacities independently gate joins, reconnects, role switches, and reductions", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  await runWithGameDatabase(db, async () => {
+    let room = await createRoom("capacity-host", "Capacity Host");
+    room = await updateRoomGameSettings({
+      roomId: room.id!,
+      hostPlayerId: "capacity-host",
+      gameMode: "ROUND_REVEAL",
+      playerCapacity: 2,
+      spectatorCapacity: 1,
+    });
+    assert.equal(room.playerCapacity, 2);
+    assert.equal(room.spectatorCapacity, 1);
+
+    const player = await joinRoom(room.code, "player-2", "Player 2", "PLAYER");
+    assert.equal(player.error, null);
+    const playerOverflow = await joinRoom(room.code, "player-3", "Player 3", "PLAYER");
+    assert.equal(playerOverflow.errorCode, "PLAYER_CAPACITY_FULL");
+
+    const spectator = await joinRoom(room.code, "spectator-1", "Spectator 1", "SPECTATOR");
+    assert.equal(spectator.error, null);
+    const spectatorOverflow = await joinRoom(room.code, "spectator-2", "Spectator 2", "SPECTATOR");
+    assert.equal(spectatorOverflow.errorCode, "SPECTATOR_CAPACITY_FULL");
+
+    const reconnected = await joinRoom(room.code, "player-2", "Player 2", "PLAYER");
+    assert.equal(reconnected.error, null);
+    await assert.rejects(
+      () => updatePlayerRole(room.id!, "player-2", "player-2", "SPECTATOR"),
+      /观战人数已满/,
+    );
+    await assert.rejects(
+      () => updateRoomGameSettings({ roomId: room.id!, hostPlayerId: "capacity-host", gameMode: "ROUND_REVEAL", playerCapacity: 1 }),
+      /玩家人数上限不能低于 2/,
+    );
+    await assert.rejects(
+      () => updateRoomGameSettings({ roomId: room.id!, hostPlayerId: "capacity-host", gameMode: "ROUND_REVEAL", spectatorCapacity: 0 }),
+      /观战人数上限不能低于 1/,
+    );
+
+    const stored = db.sqlite.prepare("SELECT member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity FROM rooms WHERE id=?").get(room.id);
+    assert.deepEqual({ ...stored }, { member_count: 2, spectator_count: 1, lobby_player_capacity: 2, lobby_spectator_capacity: 1 });
+
+    const zeroRoom = await createRoom("zero-host", "Zero Host");
+    await updateRoomGameSettings({
+      roomId: zeroRoom.id!,
+      hostPlayerId: "zero-host",
+      gameMode: "ROUND_REVEAL",
+      spectatorCapacity: 0,
+    });
+    const disabledSpectator = await joinRoom(zeroRoom.code, "zero-spectator", "Zero Spectator", "SPECTATOR");
+    assert.equal(disabledSpectator.errorCode, "SPECTATOR_CAPACITY_FULL");
   });
 });
 

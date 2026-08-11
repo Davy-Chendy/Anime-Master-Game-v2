@@ -7,13 +7,13 @@ import type { GameMode, PublicRoomSummary, RoomQuestionSource, RoomStatus } from
 function room(
   id: string,
   status: RoomStatus,
-  memberCount: number,
+  playerCount: number,
   gameMode: GameMode,
   questionSource: RoomQuestionSource | null,
   updatedAt: string,
   name = id,
 ): PublicRoomSummary {
-  return { id, code: id, name, status, memberCount, spectatorCount: 0, gameMode, questionSource, updatedAt, capacity: 50, isMemberCountApproximate: false, createdAt: updatedAt };
+  return { id, code: id, name, status, playerCount, spectatorCount: 0, gameMode, questionSource, updatedAt, playerCapacity: 50, spectatorCapacity: 50, isCountApproximate: false, createdAt: updatedAt };
 }
 
 const rooms = [

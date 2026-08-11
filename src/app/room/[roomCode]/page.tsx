@@ -79,6 +79,8 @@ type GameSettings = {
   teamPresenterBlockEnabled: boolean;
   spectatorQuestionPreviewEnabled: boolean;
   spectatorPlayerAnswersEnabled: boolean;
+  playerCapacity: number;
+  spectatorCapacity: number;
   teamAssignmentMode: TeamAssignmentMode;
 };
 
@@ -92,6 +94,8 @@ const defaultGameSettings: GameSettings = {
   teamPresenterBlockEnabled: false,
   spectatorQuestionPreviewEnabled: true,
   spectatorPlayerAnswersEnabled: true,
+  playerCapacity: 50,
+  spectatorCapacity: 50,
   teamAssignmentMode: "MANUAL",
 };
 
@@ -181,6 +185,8 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
     teamPresenterBlockEnabled: settings.teamPresenterBlockEnabled === true,
     spectatorQuestionPreviewEnabled: settings.spectatorQuestionPreviewEnabled !== false,
     spectatorPlayerAnswersEnabled: settings.spectatorPlayerAnswersEnabled !== false,
+    playerCapacity: Math.max(1, Math.min(50, Math.floor(settings.playerCapacity ?? 50))),
+    spectatorCapacity: Math.max(0, Math.min(50, Math.floor(settings.spectatorCapacity ?? 50))),
     teamAssignmentMode: settings.teamAssignmentMode === "AUTO" ? "AUTO" : "MANUAL",
   };
 }
@@ -196,6 +202,8 @@ function getRoomGameSettings(room: Room | null | undefined): GameSettings {
     teamPresenterBlockEnabled: room?.teamPresenterBlockEnabled,
     spectatorQuestionPreviewEnabled: room?.spectatorQuestionPreviewEnabled,
     spectatorPlayerAnswersEnabled: room?.spectatorPlayerAnswersEnabled,
+    playerCapacity: room?.playerCapacity,
+    spectatorCapacity: room?.spectatorCapacity,
     teamAssignmentMode: room?.teamAssignmentMode,
   });
 }
@@ -212,6 +220,8 @@ function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
     left.teamPresenterBlockEnabled === right.teamPresenterBlockEnabled &&
     left.spectatorQuestionPreviewEnabled === right.spectatorQuestionPreviewEnabled &&
     left.spectatorPlayerAnswersEnabled === right.spectatorPlayerAnswersEnabled &&
+    left.playerCapacity === right.playerCapacity &&
+    left.spectatorCapacity === right.spectatorCapacity &&
     left.teamAssignmentMode === right.teamAssignmentMode
   );
 }
@@ -1011,6 +1021,39 @@ function GameSettingsPanel({
       <details className="border-t border-[var(--line)] px-4 py-3">
         <summary className="cursor-pointer text-sm font-semibold text-slate-900">高级设置</summary>
         {copy.settingsNote ? <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{copy.settingsNote}</p> : null}
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium text-slate-900">玩家人数上限</span>
+            <input
+              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+              disabled={!canEdit}
+              min={1}
+              max={50}
+              type="number"
+              value={settings.playerCapacity}
+              onChange={(event) => onChange({
+                ...settings,
+                playerCapacity: Math.max(1, Math.min(50, Number(event.target.value) || 1)),
+              })}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium text-slate-900">观战人数上限</span>
+            <input
+              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+              disabled={!canEdit}
+              min={0}
+              max={50}
+              type="number"
+              value={settings.spectatorCapacity}
+              onChange={(event) => onChange({
+                ...settings,
+                spectatorCapacity: Math.max(0, Math.min(50, Number(event.target.value) || 0)),
+              })}
+            />
+          </label>
+        </div>
 
         {!isTeamBattleMode ? (
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -2371,6 +2414,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
   const isManualTeamRoom = Boolean(room?.gameMode === "TEAM_BATTLE" && room.teamAssignmentMode === "MANUAL");
   const needsManualJoinChoice = Boolean(isManualTeamRoom && room?.status === "PLAYING");
+  const isPlayerCapacityFull = Boolean(room && getGamePlayers(room.players).length >= (room.playerCapacity ?? 50));
+  const isSpectatorCapacityFull = Boolean(room && getSpectators(room.players).length >= (room.spectatorCapacity ?? 50));
 
   useEffect(() => {
     setGameSettings((currentSettings) => {
@@ -2649,6 +2694,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         teamPresenterBlockEnabled: normalizedSettings.teamPresenterBlockEnabled,
         spectatorQuestionPreviewEnabled: normalizedSettings.spectatorQuestionPreviewEnabled,
         spectatorPlayerAnswersEnabled: normalizedSettings.spectatorPlayerAnswersEnabled,
+        playerCapacity: normalizedSettings.playerCapacity,
+        spectatorCapacity: normalizedSettings.spectatorCapacity,
         teamAssignmentMode: normalizedSettings.teamAssignmentMode,
       });
 
@@ -2870,6 +2917,12 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             回到首页
           </Button>
         </Panel>
+      ) : !currentPlayer && isPlayerCapacityFull && isSpectatorCapacityFull ? (
+        <div className="mx-auto max-w-2xl">
+          <Panel title="房间已满">
+            <p className="text-sm leading-6 text-[var(--muted)]">当前玩家位和观战位都已满，请等待其他成员离开或房主提高人数上限。</p>
+          </Panel>
+        </div>
       ) : !currentPlayer && needsManualJoinChoice ? (
         <div className="mx-auto max-w-2xl">
           <Panel title="选择队伍加入">
@@ -2877,9 +2930,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               手动分队已开启。请选择红队或蓝队；若游戏已经开始，本题先观看并从下一题正式参赛。
             </p>
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <button className={RED_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "red")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入红队"}</button>
-              <button className={BLUE_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "blue")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "PLAYER" ? "加入中…" : "加入蓝队"}</button>
-              <Button type="button" variant="secondary" onClick={() => handleJoinRoomAsRole("SPECTATOR")} disabled={Boolean(pendingJoinRole)}>{pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}</Button>
+              <button className={RED_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "red")} disabled={Boolean(pendingJoinRole) || isPlayerCapacityFull}>{pendingJoinRole === "PLAYER" ? "加入中…" : isPlayerCapacityFull ? "玩家已满" : "加入红队"}</button>
+              <button className={BLUE_TEAM_CHOICE_BUTTON_CLASS} type="button" onClick={() => handleJoinRoomAsRole("PLAYER", "blue")} disabled={Boolean(pendingJoinRole) || isPlayerCapacityFull}>{pendingJoinRole === "PLAYER" ? "加入中…" : isPlayerCapacityFull ? "玩家已满" : "加入蓝队"}</button>
+              <Button type="button" variant="secondary" onClick={() => handleJoinRoomAsRole("SPECTATOR")} disabled={Boolean(pendingJoinRole) || isSpectatorCapacityFull}>{pendingJoinRole === "SPECTATOR" ? "加入中…" : isSpectatorCapacityFull ? "观战已满" : "作为观战加入"}</Button>
             </div>
           </Panel>
         </div>
@@ -2893,17 +2946,17 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               <Button
                 type="button"
                 onClick={() => handleJoinRoomAsRole("PLAYER")}
-                disabled={Boolean(pendingJoinRole)}
+                disabled={Boolean(pendingJoinRole) || isPlayerCapacityFull}
               >
-                {pendingJoinRole === "PLAYER" ? "加入中…" : "作为玩家加入"}
+                {pendingJoinRole === "PLAYER" ? "加入中…" : isPlayerCapacityFull ? "玩家已满" : "作为玩家加入"}
               </Button>
               <Button
                 type="button"
                 variant="secondary"
                 onClick={() => handleJoinRoomAsRole("SPECTATOR")}
-                disabled={Boolean(pendingJoinRole)}
+                disabled={Boolean(pendingJoinRole) || isSpectatorCapacityFull}
               >
-                {pendingJoinRole === "SPECTATOR" ? "加入中…" : "作为观战加入"}
+                {pendingJoinRole === "SPECTATOR" ? "加入中…" : isSpectatorCapacityFull ? "观战已满" : "作为观战加入"}
               </Button>
             </div>
           </Panel>

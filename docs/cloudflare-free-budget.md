@@ -95,6 +95,12 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 两个观战开关复用既有房间设置 mutation、Room DO WebSocket 和 snapshot inflight/cache，不新增 HTTP/RPC、D1 热路径读取、Alarm、checkpoint 或逐连接 snapshot 查询。受限观战快照从同一权威结果发送前投影；公开状态最多序列化一份普通 payload 和一份观战裁剪 payload。关闭查看回答会减少答题期间的正文投递；进入复盘时复用现有 `question_label_updated` 和最多2条答案的 `answer_text_backfill`，一次构建后发送给观战接收者集合。D1 与 DO 各增加两个有界布尔列，仅随既有房间设置行更新，不改变单局写入模型，`scripts/authority-write-budget.mjs` 无需调整。
 
+## 玩家与观战独立容量预算（2026-08-11）
+
+房间由原来的总成员最多 50 改为玩家最多 50、观战最多 50，默认 50/50。容量设置复用既有房间设置 RPC、同一 D1 房间行更新和 `room_updated` 广播；公开目录复用既有 D1 投影、游戏中 Room DO presence 与 60 秒缓存，不新增 HTTP/RPC、SQL 语句、Alarm、checkpoint 或客户端轮询。D1 的历史 `member_count` 投影改为玩家人数，`spectator_count` 继续保存观战人数；两列仍各自不超过 50，因此不需要重建 `rooms` 表或增加 changed row。
+
+按项目基准 50 人 × 30 题计算，玩家 mutation、答案、判定和持久化上限不变。极端 50 玩家 + 50 观战时，全房小 delta 的接收连接数相对原 50 人房间最多翻倍；包含完整成员名单的房间快照同时可能扩大约 2 倍，因此一次全名单广播的网络字节上界约为原模型的 4 倍。该变化不增加 Cloudflare 普通 Workers HTTP 请求或 D1/DO SQLite 行读写，但会增加 Room DO 的序列化、内存和 WebSocket 出站压力；容量回归必须覆盖 50+50 同时加入、重连、聊天、复盘和结算，并继续禁止用全员 snapshot 补拉代替 delta 广播。`scripts/authority-write-budget.mjs` 的写入模型不变，无需调整。
+
 ## Question Set Manifest V2 预算（2026-07-31）
 
 本轮预算以 [`cloudflare-usage-history/2026-07-30.md`](cloudflare-usage-history/2026-07-30.md) 的完整生产窗口为依据，不把 SQL 语句数当作计费行数。该窗口 D1 共写入 3,795 行，其中题目创建 796 行、题集创建 146 行、结算逐题标签投影 810 行，三项合计 1,752 行，占 46.2%；孤儿私有题集候选查询读取 65,062 行，占当日 D1 读取 64.9%。

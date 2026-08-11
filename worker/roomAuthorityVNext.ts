@@ -277,6 +277,20 @@ function getInteger(value: unknown) {
   return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
+function getPlayerCapacity(room: Room | undefined) {
+  const value = room?.playerCapacity;
+  return typeof value === "number" && Number.isInteger(value) ? Math.max(1, Math.min(50, value)) : MAX_PLAYERS_PER_ROOM;
+}
+
+function getSpectatorCapacity(room: Room | undefined) {
+  const value = room?.spectatorCapacity;
+  return typeof value === "number" && Number.isInteger(value) ? Math.max(0, Math.min(50, value)) : MAX_PLAYERS_PER_ROOM;
+}
+
+function countPlayersByRole(players: Player[], role: Player["role"]) {
+  return players.filter((player) => player.role === role).length;
+}
+
 function questionRoundKey(questionIndex: number, revealRound: number, playerId: string) {
   return `${questionIndex}:${revealRound}:${playerId}`;
 }
@@ -1539,8 +1553,13 @@ export class RoomAuthorityVNext {
       }
       role = requestedRole;
     }
-    if (role === "PLAYER" && (!player || player.role !== "PLAYER") && aggregate.players.filter((item) => item.role === "PLAYER").length >= MAX_PLAYERS_PER_ROOM) {
-      throw new TerminalMutationError(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以选择观战加入。`);
+    const playerCapacity = getPlayerCapacity(aggregate.room);
+    const spectatorCapacity = getSpectatorCapacity(aggregate.room);
+    if (role === "PLAYER" && (!player || player.role !== "PLAYER") && countPlayersByRole(aggregate.players, "PLAYER") >= playerCapacity) {
+      throw new TerminalMutationError(`玩家已满，当前房间最多支持 ${playerCapacity} 名玩家；可以选择观战加入。`);
+    }
+    if (role === "SPECTATOR" && (!player || player.role !== "SPECTATOR") && countPlayersByRole(aggregate.players, "SPECTATOR") >= spectatorCapacity) {
+      throw new TerminalMutationError(`观战人数已满，当前房间最多支持 ${spectatorCapacity} 名观战者。`);
     }
     const manualTeamBattle = aggregate.gameSession?.gameMode === "TEAM_BATTLE" && aggregate.room?.teamAssignmentMode === "MANUAL";
     if (role === "PLAYER" && aggregate.cutoverState === "active" && manualTeamBattle && action.actorId !== aggregate.gameSession?.presenterPlayerId && !selectedTeam && !aggregate.room?.teamAssignments?.[action.actorId]) {
@@ -1548,7 +1567,6 @@ export class RoomAuthorityVNext {
     }
     if (player) Object.assign(player, { nickname, role, lastSeenAt: nowIso(action.serverReceivedAtMs) });
     else {
-      if (aggregate.players.length >= MAX_PLAYERS_PER_ROOM) throw new TerminalMutationError("房间人数已满。");
       player = { id: action.actorId, roomId: aggregate.roomId, nickname, isHost: false, role, joinedAt: nowIso(action.serverReceivedAtMs), lastSeenAt: nowIso(action.serverReceivedAtMs) };
       aggregate.players.push(player);
     }
@@ -1677,8 +1695,13 @@ export class RoomAuthorityVNext {
       throw new TerminalMutationError("当前出题人不能切换为观战身份。");
     }
     if (!player) throw new TerminalMutationError("身份切换失败：你不在当前房间。");
-    if (action.payload.role === "PLAYER" && player.role !== "PLAYER" && aggregate.players.filter((item) => item.role === "PLAYER").length >= MAX_PLAYERS_PER_ROOM) {
-      throw new TerminalMutationError(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以继续观战。`);
+    const playerCapacity = getPlayerCapacity(room);
+    const spectatorCapacity = getSpectatorCapacity(room);
+    if (action.payload.role === "PLAYER" && player.role !== "PLAYER" && countPlayersByRole(aggregate.players, "PLAYER") >= playerCapacity) {
+      throw new TerminalMutationError(`玩家已满，当前房间最多支持 ${playerCapacity} 名玩家；可以继续观战。`);
+    }
+    if (action.payload.role === "SPECTATOR" && player.role !== "SPECTATOR" && countPlayersByRole(aggregate.players, "SPECTATOR") >= spectatorCapacity) {
+      throw new TerminalMutationError(`观战人数已满，当前房间最多支持 ${spectatorCapacity} 名观战者。`);
     }
     const selectedTeam = action.payload.team === "red" || action.payload.team === "blue" ? action.payload.team : null;
     const teamAssignments = room.teamAssignments ?? {};
@@ -2049,8 +2072,8 @@ export class RoomAuthorityVNext {
               game.room.currentGameId ?? null,
               game.room.preparedQuestionSetId ?? null,
               game.room.preparedQuestionSource ?? null,
-              game.players.length,
-              game.players.filter((player) => player.role === "SPECTATOR").length,
+              countPlayersByRole(game.players, "PLAYER"),
+              countPlayersByRole(game.players, "SPECTATOR"),
               game.room.teamAssignmentMode ?? "AUTO",
               JSON.stringify(game.room.teamAssignments ?? {}),
               ROOM_STATE_MANIFEST_VERSION,
@@ -2073,8 +2096,8 @@ export class RoomAuthorityVNext {
               game.room.currentGameId ?? null,
               game.room.preparedQuestionSetId ?? null,
               game.room.preparedQuestionSource ?? null,
-              game.players.length,
-              game.players.filter((player) => player.role === "SPECTATOR").length,
+              countPlayersByRole(game.players, "PLAYER"),
+              countPlayersByRole(game.players, "SPECTATOR"),
               game.room.teamAssignmentMode ?? "AUTO",
               JSON.stringify(game.room.teamAssignments ?? {}),
               publicActivityAt,

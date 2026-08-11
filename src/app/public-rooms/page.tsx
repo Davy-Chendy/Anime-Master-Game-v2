@@ -201,7 +201,10 @@ export default function PublicRoomsPage() {
               </tr>
             ) : sortedRooms.map((room) => {
               const isCurrentRoom = currentRoomCode === room.code;
-              const isDefinitelyFull = room.memberCount >= room.capacity && !room.isMemberCountApproximate && !isCurrentRoom;
+              const isDefinitelyFull = room.playerCount >= room.playerCapacity
+                && room.spectatorCount >= room.spectatorCapacity
+                && !room.isCountApproximate
+                && !isCurrentRoom;
               return (
                 <tr className="transition hover:bg-slate-50/70" key={room.id}>
                   <td className="max-w-48 px-4 py-4"><p className="truncate font-bold text-slate-950" title={room.name}>{room.name}</p></td>
@@ -219,8 +222,10 @@ export default function PublicRoomsPage() {
                   </td>
                   <td className="whitespace-nowrap px-4 py-4 text-sm font-semibold text-slate-800">{GAME_MODE_LABELS[room.gameMode]}</td>
                   <td className="whitespace-nowrap px-4 py-4 text-center text-sm font-semibold text-slate-800">
-                    {room.isMemberCountApproximate ? "约 " : ""}{room.memberCount}/{room.capacity}
-                    {room.spectatorCount > 0 ? <span className="mt-0.5 block text-xs font-medium text-slate-500">（观战：{room.spectatorCount}）</span> : null}
+                    {room.isCountApproximate ? "约 " : ""}{room.playerCount}/{room.playerCapacity}
+                    <span className="mt-0.5 block text-xs font-medium text-slate-500">
+                      （观战：{room.isCountApproximate ? "约 " : ""}{room.spectatorCount}/{room.spectatorCapacity}）
+                    </span>
                   </td>
                   <td className="whitespace-nowrap px-4 py-4 text-sm font-semibold text-slate-800">{room.questionSource ? SOURCE_LABELS[room.questionSource] : "暂未准备"}</td>
                   <td className="whitespace-nowrap px-4 py-4 text-sm text-slate-700">{formatRelativeActivity(room.updatedAt)}</td>

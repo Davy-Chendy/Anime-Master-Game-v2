@@ -80,7 +80,9 @@ export type Room = {
   visibility?: RoomVisibility;
   name?: string | null;
   notice?: string | null;
-  memberCount?: number;
+  playerCount?: number;
+  playerCapacity?: number;
+  spectatorCapacity?: number;
   preparedQuestionSource?: RoomQuestionSource | null;
   gameMode?: GameMode;
   maxRevealRounds?: number;
@@ -110,6 +112,8 @@ export type DbRoom = {
   room_notice?: string | null;
   member_count?: number | null;
   spectator_count?: number | null;
+  lobby_player_capacity?: number | null;
+  lobby_spectator_capacity?: number | null;
   prepared_question_source?: RoomQuestionSource | null;
   public_activity_at?: string | null;
   lobby_game_mode?: GameMode | null;
@@ -137,10 +141,11 @@ export type PublicRoomSummary = {
   name: string;
   status: RoomStatus;
   gameMode: GameMode;
-  memberCount: number;
+  playerCount: number;
   spectatorCount: number;
-  capacity: number;
-  isMemberCountApproximate: boolean;
+  playerCapacity: number;
+  spectatorCapacity: number;
+  isCountApproximate: boolean;
   questionSource: RoomQuestionSource | null;
   currentQuestionIndex?: number | null;
   questionCount?: number | null;

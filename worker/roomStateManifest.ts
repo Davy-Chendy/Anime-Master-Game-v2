@@ -1,7 +1,8 @@
 import type { DbPlayer, DbRoom, Player, PlayerRole } from "../src/types/game";
 
 export const ROOM_STATE_MANIFEST_VERSION = 1 as const;
-export const ROOM_STATE_MAX_PLAYERS = 50;
+export const ROOM_STATE_MAX_GAME_PLAYERS = 50;
+export const ROOM_STATE_MAX_SPECTATORS = 50;
 export const ROOM_STATE_MAX_BYTES = 64 * 1024;
 
 type StoredRoomPlayer = {
@@ -46,8 +47,14 @@ function normalizeJoinedAt(value: number | string) {
 }
 
 function validateStoredPlayers(players: StoredRoomPlayer[], roomId: string, hostPlayerId: string) {
-  if (players.length < 1 || players.length > ROOM_STATE_MAX_PLAYERS) {
+  if (players.length < 1) {
     throw new Error(`房间 ${roomId} 的玩家数量无效。`);
+  }
+  if (players.filter((player) => player.role === "PLAYER").length > ROOM_STATE_MAX_GAME_PLAYERS) {
+    throw new Error(`房间 ${roomId} 的游戏玩家数量无效。`);
+  }
+  if (players.filter((player) => player.role === "SPECTATOR").length > ROOM_STATE_MAX_SPECTATORS) {
+    throw new Error(`房间 ${roomId} 的观战人数无效。`);
   }
   if (new Set(players.map((player) => player.id)).size !== players.length) {
     throw new Error(`房间 ${roomId} 包含重复玩家 ID。`);

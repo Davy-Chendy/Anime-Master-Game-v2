@@ -468,6 +468,12 @@ const ROOM_HANDOFF_BARRIER_NAMES = new Set([
   "startGameWithQuestionSet",
 ]);
 
+function getJoinCapacityErrorCode(error: string | undefined) {
+  if (error?.startsWith("玩家已满")) return "PLAYER_CAPACITY_FULL";
+  if (error?.startsWith("观战人数已满")) return "SPECTATOR_CAPACITY_FULL";
+  return undefined;
+}
+
 function shouldUseVNextRoomState(aggregate: VNextAggregate | null, hasPendingRoomHandoff: boolean) {
   return Boolean(
     aggregate?.gameSession
@@ -2537,6 +2543,8 @@ type PublicRoomRow = {
   lobby_game_mode: GameMode | null;
   member_count: number | null;
   spectator_count: number | null;
+  lobby_player_capacity: number | null;
+  lobby_spectator_capacity: number | null;
   prepared_question_source: RoomQuestionSource | null;
   created_at: string;
   activity_at: string;
@@ -2562,7 +2570,7 @@ const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 60 * 60 * 1000;
 const PUBLIC_ROOM_PRESENCE_CONCURRENCY = 5;
 const PUBLIC_ROOM_PRESENCE_TIMEOUT_MS = 800;
 const PUBLIC_ROOM_DIRECTORY_CACHE_TTL_SECONDS = 60;
-const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 1;
+const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 2;
 
 type PublicRoomResponseCache = Pick<Cache, "match" | "put">;
 
@@ -2641,7 +2649,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
   bindings.push(PUBLIC_ROOM_QUERY_LIMIT);
   const result = await env.DB.prepare(`WITH ranked_rooms AS (
       SELECT
-        id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,prepared_question_source,created_at,
+        id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,
         COALESCE(public_activity_at,updated_at) AS activity_at,
         CASE
           WHEN game_status='PLAYING' THEN 0
@@ -2654,7 +2662,7 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       WHERE room_visibility='PUBLIC' AND runtime_generation=?
         AND (game_status IN ('PLAYING','GAME_RESULT') OR COALESCE(public_activity_at,updated_at)>=?)
     )
-    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,prepared_question_source,created_at,activity_at,status_rank
+    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,activity_at,status_rank
     FROM ranked_rooms
     ${cursorClause}
     ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC
@@ -2670,10 +2678,13 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       name: room.room_name?.trim() || "未命名房间",
       status: room.game_status,
       gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
-      memberCount: Math.max(0, Math.min(50, Number(room.member_count) || 0)),
+      playerCount: Math.max(0, Math.min(50, Number(room.member_count) || 0)),
       spectatorCount: Math.max(0, Math.min(50, Number(room.spectator_count) || 0)),
-      capacity: 50,
-      isMemberCountApproximate: room.game_status === "PLAYING" || room.game_status === "GAME_RESULT",
+      playerCapacity: Math.max(1, Math.min(50, Number(room.lobby_player_capacity) || 50)),
+      spectatorCapacity: typeof room.lobby_spectator_capacity === "number"
+        ? Math.max(0, Math.min(50, room.lobby_spectator_capacity))
+        : 50,
+      isCountApproximate: room.game_status === "PLAYING" || room.game_status === "GAME_RESULT",
       questionSource: room.prepared_question_source ?? null,
       currentQuestionIndex: null,
       questionCount: null,
@@ -2694,13 +2705,15 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       if (!response.ok) throw new Error(`presence ${response.status}`);
       const presence = await response.json<{
         status?: RoomStatus;
-        memberCount?: number;
+        playerCount?: number;
         spectatorCount?: number;
+        playerCapacity?: number;
+        spectatorCapacity?: number;
         updatedAt?: string;
         currentQuestionIndex?: number;
         questionCount?: number;
       }>();
-      if (typeof presence.memberCount !== "number") throw new Error("invalid presence response");
+      if (typeof presence.playerCount !== "number") throw new Error("invalid presence response");
       const presenceUpdatedAt = typeof presence.updatedAt === "string" && Number.isFinite(Date.parse(presence.updatedAt))
         ? presence.updatedAt
         : room.updatedAt;
@@ -2709,14 +2722,22 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
         Number(presence.currentQuestionIndex) >= 0 &&
         Number(presence.questionCount) > 0 &&
         Number(presence.currentQuestionIndex) < Number(presence.questionCount);
+      const playerCapacity = typeof presence.playerCapacity === "number"
+        ? Math.max(1, Math.min(50, Math.floor(presence.playerCapacity)))
+        : room.playerCapacity;
+      const spectatorCapacity = typeof presence.spectatorCapacity === "number"
+        ? Math.max(0, Math.min(50, Math.floor(presence.spectatorCapacity)))
+        : room.spectatorCapacity;
       return {
         ...room,
         status: presence.status ?? room.status,
-        memberCount: Math.max(0, Math.min(room.capacity, Math.floor(presence.memberCount))),
+        playerCount: Math.max(0, Math.min(playerCapacity, Math.floor(presence.playerCount))),
         spectatorCount: typeof presence.spectatorCount === "number"
-          ? Math.max(0, Math.min(room.capacity, Math.floor(presence.spectatorCount)))
+          ? Math.max(0, Math.min(spectatorCapacity, Math.floor(presence.spectatorCount)))
           : room.spectatorCount,
-        isMemberCountApproximate: false,
+        playerCapacity,
+        spectatorCapacity,
+        isCountApproximate: false,
         updatedAt: presenceUpdatedAt,
         currentQuestionIndex: hasValidProgress ? Number(presence.currentQuestionIndex) : null,
         questionCount: hasValidProgress ? Number(presence.questionCount) : null,
@@ -3416,8 +3437,10 @@ export class RoomDurableObjectV3 {
       }
       return Response.json({
         status: aggregate.room.status,
-        memberCount: aggregate.players.length,
+        playerCount: aggregate.players.filter((player) => player.role === "PLAYER").length,
         spectatorCount: aggregate.players.filter((player) => player.role === "SPECTATOR").length,
+        playerCapacity: aggregate.room.playerCapacity ?? 50,
+        spectatorCapacity: aggregate.room.spectatorCapacity ?? 50,
         updatedAt: new Date(aggregate.lastPublicActivityAtMs).toISOString(),
         currentQuestionIndex: aggregate.gameSession?.currentQuestionIndex ?? null,
         questionCount: aggregate.questions.length,
@@ -3699,6 +3722,16 @@ export class RoomDurableObjectV3 {
           const authoritySequence = committedSeq >= envelope.clientSeq
             ? { gameId: envelope.gameId, actorId: positional.actorId, committedSeq }
             : undefined;
+          if (body.name === "joinRoom" && outcome.error) {
+            return Response.json({
+              data: {
+                room: null,
+                error: outcome.error,
+                errorCode: getJoinCapacityErrorCode(outcome.error),
+              },
+              authoritySequence,
+            });
+          }
           return Response.json(
             outcome.error ? { error: outcome.error, authoritySequence } : { data: outcome.data, authoritySequence },
             { status: outcome.error ? 400 : 200 },

@@ -11,8 +11,9 @@ const WRANGLER = join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 const ROOM_COUNT = 10;
 const QUESTION_COUNT = 30;
 const REGULAR_PLAYERS = 17;
-const EXTREME_PLAYERS = 47;
-const SPECTATORS_PER_ROOM = 2;
+const EXTREME_PLAYERS = 49;
+const EXTREME_SPECTATORS = 50;
+const REGULAR_SPECTATORS = 2;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 function percentile(values, quantile) {
@@ -311,8 +312,9 @@ async function setupRoom(worker, metrics, roomIndex) {
   const hostId = `runtime-host-${roomIndex}`;
   const room = await rpc(worker, metrics, "createRoom", [hostId, `Host ${roomIndex}`]);
   const playerCount = roomIndex === 0 ? EXTREME_PLAYERS : REGULAR_PLAYERS;
+  const spectatorCount = roomIndex === 0 ? EXTREME_SPECTATORS : REGULAR_SPECTATORS;
   const players = Array.from({ length: playerCount }, (_, index) => `runtime-r${roomIndex}-p${index}`);
-  const spectators = Array.from({ length: SPECTATORS_PER_ROOM }, (_, index) => `runtime-r${roomIndex}-s${index}`);
+  const spectators = Array.from({ length: spectatorCount }, (_, index) => `runtime-r${roomIndex}-s${index}`);
   await Promise.all([
     ...players.map((playerId, index) => rpc(worker, metrics, "joinRoom", [room.code, playerId, `R${roomIndex}P${index}`, "PLAYER"])),
     ...spectators.map((playerId, index) => rpc(worker, metrics, "joinRoom", [room.code, playerId, `R${roomIndex}S${index}`, "SPECTATOR"])),
@@ -605,8 +607,8 @@ async function main() {
     assert.equal(aggregateRoomRows.room_rows, ROOM_COUNT);
     assert.equal(aggregateRoomRows.valid_aggregate_rows, ROOM_COUNT);
     assert.ok(aggregateRoomRows.min_revision >= 1, "final projection did not update aggregate room state");
-    assert.equal(aggregateRoomRows.min_roster_size, 1 + REGULAR_PLAYERS + SPECTATORS_PER_ROOM);
-    assert.equal(aggregateRoomRows.max_roster_size, 1 + EXTREME_PLAYERS + SPECTATORS_PER_ROOM);
+    assert.equal(aggregateRoomRows.min_roster_size, 1 + REGULAR_PLAYERS + REGULAR_SPECTATORS);
+    assert.equal(aggregateRoomRows.max_roster_size, 1 + EXTREME_PLAYERS + EXTREME_SPECTATORS);
     const [secondGameLobby] = await queryLocalD1(persistTo, `SELECT game_status,current_presenter_player_id,current_game_id,prepared_question_set_id,room_state_json
       FROM rooms WHERE id='${secondGameContext.room.id}'`);
     assert.equal(secondGameLobby.game_status, "LOBBY");
@@ -636,7 +638,7 @@ async function main() {
       runtime: "wrangler-dev-workerd",
       rooms: contexts.length,
       totalPeople,
-      extremeRoomPeople: 1 + EXTREME_PLAYERS + SPECTATORS_PER_ROOM,
+      extremeRoomPeople: 1 + EXTREME_PLAYERS + EXTREME_SPECTATORS,
       questionsPerRoom: QUESTION_COUNT,
       httpRequests: metrics.httpRequests,
       httpErrors: metrics.httpErrors,

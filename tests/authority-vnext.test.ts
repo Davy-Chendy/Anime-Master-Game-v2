@@ -290,7 +290,7 @@ test("review answer backfill reuses bounded two-answer deltas", () => {
   assert.equal(deltas.every((delta) => JSON.stringify(delta).length < 1024), true);
 });
 
-test("v6 upgrades atomically through v12 and repeated initialization is idempotent", () => {
+test("v6 upgrades atomically through v13 and repeated initialization is idempotent", () => {
   const storage = new StorageAdapter();
   storage.sql.db.exec(`
     CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
@@ -300,7 +300,7 @@ test("v6 upgrades atomically through v12 and repeated initialization is idempote
   `);
   const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
   authority.initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   authority.initializeSchema();
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM authority_vnext_active_game").get().count, 0);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='creation_method'").get().count, 1);
@@ -311,6 +311,8 @@ test("v6 upgrades atomically through v12 and repeated initialization is idempote
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_team_presenter_block_enabled'").get().count, 1);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_spectator_question_preview_enabled'").get().count, 1);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_spectator_player_answers_enabled'").get().count, 1);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_player_capacity'").get().count, 1);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_spectator_capacity'").get().count, 1);
 });
 
 test("migration failure does not advance production v6", () => {
@@ -322,10 +324,10 @@ test("migration failure does not advance production v6", () => {
   assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 6);
 });
 
-test("fresh schema reaches v12", () => {
+test("fresh schema reaches v13", () => {
   const storage = new StorageAdapter();
   new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1).initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('authority_vnext_projection_outbox') WHERE name='payload_json'").get().count, 1);
   assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('question_sets') WHERE name='creation_method'").get().count, 1);
 });
@@ -346,7 +348,7 @@ test("v7 question-set migration preserves rows and failure does not advance the 
 
   storage.sql.failOn = "";
   authority.initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   assert.equal(storage.sql.db.prepare("SELECT title FROM question_sets WHERE id='set-1'").get().title, "Legacy");
   assert.equal(storage.sql.db.prepare("SELECT creation_method FROM question_sets WHERE id='set-1'").get().creation_method, null);
 });
@@ -367,7 +369,7 @@ test("v8 team vote duration migration preserves rooms, Alarm, and failure does n
 
   storage.sql.failOn = "";
   authority.initializeSchema();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   const room = storage.sql.db.prepare("SELECT * FROM rooms WHERE id='r1'").get();
   assert.equal(room.room_code, "ROOM01");
   assert.equal(room.lobby_team_reveal_vote_seconds, 15);
@@ -391,7 +393,7 @@ test("v9 manual-team migration preserves rooms and Alarm, and failure does not a
   storage.sql.failOn = "";
   authority.initializeSchema();
   const room = storage.sql.db.prepare("SELECT * FROM rooms WHERE id='r1'").get();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   assert.equal(room.lobby_team_assignment_mode, "AUTO");
   assert.equal(room.lobby_team_assignments, "{}");
   assert.equal(await storage.getAlarm(), 987_654);
@@ -415,7 +417,7 @@ test("v10 presenter-block migration preserves rooms and Alarm, and failure does 
   storage.sql.failOn = "";
   authority.initializeSchema();
   const room = storage.sql.db.prepare("SELECT * FROM rooms WHERE id='r1'").get();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   assert.equal(room.lobby_team_presenter_block_enabled, 0);
   assert.equal(await storage.getAlarm(), 654_321);
 });
@@ -438,10 +440,34 @@ test("v12 spectator visibility migration preserves rooms and Alarm, and failure 
   storage.sql.failOn = "";
   authority.initializeSchema();
   const room = storage.sql.db.prepare("SELECT * FROM rooms WHERE id='r1'").get();
-  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
   assert.equal(room.lobby_spectator_question_preview_enabled, 1);
   assert.equal(room.lobby_spectator_player_answers_enabled, 1);
   assert.equal(await storage.getAlarm(), 765_432);
+});
+
+test("v13 role-capacity migration preserves rooms and Alarm, and failure does not advance", async () => {
+  const storage = new StorageAdapter();
+  storage.sql.db.exec(`
+    CREATE TABLE authority_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
+    INSERT INTO authority_schema VALUES(1,12);
+    CREATE TABLE rooms(id TEXT PRIMARY KEY, room_code TEXT NOT NULL);
+    INSERT INTO rooms VALUES('r1','ROOM01');
+  `);
+  await storage.setAlarm(876_543);
+  storage.sql.failOn = "lobby_spectator_capacity";
+  const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
+  assert.throws(() => authority.initializeSchema(), /injected migration failure/);
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 12);
+  assert.equal(storage.sql.db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_player_capacity'").get().count, 0);
+
+  storage.sql.failOn = "";
+  authority.initializeSchema();
+  const room = storage.sql.db.prepare("SELECT * FROM rooms WHERE id='r1'").get();
+  assert.equal(storage.sql.db.prepare("SELECT version FROM authority_schema WHERE id=1").get().version, 13);
+  assert.equal(room.lobby_player_capacity, 50);
+  assert.equal(room.lobby_spectator_capacity, 50);
+  assert.equal(await storage.getAlarm(), 876_543);
 });
 
 test("v6 journal and existing business Alarm survive the additive upgrade", async () => {
@@ -598,6 +624,60 @@ test("hibernation merges uncommitted Attachment exactly once", async () => {
   await restored.restoreFromStorage();
   assert.equal(restored.getAggregate()?.questions[0].labelText, "pending");
   assert.equal(restored.getAggregate()?.seenSeqByActor.host, 1);
+});
+
+test("authority independently enforces player and spectator capacities while allowing reconnects", () => {
+  const { authority } = createAuthority(1);
+  const aggregate = authority.getAggregate()!;
+  aggregate.room!.playerCapacity = 2;
+  aggregate.room!.spectatorCapacity = 1;
+
+  const playerOverflow = authority.handleMutation(null, envelope("p2", 1, "joinRoom", { nickname: "P2", role: "PLAYER" }), Date.now());
+  assert.match(playerOverflow.error ?? "", /最多支持 2 名玩家/);
+
+  const spectator = authority.handleMutation(null, envelope("s1", 1, "joinRoom", { nickname: "S1", role: "SPECTATOR" }), Date.now() + 1);
+  assert.equal(spectator.error, undefined);
+  const spectatorOverflow = authority.handleMutation(null, envelope("s2", 1, "joinRoom", { nickname: "S2", role: "SPECTATOR" }), Date.now() + 2);
+  assert.match(spectatorOverflow.error ?? "", /最多支持 1 名观战者/);
+
+  aggregate.room!.status = "QUESTION_SETUP";
+  const roleOverflow = authority.handleMutation(null, envelope("p0", 1, "updatePlayerRole", {
+    targetPlayerId: "p0",
+    role: "SPECTATOR",
+  }), Date.now() + 3);
+  assert.match(roleOverflow.error ?? "", /观战人数已满/);
+
+  const reconnect = authority.handleMutation(null, envelope("p0", 2, "joinRoom", { nickname: "P0", role: "PLAYER" }), Date.now() + 4);
+  assert.equal(reconnect.error, undefined);
+  assert.equal(authority.getAggregate()?.players.length, 3);
+});
+
+test("authority admits 50 players and 50 spectators without a shared room cap", () => {
+  const { authority } = createAuthority(49);
+  const now = Date.now();
+  for (let index = 0; index < 50; index += 1) {
+    const playerId = `spectator-${index}`;
+    const joined = authority.handleMutation(null, envelope(playerId, 1, "joinRoom", {
+      nickname: `Spectator ${index}`,
+      role: "SPECTATOR",
+    }), now + index);
+    assert.equal(joined.error, undefined);
+  }
+  assert.equal(authority.getAggregate()?.players.filter((player) => player.role === "PLAYER").length, 50);
+  assert.equal(authority.getAggregate()?.players.filter((player) => player.role === "SPECTATOR").length, 50);
+
+  const overflow = authority.handleMutation(null, envelope("spectator-overflow", 1, "joinRoom", {
+    nickname: "Spectator Overflow",
+    role: "SPECTATOR",
+  }), now + 51);
+  assert.match(overflow.error ?? "", /最多支持 50 名观战者/);
+
+  const reconnect = authority.handleMutation(null, envelope("spectator-0", 2, "joinRoom", {
+    nickname: "Spectator 0",
+    role: "SPECTATOR",
+  }), now + 52);
+  assert.equal(reconnect.error, undefined);
+  assert.equal(authority.getAggregate()?.players.length, 100);
 });
 
 test("FIRST_CORRECT hibernation replay does not revive a persisted round deadline", async () => {

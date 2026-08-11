@@ -165,6 +165,10 @@ function countGamePlayers(players: Pick<DbPlayer, "role">[]) {
   return players.filter(isGamePlayer).length;
 }
 
+function countSpectators(players: Pick<DbPlayer, "role">[]) {
+  return players.length - countGamePlayers(players);
+}
+
 function isGameMode(value: unknown): value is GameMode {
   return value === "ROUND_REVEAL" || value === "BUZZER_FIRST_CORRECT" || value === "BUZZER_RANKED" || value === "TEAM_BATTLE";
 }
@@ -213,6 +217,28 @@ function normalizeTeamBattleVoteSeconds(value: unknown, fallback: number) {
   return Math.max(1, Math.min(600, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : fallback)));
 }
 
+function normalizePlayerCapacity(value: unknown) {
+  return Math.max(1, Math.min(50, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : 50)));
+}
+
+function normalizeSpectatorCapacity(value: unknown) {
+  return Math.max(0, Math.min(50, Math.floor(typeof value === "number" && Number.isFinite(value) ? value : 50)));
+}
+
+function requirePlayerCapacity(value: unknown) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 50) {
+    throw new Error("玩家人数上限必须是 1 到 50 之间的整数。");
+  }
+  return value;
+}
+
+function requireSpectatorCapacity(value: unknown) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 50) {
+    throw new Error("观战人数上限必须是 0 到 50 之间的整数。");
+  }
+  return value;
+}
+
 function normalizeRoundScores(value: unknown, maxRevealRounds: number) {
   let source: unknown[] = [];
   if (Array.isArray(value)) {
@@ -246,7 +272,9 @@ function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): 
     visibility: room.room_visibility ?? "PRIVATE",
     name: room.room_name ?? null,
     notice: room.room_notice ?? null,
-    memberCount: room.member_count ?? players.length,
+    playerCount: room.member_count ?? countGamePlayers(players),
+    playerCapacity: normalizePlayerCapacity(room.lobby_player_capacity),
+    spectatorCapacity: normalizeSpectatorCapacity(room.lobby_spectator_capacity),
     preparedQuestionSource: room.prepared_question_source ?? null,
     gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
     maxRevealRounds,
@@ -1587,6 +1615,7 @@ const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 50;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
+const SPECTATOR_CAPACITY_FULL_ERROR_CODE = "SPECTATOR_CAPACITY_FULL";
 const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
 const ROUND_DEADLINE_GRACE_MS = 3000;
 const BUZZER_JUDGING_STABILIZE_MS = 3000;
@@ -1793,6 +1822,8 @@ export async function createRoom(playerId: string, nickname: string, options: Cr
         lobby_team_presenter_block_enabled: 0,
         lobby_spectator_question_preview_enabled: 1,
         lobby_spectator_player_answers_enabled: 1,
+        lobby_player_capacity: MAX_PLAYERS_PER_ROOM,
+        lobby_spectator_capacity: MAX_PLAYERS_PER_ROOM,
         lobby_team_assignment_mode: "MANUAL",
         lobby_team_assignments: "{}",
         runtime_generation: CURRENT_ROOM_RUNTIME_GENERATION,
@@ -1886,8 +1917,8 @@ async function updateRoomAggregate(
     .from("rooms")
     .update({
       ...roomUpdates,
-      member_count: players.length,
-      spectator_count: players.filter((player) => player.role === "SPECTATOR").length,
+      member_count: countGamePlayers(players),
+      spectator_count: countSpectators(players),
       room_state_json: roomStateJson,
       room_state_revision: currentRevision + 1,
     })
@@ -1994,18 +2025,20 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     nextRole = requestedRole;
   }
 
-  if (nextRole === "PLAYER" && (!existingPlayer || !isGamePlayer(existingPlayer)) && countGamePlayers(players) >= MAX_PLAYERS_PER_ROOM) {
+  const playerCapacity = normalizePlayerCapacity(room.lobby_player_capacity);
+  const spectatorCapacity = normalizeSpectatorCapacity(room.lobby_spectator_capacity);
+  if (nextRole === "PLAYER" && (!existingPlayer || !isGamePlayer(existingPlayer)) && countGamePlayers(players) >= playerCapacity) {
     return {
       room: null,
       errorCode: PLAYER_CAPACITY_FULL_ERROR_CODE,
-      error: `玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以选择观战加入。`,
+      error: `玩家已满，当前房间最多支持 ${playerCapacity} 名玩家；可以选择观战加入。`,
     };
   }
-  if (!existingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
+  if (nextRole === "SPECTATOR" && (!existingPlayer || isGamePlayer(existingPlayer)) && countSpectators(players) >= spectatorCapacity) {
     return {
       room: null,
-      errorCode: PLAYER_CAPACITY_FULL_ERROR_CODE,
-      error: `房间已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家和观战者。`,
+      errorCode: SPECTATOR_CAPACITY_FULL_ERROR_CODE,
+      error: `观战人数已满，当前房间最多支持 ${spectatorCapacity} 名观战者。`,
     };
   }
 
@@ -2780,6 +2813,8 @@ export async function updateRoomGameSettings(params: {
   teamPresenterBlockEnabled?: boolean;
   spectatorQuestionPreviewEnabled?: boolean;
   spectatorPlayerAnswersEnabled?: boolean;
+  playerCapacity?: number;
+  spectatorCapacity?: number;
   teamAssignmentMode?: TeamAssignmentMode;
 }) {
   assertD1Env();
@@ -2822,6 +2857,21 @@ export async function updateRoomGameSettings(params: {
   const spectatorPlayerAnswersEnabled = params.spectatorPlayerAnswersEnabled ?? (
     currentRoom.lobby_spectator_player_answers_enabled !== 0 && currentRoom.lobby_spectator_player_answers_enabled !== false
   );
+  const playerCapacity = params.playerCapacity === undefined
+    ? normalizePlayerCapacity(currentRoom.lobby_player_capacity)
+    : requirePlayerCapacity(params.playerCapacity);
+  const spectatorCapacity = params.spectatorCapacity === undefined
+    ? normalizeSpectatorCapacity(currentRoom.lobby_spectator_capacity)
+    : requireSpectatorCapacity(params.spectatorCapacity);
+  const currentPlayers = getRoomStatePlayers(currentRoom);
+  const playerCount = countGamePlayers(currentPlayers);
+  const spectatorCount = countSpectators(currentPlayers);
+  if (playerCapacity < playerCount) {
+    throw new Error(`当前已有 ${playerCount} 名玩家，玩家人数上限不能低于 ${playerCount}。`);
+  }
+  if (spectatorCapacity < spectatorCount) {
+    throw new Error(`当前已有 ${spectatorCount} 名观战者，观战人数上限不能低于 ${spectatorCount}。`);
+  }
   const teamAssignmentMode = normalizeTeamAssignmentMode(params.teamAssignmentMode ?? currentRoom.lobby_team_assignment_mode);
   const roomUpdates: Partial<DbRoom> = {
     lobby_game_mode: params.gameMode,
@@ -2833,6 +2883,8 @@ export async function updateRoomGameSettings(params: {
     lobby_team_presenter_block_enabled: teamPresenterBlockEnabled ? 1 : 0,
     lobby_spectator_question_preview_enabled: spectatorQuestionPreviewEnabled ? 1 : 0,
     lobby_spectator_player_answers_enabled: spectatorPlayerAnswersEnabled ? 1 : 0,
+    lobby_player_capacity: playerCapacity,
+    lobby_spectator_capacity: spectatorCapacity,
     lobby_team_assignment_mode: teamAssignmentMode,
     ...(params.gameMode !== "TEAM_BATTLE" || teamAssignmentMode === "AUTO"
       ? { lobby_team_assignments: "{}" }
@@ -3311,8 +3363,13 @@ export async function updatePlayerRole(roomId: string, actorPlayerId: string, ta
     throw new Error("身份切换失败：你不在当前房间。");
   }
 
-  if (role === "PLAYER" && !isGamePlayer(targetPlayer) && countGamePlayers(players) >= MAX_PLAYERS_PER_ROOM) {
-    throw new Error(`玩家已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家；可以继续观战。`);
+  const playerCapacity = normalizePlayerCapacity(room.lobby_player_capacity);
+  const spectatorCapacity = normalizeSpectatorCapacity(room.lobby_spectator_capacity);
+  if (role === "PLAYER" && !isGamePlayer(targetPlayer) && countGamePlayers(players) >= playerCapacity) {
+    throw new Error(`玩家已满，当前房间最多支持 ${playerCapacity} 名玩家；可以继续观战。`);
+  }
+  if (role === "SPECTATOR" && isGamePlayer(targetPlayer) && countSpectators(players) >= spectatorCapacity) {
+    throw new Error(`观战人数已满，当前房间最多支持 ${spectatorCapacity} 名观战者。`);
   }
 
   const selectedTeam = team === "red" || team === "blue" ? team : null;

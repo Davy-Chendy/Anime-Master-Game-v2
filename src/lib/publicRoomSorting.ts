@@ -35,7 +35,7 @@ function comparePrimary(left: PublicRoomSummary, right: PublicRoomSummary, key: 
   if (key === "name") return left.name.localeCompare(right.name, "zh-CN");
   if (key === "activity") return activityTime(left) - activityTime(right);
   if (key === "status") return statusOrder(left) - statusOrder(right);
-  if (key === "people") return left.memberCount - right.memberCount;
+  if (key === "people") return left.playerCount - right.playerCount;
   if (key === "mode") return GAME_MODE_ORDER.indexOf(left.gameMode) - GAME_MODE_ORDER.indexOf(right.gameMode);
   if (!left.questionSource || !right.questionSource) return 0;
   return SOURCE_ORDER[left.questionSource] - SOURCE_ORDER[right.questionSource];
