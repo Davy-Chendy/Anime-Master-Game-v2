@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { listPublicRooms, type Env } from "../worker/index";
+import { getPublicRoomsResponse, listPublicRooms, type Env } from "../worker/index";
 
 type Status = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
 type Row = {
@@ -86,6 +86,25 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
     },
   } as unknown as Env;
   return { env, fetchedTopics, boundQueries };
+}
+
+function createResponseCache() {
+  const entries = new Map<string, Response>();
+  const matchedKeys: string[] = [];
+  const writtenKeys: string[] = [];
+  const cache = {
+    async match(request: RequestInfo | URL) {
+      const key = request instanceof Request ? request.url : String(request);
+      matchedKeys.push(key);
+      return entries.get(key)?.clone();
+    },
+    async put(request: RequestInfo | URL, response: Response) {
+      const key = request instanceof Request ? request.url : String(request);
+      writtenKeys.push(key);
+      entries.set(key, response.clone());
+    },
+  } satisfies Pick<Cache, "match" | "put">;
+  return { cache, entries, matchedKeys, writtenKeys };
 }
 
 test("public room directory filters every status by authoritative one-hour activity", async () => {
@@ -206,4 +225,107 @@ test("public room directory rejects malformed cursors without querying storage",
   })).toString("base64url");
   await assert.rejects(() => listPublicRooms(env, previousOrderingCursor, NOW), /公开房间游标无效/);
   assert.equal(boundQueries.length, 0);
+});
+
+test("public room directory caches a complete successful response for sixty seconds", async () => {
+  const freshAt = new Date().toISOString();
+  const { env, fetchedTopics, boundQueries } = createEnv([
+    [room("playing-cache", "PLAYING", freshAt, 3)],
+  ], {
+    "room:playing-cache": Response.json({
+      status: "PLAYING",
+      memberCount: 7,
+      spectatorCount: 2,
+      updatedAt: freshAt,
+      currentQuestionIndex: 2,
+      questionCount: 30,
+    }),
+  });
+  const { cache, entries, matchedKeys, writtenKeys } = createResponseCache();
+
+  const firstResponse = await getPublicRoomsResponse(
+    new Request("https://api.example.com/api/public-rooms?ignored=first", { headers: { origin: "https://first.example.com" } }),
+    env,
+    cache,
+  );
+  const secondResponse = await getPublicRoomsResponse(
+    new Request("https://api.example.com/api/public-rooms?ignored=second", { headers: { origin: "https://second.example.com" } }),
+    { ...env, ALLOWED_ORIGIN: "*" },
+    cache,
+  );
+
+  assert.equal(firstResponse.headers.get("x-public-room-cache"), "MISS");
+  assert.equal(secondResponse.headers.get("x-public-room-cache"), "HIT");
+  assert.equal(firstResponse.headers.get("cache-control"), "no-store");
+  assert.equal(secondResponse.headers.get("cache-control"), "no-store");
+  assert.equal(firstResponse.headers.get("access-control-allow-origin"), "https://first.example.com");
+  assert.equal(secondResponse.headers.get("access-control-allow-origin"), "https://second.example.com");
+  assert.deepEqual(await firstResponse.json(), await secondResponse.json());
+  assert.equal(boundQueries.length, 1);
+  assert.deepEqual(fetchedTopics, ["room:playing-cache"]);
+  assert.equal(matchedKeys.length, 2);
+  assert.equal(writtenKeys.length, 1);
+  assert.equal(matchedKeys[0], matchedKeys[1], "irrelevant query parameters and Origin must not fragment the shared cache");
+  assert.match(matchedKeys[0], /cacheVersion=1/);
+  assert.match(matchedKeys[0], /runtimeGeneration=/);
+  assert.equal(entries.get(writtenKeys[0])?.headers.get("cache-control"), "public, max-age=60");
+});
+
+test("public room directory isolates each cursor in the shared cache", async () => {
+  const baseTime = Date.now();
+  const firstQuery = Array.from({ length: 21 }, (_, index) => room(
+    `cache-page-${String(index).padStart(2, "0")}`,
+    "LOBBY",
+    new Date(baseTime - index * 1_000).toISOString(),
+  ));
+  const secondQuery = [room("cache-page-20", "LOBBY", new Date(baseTime - 20_000).toISOString())];
+  const { env, boundQueries } = createEnv([firstQuery, secondQuery], {});
+  const { cache, writtenKeys } = createResponseCache();
+
+  const firstResponse = await getPublicRoomsResponse(new Request("https://api.example.com/api/public-rooms"), env, cache);
+  const firstPage = await firstResponse.json() as { rooms: Array<{ id: string }>; nextCursor: string | null };
+  assert.ok(firstPage.nextCursor);
+  const secondResponse = await getPublicRoomsResponse(
+    new Request(`https://api.example.com/api/public-rooms?cursor=${encodeURIComponent(firstPage.nextCursor)}`),
+    env,
+    cache,
+  );
+  const secondPage = await secondResponse.json() as { rooms: Array<{ id: string }>; nextCursor: string | null };
+  const repeatedFirstResponse = await getPublicRoomsResponse(new Request("https://api.example.com/api/public-rooms"), env, cache);
+
+  assert.equal(firstResponse.headers.get("x-public-room-cache"), "MISS");
+  assert.equal(secondResponse.headers.get("x-public-room-cache"), "MISS");
+  assert.equal(repeatedFirstResponse.headers.get("x-public-room-cache"), "HIT");
+  assert.equal(firstPage.rooms[0].id, "cache-page-00");
+  assert.deepEqual(secondPage.rooms.map(({ id }) => id), ["cache-page-20"]);
+  assert.equal(boundQueries.length, 2);
+  assert.equal(writtenKeys.length, 2);
+  assert.notEqual(writtenKeys[0], writtenKeys[1]);
+});
+
+test("public room directory does not cache failures", async () => {
+  let queryCount = 0;
+  const env = {
+    DB: {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async all() {
+                queryCount += 1;
+                throw new Error("temporary D1 failure");
+              },
+            };
+          },
+        };
+      },
+    },
+  } as unknown as Env;
+  const { cache, writtenKeys } = createResponseCache();
+  const request = new Request("https://api.example.com/api/public-rooms");
+
+  await assert.rejects(() => getPublicRoomsResponse(request, env, cache), /temporary D1 failure/);
+  await assert.rejects(() => getPublicRoomsResponse(request, env, cache), /temporary D1 failure/);
+  assert.equal(queryCount, 2);
+  assert.equal(writtenKeys.length, 0);
 });

@@ -2494,6 +2494,10 @@ const PUBLIC_ROOM_QUERY_LIMIT = PUBLIC_ROOM_PAGE_SIZE + 1;
 const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 60 * 60 * 1000;
 const PUBLIC_ROOM_PRESENCE_CONCURRENCY = 5;
 const PUBLIC_ROOM_PRESENCE_TIMEOUT_MS = 800;
+const PUBLIC_ROOM_DIRECTORY_CACHE_TTL_SECONDS = 60;
+const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 1;
+
+type PublicRoomResponseCache = Pick<Cache, "match" | "put">;
 
 function encodePublicRoomCursor(room: PublicRoomRow) {
   return btoa(JSON.stringify({
@@ -2664,6 +2668,57 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       ? encodePublicRoomCursor(pageCandidates[pageCandidates.length - 1])
       : null,
   };
+}
+
+function getPublicRoomDirectoryCacheKey(request: Request, cursorValue?: string | null) {
+  const cacheUrl = new URL(request.url);
+  cacheUrl.pathname = "/api/public-rooms";
+  cacheUrl.search = "";
+  cacheUrl.searchParams.set("cacheVersion", String(PUBLIC_ROOM_DIRECTORY_CACHE_VERSION));
+  cacheUrl.searchParams.set("runtimeGeneration", String(CURRENT_ROOM_RUNTIME_GENERATION));
+  if (cursorValue) cacheUrl.searchParams.set("cursor", cursorValue);
+  return new Request(cacheUrl.toString(), { method: "GET" });
+}
+
+function publicRoomDirectoryClientResponse(response: Response, request: Request, env: Env, cacheStatus: "HIT" | "MISS") {
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "no-store");
+  headers.set("x-public-room-cache", cacheStatus);
+  return withCors(new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  }), request, env);
+}
+
+export async function getPublicRoomsResponse(
+  request: Request,
+  env: Env,
+  cache: PublicRoomResponseCache,
+): Promise<Response> {
+  const cursorValue = new URL(request.url).searchParams.get("cursor");
+  const cacheKey = getPublicRoomDirectoryCacheKey(request, cursorValue);
+  try {
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) return publicRoomDirectoryClientResponse(cachedResponse, request, env, "HIT");
+  } catch (error) {
+    logAuxiliaryFailure("public_room_directory_cache_read_failed", error);
+  }
+
+  const page = await listPublicRooms(env, cursorValue);
+  const body = JSON.stringify(page);
+  const cacheResponse = new Response(body, {
+    headers: {
+      "cache-control": `public, max-age=${PUBLIC_ROOM_DIRECTORY_CACHE_TTL_SECONDS}`,
+      "content-type": "application/json; charset=utf-8",
+    },
+  });
+  try {
+    await cache.put(cacheKey, cacheResponse.clone());
+  } catch (error) {
+    logAuxiliaryFailure("public_room_directory_cache_write_failed", error);
+  }
+  return publicRoomDirectoryClientResponse(cacheResponse, request, env, "MISS");
 }
 
 async function getExpiredRooms(env: Env, cutoffIso: string) {
@@ -5468,8 +5523,7 @@ export default {
 
     try {
       if (url.pathname === "/api/public-rooms" && request.method === "GET") {
-        const page = await listPublicRooms(env, url.searchParams.get("cursor"));
-        return json(page, { headers: { "cache-control": "no-store" } }, request, env);
+        return await getPublicRoomsResponse(request, env, caches.default);
       }
 
       if (url.pathname === "/api/rpc" && request.method === "POST") {
