@@ -717,12 +717,17 @@ test("TEAM_BATTLE completes alternating-team votes, wrong guess, bonus reveal, a
   assert.equal(sim.session.teamBattleState?.phase, "GUESS_VOTE");
   await teamVote(sim, "GUESS_VOTE", { type: "guess", answerText: "red correct" });
   assert.equal(sim.session.teamBattleState?.phase, "JUDGING");
+  const redProposerId = sim.session.teamBattleState!.teams.red[0];
+  assert.equal(sim.session.teamBattleState?.pendingGuess?.proposerPlayerId, redProposerId);
+  assert.equal(sim.session.teamBattleState?.pendingGuess?.proposerName, sim.session.teamBattleState?.teamMemberNames?.[redProposerId]);
   await sim.act("host", "judgeTeamBattleGuess", { presenterPlayerId: "host", isCorrect: true });
   assert.equal(sim.session.teamBattleState?.phase, "REVIEW");
   assert.equal(sim.session.teamBattleState?.teamScores.red, 1);
+  assert.equal(sim.session.teamBattleState?.correctGuess?.proposerPlayerId, redProposerId);
   await labelAndAdvance(sim, "team answer 1");
 
   assert.equal(sim.session.teamBattleState?.activeTeam, "blue");
+  assert.equal(sim.session.teamBattleState?.correctGuess, null);
   await completeTeamBlockSelection(sim);
   await teamVote(sim, "REVEAL_VOTE", [1]);
   await teamVote(sim, "GUESS_VOTE", { type: "skip" });

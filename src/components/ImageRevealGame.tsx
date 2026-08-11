@@ -4635,6 +4635,19 @@ export function ImageRevealGame({
             <p className="font-semibold text-slate-950">正确答案</p>
             <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "未填写"}</p>
           </div>
+          {isTeamBattleMode && teamBattleState?.correctGuess ? (
+            <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm">
+              <p className="font-semibold text-emerald-800">
+                {getTeamName(teamBattleState.correctGuess.team)}猜测回答正确
+              </p>
+              <p className="mt-2 break-words text-lg font-bold text-slate-950">
+                「{teamBattleState.correctGuess.answerText}」
+              </p>
+              {teamBattleState.correctGuess.proposerName ? (
+                <p className="mt-1 text-[var(--muted)]">提出者：{teamBattleState.correctGuess.proposerName}</p>
+              ) : null}
+            </div>
+          ) : null}
           {!isPresenter && isCurrentPlayerCorrect ? (
             <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
               <PlayerAnswerViewSwitch
@@ -4800,10 +4813,12 @@ export function ImageRevealGame({
                           >
                             <span className="min-w-0">
                               <span className="block truncate font-semibold text-slate-950">{option.label}</span>
-                              {teamBattleCanAct && !teamBattleIsVoteClosed ? (
+                              {option.vote.type === "guess" ? (
                                 <span className="mt-0.5 block text-xs text-[var(--muted)]">
-                                  {option.vote.type === "skip" ? "跟投不猜" : option.proposerName}
+                                  提出者：{option.proposerName}
                                 </span>
+                              ) : teamBattleCanAct && !teamBattleIsVoteClosed ? (
+                                <span className="mt-0.5 block text-xs text-[var(--muted)]">跟投不猜</span>
                               ) : null}
                             </span>
                             <span className="shrink-0 rounded bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-700">
@@ -4865,6 +4880,9 @@ export function ImageRevealGame({
               <div className="rounded-md bg-white p-3 text-sm">
                 <p className="font-semibold text-slate-950">{getTeamName(teamBattleState.pendingGuess.team)}猜测</p>
                 <p className="mt-2 break-words text-lg font-bold text-slate-950">{teamBattleState.pendingGuess.answerText}</p>
+                {teamBattleState.pendingGuess.proposerName ? (
+                  <p className="mt-1 text-[var(--muted)]">提出者：{teamBattleState.pendingGuess.proposerName}</p>
+                ) : null}
                 {isPresenter ? (
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <Button type="button" onClick={() => handleJudgeTeamBattleGuess(true)} disabled={isJudgingTeamBattle}>

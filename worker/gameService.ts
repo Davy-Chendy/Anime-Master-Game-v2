@@ -52,6 +52,7 @@ import type {
   RoomVisibility,
   TeamBattleGuessVote,
   TeamBattlePreviousTurnAction,
+  TeamBattleResolvedGuess,
   TeamBattleState,
   TeamBattleTeam,
   TeamAssignmentMode,
@@ -418,21 +419,31 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     revealVotes: normalizeRevealVotes(record.revealVotes),
     guessVotes: normalizeGuessVotes(record.guessVotes),
     previousTurnAction: normalizePreviousTurnAction(record.previousTurnAction),
-    pendingGuess:
-      record.pendingGuess &&
-      typeof record.pendingGuess === "object" &&
-      (record.pendingGuess.team === "red" || record.pendingGuess.team === "blue") &&
-      typeof record.pendingGuess.answerText === "string"
-        ? {
-            team: record.pendingGuess.team,
-            answerText: record.pendingGuess.answerText,
-          }
-        : null,
+    pendingGuess: normalizeResolvedTeamGuess(record.pendingGuess),
+    correctGuess: normalizeResolvedTeamGuess(record.correctGuess),
     teamScores: {
       red: Math.max(0, Math.floor(Number(teamScoresRecord?.red) || 0)),
       blue: Math.max(0, Math.floor(Number(teamScoresRecord?.blue) || 0)),
     },
     message: typeof record.message === "string" ? record.message : null,
+  };
+}
+
+function normalizeResolvedTeamGuess(value: unknown): TeamBattleResolvedGuess | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as { team?: unknown; answerText?: unknown; proposerPlayerId?: unknown; proposerName?: unknown };
+  if ((record.team !== "red" && record.team !== "blue") || typeof record.answerText !== "string") {
+    return null;
+  }
+
+  return {
+    team: record.team,
+    answerText: record.answerText,
+    proposerPlayerId: typeof record.proposerPlayerId === "string" ? record.proposerPlayerId : undefined,
+    proposerName: typeof record.proposerName === "string" ? record.proposerName : undefined,
   };
 }
 
@@ -606,6 +617,7 @@ function createInitialTeamBattleState(
     guessVotes: {},
     previousTurnAction: null,
     pendingGuess: null,
+    correctGuess: null,
     teamScores: options?.previousScores ?? { red: 0, blue: 0 },
     message: presenterBlockEnabled ? "等待出题人禁用格子" : "红队选格",
   };
@@ -682,6 +694,7 @@ async function resetTeamBattleStateForQuestion(
     guessVotes: {},
     previousTurnAction: null,
     pendingGuess: null,
+    correctGuess: null,
     teamScores: state.teamScores,
     message: presenterBlockEnabled
       ? newGuessers.length > 0
@@ -5795,13 +5808,15 @@ export async function finalizeTeamBattleVote(params: {
     return { gameSession: toGameSession(updatedGameSession) };
   }
 
-  const optionCounts = new Map<string, { count: number; vote: TeamBattleGuessVote }>();
-  for (const vote of Object.values(state.guessVotes)) {
+  const optionCounts = new Map<string, { count: number; vote: TeamBattleGuessVote; proposerPlayerId?: string; proposerName?: string }>();
+  for (const [voterId, vote] of Object.entries(state.guessVotes)) {
     const key = vote.type === "skip" ? "__skip__" : `guess:${vote.answerText?.trim() ?? ""}`;
     const existing = optionCounts.get(key);
     optionCounts.set(key, {
       count: (existing?.count ?? 0) + 1,
       vote,
+      proposerPlayerId: existing?.proposerPlayerId ?? (vote.type === "guess" ? voterId : undefined),
+      proposerName: existing?.proposerName ?? (vote.type === "guess" ? state.teamMemberNames?.[voterId] : undefined),
     });
   }
 
@@ -5851,6 +5866,8 @@ export async function finalizeTeamBattleVote(params: {
     pendingGuess: {
       team: state.activeTeam,
       answerText,
+      proposerPlayerId: winningOption.proposerPlayerId,
+      proposerName: winningOption.proposerName,
     },
     message: `${getTeamName(state.activeTeam)}决定猜「${answerText}」。${tieMessage}`,
   };
@@ -5948,6 +5965,7 @@ export async function judgeTeamBattleGuess(params: {
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    correctGuess: { ...state.pendingGuess },
     pendingGuess: null,
     teamScores: nextScores,
     message: `${getTeamName(winningTeam)}猜对并获得 1 分，当前展示完整图片。`,

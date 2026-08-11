@@ -2051,6 +2051,68 @@ test("legacy journal recovery does not switch teams while TEAM_BATTLE waits on a
   assert.equal(recovered.voteDeadlineAt, null);
 });
 
+test("legacy journal recovery preserves the correct TEAM_BATTLE guess proposer", () => {
+  const storage = new StorageAdapter();
+  const authority = new RoomGameAuthority(storage as unknown as DurableObjectStorage, fakeD1);
+  authority.initializeSchema();
+  const now = new Date(0).toISOString();
+  const teamState = {
+    teams: { red: ["p0"], blue: ["p1"] },
+    initialTeams: { red: ["p0"], blue: ["p1"] },
+    teamMemberNames: { p0: "Red", p1: "Blue" },
+    activeTeam: "red",
+    phase: "JUDGING",
+    revealBlockCount: 45,
+    revealLimit: 1,
+    turnNumber: 1,
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    previousTurnAction: null,
+    pendingGuess: {
+      team: "red",
+      answerText: "正确答案",
+      proposerPlayerId: "p0",
+      proposerName: "Red",
+    },
+    teamScores: { red: 0, blue: 0 },
+  };
+  storage.sql.db.prepare(
+    "INSERT INTO authority_meta(room_id,hydrated_at,active_game_id,epoch,state_version) VALUES(?,?,?,?,?)",
+  ).run("r1", now, "g1", "epoch-1", 0);
+  storage.sql.db.prepare(
+    "INSERT INTO rooms(id,room_code,host_player_id,game_status,current_presenter_player_id,current_game_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+  ).run("r1", "ROOM01", "host", "PLAYING", "host", "g1", now, now);
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["p0", "Red", 0], ["p1", "Blue", 0]] as const) {
+    storage.sql.db.prepare(
+      "INSERT INTO players(id,room_id,nickname,is_host,joined_at,last_seen_at,role) VALUES(?,?,?,?,?,?,?)",
+    ).run(id, "r1", nickname, isHost, now, now, "PLAYER");
+  }
+  storage.sql.db.prepare(
+    "INSERT INTO game_sessions(id,room_id,question_set_id,presenter_player_id,status,game_mode,team_battle_state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+  ).run("g1", "r1", "qs1", "host", "PLAYING", "TEAM_BATTLE", JSON.stringify(teamState), now);
+  storage.sql.db.prepare(
+    "INSERT INTO question_results(id,game_session_id,question_index,player_id,scored_round,score_awarded,judged_by_player_id,judged_at) VALUES(?,?,?,?,?,?,?,?)",
+  ).run("result-p0", "g1", 0, "p0", 1, 1, "host", now);
+
+  authority.beginMutation("r1", "judgeTeamBattleGuess", null, [{
+    gameSessionId: "g1",
+    presenterPlayerId: "host",
+    isCorrect: true,
+  }]);
+  authority.recoverIncompleteMutation("r1");
+
+  const recoveredRow = storage.sql.db.prepare("SELECT team_battle_state FROM game_sessions WHERE id='g1'").get() as { team_battle_state: string };
+  const recovered = JSON.parse(recoveredRow.team_battle_state) as typeof teamState & {
+    correctGuess?: typeof teamState.pendingGuess;
+    pendingGuess: typeof teamState.pendingGuess | null;
+  };
+  assert.equal(recovered.phase, "REVIEW");
+  assert.equal(recovered.pendingGuess, null);
+  assert.deepEqual(recovered.correctGuess, teamState.pendingGuess);
+  assert.equal(recovered.teamScores.red, 1);
+});
+
 test("TEAM_BATTLE presenter fallback settles only after the authoritative deadline", () => {
   const { state, authority } = createAuthority(2);
   const aggregate = authority.getAggregate()!;
@@ -2163,6 +2225,73 @@ test("TEAM_BATTLE guess vote randomly selects within a highest-vote tie", () => 
   authority.handleMutation(socketFor(state, "host"), envelope("host", 1, "finalizeTeamBattleVote", teamVoteFallbackPayload(aggregate.gameSession!)), 1000);
   assert.equal(aggregate.gameSession!.teamBattleState!.previousTurnAction?.type, "skip");
   assert.match(aggregate.gameSession!.teamBattleState!.message ?? "", /最高票选项票数相同，随机选择了不猜/);
+});
+
+test("TEAM_BATTLE keeps the winning guess proposer through review, checkpoint recovery, and clears it for the next question", async () => {
+  const { state, authority } = createAuthority(3, fakeD1, 2, () => 0);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] },
+    initialTeams: { red: ["p0", "p1"], blue: ["p2"] },
+    teamMemberNames: { p0: "P0", p1: "P1", p2: "P2" },
+    activeTeam: "red",
+    phase: "GUESS_VOTE",
+    revealBlockCount: 45,
+    revealLimit: 1,
+    turnNumber: 1,
+    voteDeadlineAt: new Date(1_000).toISOString(),
+    revealVotes: {},
+    guessVotes: {
+      p0: { type: "guess", answerText: "正确答案" },
+      p1: { type: "guess", answerText: "正确答案" },
+    },
+    previousTurnAction: null,
+    pendingGuess: null,
+    correctGuess: null,
+    teamScores: { red: 0, blue: 0 },
+  };
+
+  const finalized = authority.handleMutation(
+    socketFor(state, "host"),
+    envelope("host", 1, "finalizeTeamBattleVote", teamVoteFallbackPayload(aggregate.gameSession!)),
+    1_000,
+  );
+  assert.equal(finalized.error, undefined);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.pendingGuess, {
+    team: "red",
+    answerText: "正确答案",
+    proposerPlayerId: "p0",
+    proposerName: "P0",
+  });
+
+  const judged = authority.handleMutation(
+    socketFor(state, "host"),
+    envelope("host", 2, "judgeTeamBattleGuess", { presenterPlayerId: "host", isCorrect: true }),
+    2_000,
+  );
+  assert.equal(judged.error, undefined);
+  assert.equal(aggregate.gameSession!.teamBattleState.phase, "REVIEW");
+  assert.equal(aggregate.gameSession!.teamBattleState.pendingGuess, null);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.correctGuess, {
+    team: "red",
+    answerText: "正确答案",
+    proposerPlayerId: "p0",
+    proposerName: "P0",
+  });
+
+  await authority.forceCheckpoint(judged.forceCheckpoint!);
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.equal(restored.getAggregate()!.gameSession!.teamBattleState?.correctGuess?.proposerName, "P0");
+
+  const advanced = restored.handleMutation(
+    socketFor(state, "host"),
+    envelope("host", 3, "advanceReviewedQuestion", { presenterPlayerId: "host", expectedQuestionIndex: 0 }),
+    3_000,
+  );
+  assert.equal(advanced.error, undefined);
+  assert.equal(restored.getAggregate()!.gameSession!.teamBattleState?.correctGuess, null);
 });
 
 test("TEAM_BATTLE new questions wait for one presenter block selection without an Alarm", async () => {

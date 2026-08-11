@@ -1022,7 +1022,7 @@ export class RoomGameAuthority {
           state.pendingGuess &&
           typeof state.pendingGuess === "object"
         ) {
-          const pending = state.pendingGuess as { team?: "red" | "blue" };
+          const pending = state.pendingGuess as { team?: "red" | "blue"; answerText?: string; proposerPlayerId?: string; proposerName?: string };
           const winningTeam = pending.team;
           const winningMembers = winningTeam ? (state.teams[winningTeam] ?? []) : [];
           const resultCount = winningMembers.length > 0
@@ -1041,8 +1041,9 @@ export class RoomGameAuthority {
               ).toArray()[0]?.count ?? 0)
             : 0;
           if (winningTeam && resultCount === winningMembers.length) {
-            const mutable = state as typeof state & { phase?: string; teamScores?: Record<"red" | "blue", number>; message?: string; revealVotes?: Record<string, unknown>; guessVotes?: Record<string, unknown> };
+            const mutable = state as typeof state & { phase?: string; teamScores?: Record<"red" | "blue", number>; message?: string; revealVotes?: Record<string, unknown>; guessVotes?: Record<string, unknown>; correctGuess?: typeof pending };
             mutable.phase = "REVIEW";
+            mutable.correctGuess = { ...pending };
             mutable.teamScores = { red: mutable.teamScores?.red ?? 0, blue: mutable.teamScores?.blue ?? 0 };
             mutable.teamScores[winningTeam] += 1;
             mutable.voteDeadlineAt = null;

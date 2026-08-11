@@ -1279,20 +1279,30 @@ export class RoomAuthorityVNext {
       return this.publicSessionOutcome(session, "phase-boundary", true);
     }
     if (state.phase !== "GUESS_VOTE") return this.publicSessionOutcome(session);
-    const options = new Map<string, { vote: TeamBattleGuessVote; count: number }>();
-    for (const vote of Object.values(state.guessVotes)) {
+    const options = new Map<string, { vote: TeamBattleGuessVote; count: number; proposerPlayerId?: string; proposerName?: string }>();
+    for (const [voterId, vote] of Object.entries(state.guessVotes)) {
       const key = vote.type === "skip" ? "skip" : `guess:${vote.answerText?.trim()}`;
       const current = options.get(key);
-      options.set(key, { vote, count: (current?.count ?? 0) + 1 });
+      options.set(key, {
+        vote,
+        count: (current?.count ?? 0) + 1,
+        proposerPlayerId: current?.proposerPlayerId ?? (vote.type === "guess" ? voterId : undefined),
+        proposerName:
+          current?.proposerName ??
+          (vote.type === "guess"
+            ? state.teamMemberNames?.[voterId] ?? aggregate.players.find((player) => player.id === voterId)?.nickname
+            : undefined),
+      });
     }
     const noVotes = options.size === 0;
     const highest = noVotes ? 0 : Math.max(...[...options.values()].map((option) => option.count));
     const tiedOptions = noVotes
       ? [{ vote: { type: "skip" as const }, count: 0 }]
       : [...options.values()].filter((option) => option.count === highest);
-    const winner = tiedOptions.length > 1
-      ? tiedOptions[Math.min(tiedOptions.length - 1, Math.floor(this.random() * tiedOptions.length))]?.vote
-      : tiedOptions[0]?.vote;
+    const winningOption = tiedOptions.length > 1
+      ? tiedOptions[Math.min(tiedOptions.length - 1, Math.floor(this.random() * tiedOptions.length))]
+      : tiedOptions[0];
+    const winner = winningOption?.vote;
     if (!winner) throw new TerminalMutationError("当前没有可结算的投票。");
     const tieMessage = noVotes
       ? "由于无人提交，视为不猜。"
@@ -1308,7 +1318,12 @@ export class RoomAuthorityVNext {
       aggregate.deadline = null;
     } else {
       state.phase = "JUDGING";
-      state.pendingGuess = { team: state.activeTeam, answerText: winner.answerText?.trim() ?? "" };
+      state.pendingGuess = {
+        team: state.activeTeam,
+        answerText: winner.answerText?.trim() ?? "",
+        proposerPlayerId: winningOption?.proposerPlayerId,
+        proposerName: winningOption?.proposerName,
+      };
       state.message = `${teamName(state.activeTeam)}决定猜「${state.pendingGuess.answerText}」。${tieMessage}`;
       state.voteDeadlineAt = null;
       aggregate.deadline = null;
@@ -1329,6 +1344,7 @@ export class RoomAuthorityVNext {
     if (action.payload.isCorrect) {
       const members = getTeamMembers(state, guessedBy);
       if (!members.length) throw new TerminalMutationError("猜测队伍已经没有成员。");
+      state.correctGuess = clone(state.pendingGuess);
       scoredPlayerIds = members;
       for (const playerId of members) {
         aggregate.questionResults = aggregate.questionResults.filter((result) => !(result.questionIndex === session.currentQuestionIndex && result.playerId === playerId));
@@ -2377,6 +2393,7 @@ export class RoomAuthorityVNext {
       guessVotes: {},
       previousTurnAction: null,
       pendingGuess: null,
+      correctGuess: null,
       teamScores: previous?.teamScores ?? { red: 0, blue: 0 },
       message: presenterBlockEnabled ? "等待出题人禁用格子" : `${teamName(nextActiveTeam)}选格`,
     };
