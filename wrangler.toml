@@ -47,5 +47,5 @@ REMOTE_IMAGE_PROXY_CANDIDATES = "https://corsproxy.io/?url=,https://api.allorigi
 
 [observability.logs]
 enabled = true
-head_sampling_rate = 0.1
+head_sampling_rate = 1
 invocation_logs = true
