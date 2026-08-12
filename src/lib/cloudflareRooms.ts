@@ -18,12 +18,9 @@ import type {
   TeamBattleTeam,
   PlayerScore,
   Question,
-  QuestionSetUrlImportResult,
   QuestionSetCreationMethod,
-  QuestionUrlImportInput,
   QuestionResult,
   QuestionSet,
-  PreparedQuestionUrlImport,
   RoundSnapshot,
   Room,
   RoomVisibility,
@@ -179,18 +176,6 @@ export const createUploadedQuestionSet = (params: {
   questions?: QuestionImportItem[];
   creationMethod?: QuestionSetCreationMethod;
 }) => rpc<QuestionSet>("createUploadedQuestionSet", params);
-
-export const createQuestionSetFromUrlText = (params: {
-  roomId: string;
-  presenterPlayerId: string;
-  title: string;
-  description?: string;
-  imageUrlsText?: string;
-  retryQuestions?: QuestionUrlImportInput[];
-  preparedQuestions?: PreparedQuestionUrlImport[];
-  fallbackToOriginalUrls?: boolean;
-  prepareOnly?: boolean;
-}) => rpc<QuestionSetUrlImportResult>("createQuestionSetFromUrlText", params);
 
 export const getQuestionSetById = (questionSetId: string) =>
   rpc<QuestionSet | null>("getQuestionSetById", questionSetId);

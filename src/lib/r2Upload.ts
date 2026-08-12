@@ -1,6 +1,7 @@
 "use client";
 
 import { isR2ImageUploadTooLarge, R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE } from "./r2UploadPolicy";
+import type { FailedQuestionUrlImport, PreparedQuestionUrlImport, QuestionUrlImportInput } from "../types/game";
 
 export type UploadableImage = {
   file: File;
@@ -103,6 +104,18 @@ type PreparedImage = {
   usedOriginal: boolean;
 };
 
+type RemoteImportDependencies = {
+  fetchSource?: (input: QuestionUrlImportInput) => Promise<{ blob: Blob; name: string }>;
+  prepare?: (source: { blob: Blob; name: string }) => Promise<PreparedImage>;
+  upload?: (prepared: PreparedImage) => Promise<{ key: string; url: string; publicId: string }>;
+  concurrency?: number;
+};
+
+export type RemoteImageImportResult = {
+  preparedQuestions: PreparedQuestionUrlImport[];
+  failedQuestions: FailedQuestionUrlImport[];
+};
+
 export type UploadProgress = {
   done: number;
   total: number;
@@ -113,15 +126,17 @@ export type UploadProgress = {
   latestMessage: string;
 };
 
+const clientEnv = (import.meta as ImportMeta & { env?: ImportMetaEnv }).env ?? {} as ImportMetaEnv;
+
 const r2UploadConfig = {
-  maxSize: Number(import.meta.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 1600),
-  quality: Number(import.meta.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
-  format: import.meta.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
-  concurrency: Number(import.meta.env.NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY ?? 2),
+  maxSize: Number(clientEnv.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 1600),
+  quality: Number(clientEnv.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
+  format: clientEnv.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
+  concurrency: Number(clientEnv.NEXT_PUBLIC_R2_UPLOAD_CONCURRENCY ?? 2),
 };
 
 function apiBase() {
-  return (import.meta.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+  return (clientEnv.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
 }
 
 function apiUrl(path: string) {
@@ -410,6 +425,139 @@ export async function uploadImagesToR2(
   return results.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+function remoteFileName(rawUrl: string, contentType: string) {
+  try {
+    const url = new URL(rawUrl);
+    const lastSegment = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "image");
+    if (/\.[a-z0-9]{1,8}$/i.test(lastSegment)) return lastSegment;
+    return `${lastSegment || "image"}${extensionForMime(contentType, "image.jpg")}`;
+  } catch {
+    return `image${extensionForMime(contentType, "image.jpg")}`;
+  }
+}
+
+async function readRemoteResponse(response: Response, imageUrl: string) {
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(payload.error ?? `下载远端图片失败，状态码 ${response.status}。`);
+  }
+  const contentType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!contentType.startsWith("image/") || contentType === "image/svg+xml") throw new Error("远端返回的不是受支持的位图图片。");
+  const maxBytes = 20 * 1024 * 1024;
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) throw new Error("远端原图不能超过 20 MB。");
+  if (!response.body) throw new Error("远端图片内容为空。");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("远端原图不能超过 20 MB。");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (totalBytes === 0) throw new Error("远端图片内容为空。");
+  const blob = new Blob(chunks as BlobPart[], { type: contentType });
+  return { blob, name: remoteFileName(imageUrl, contentType) };
+}
+
+async function fetchRemoteSource(input: QuestionUrlImportInput, roomId: string, presenterPlayerId: string) {
+  let direct: Response | null = null;
+  try {
+    direct = await fetch(input.imageUrl, {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    });
+  } catch {
+    // Browser CORS/network failures use the authorized Worker source fallback.
+  }
+  if (direct?.ok) return await readRemoteResponse(direct, input.imageUrl);
+  const response = await fetch(apiUrl("/api/remote-image-source"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ roomId, presenterPlayerId, imageUrl: input.imageUrl }),
+  });
+  return await readRemoteResponse(response, input.imageUrl);
+}
+
+function defaultRemoteImportConcurrency() {
+  if (typeof navigator === "undefined") return 1;
+  const navigatorWithMemory = navigator as Navigator & { deviceMemory?: number };
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    || (navigatorWithMemory.deviceMemory ?? 8) <= 4
+    ? 1
+    : 2;
+}
+
+export async function uploadRemoteImagesToR2(
+  inputs: QuestionUrlImportInput[],
+  roomId: string,
+  presenterPlayerId: string,
+  onProgress: (progress: UploadProgress) => void,
+  dependencies: RemoteImportDependencies = {},
+): Promise<RemoteImageImportResult> {
+  const preparedQuestions: PreparedQuestionUrlImport[] = [];
+  const failedQuestions: FailedQuestionUrlImport[] = [];
+  const fetchSource = dependencies.fetchSource ?? ((input) => fetchRemoteSource(input, roomId, presenterPlayerId));
+  const prepare = dependencies.prepare ?? ((source) => compressImage({
+    file: source.blob as File,
+    path: source.name,
+    name: source.name,
+    size: source.blob.size,
+    type: source.blob.type,
+  }));
+  const upload = dependencies.upload ?? uploadPreparedFile;
+  const limit = Math.max(1, Math.min(2, dependencies.concurrency ?? defaultRemoteImportConcurrency()));
+  let done = 0;
+  let success = 0;
+  let fail = 0;
+  let rawBytes = 0;
+  let uploadBytes = 0;
+
+  await runPool(inputs, limit, async (input) => {
+    try {
+      onProgress({ done, total: inputs.length, success, fail, rawBytes, uploadBytes, latestMessage: `正在下载第 ${input.orderIndex + 1} 张图片` });
+      const source = await fetchSource(input);
+      const prepared = await prepare(source);
+      if (isR2ImageUploadTooLarge(prepared.uploadBytes)) throw new Error(R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE);
+      const uploaded = await upload(prepared);
+      rawBytes += prepared.rawBytes;
+      uploadBytes += prepared.uploadBytes;
+      success += 1;
+      preparedQuestions.push({
+        ...input,
+        imageUrl: uploaded.url,
+        originalImageUrl: input.imageUrl,
+        r2Key: uploaded.key,
+        rawBytes: prepared.rawBytes,
+        uploadBytes: prepared.uploadBytes,
+        usedOriginal: prepared.usedOriginal,
+      });
+    } catch (error) {
+      fail += 1;
+      failedQuestions.push({ ...input, error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      done += 1;
+      onProgress({ done, total: inputs.length, success, fail, rawBytes, uploadBytes, latestMessage: `已完成 ${done}/${inputs.length}` });
+    }
+  });
+
+  return {
+    preparedQuestions: preparedQuestions.sort((a, b) => a.orderIndex - b.orderIndex),
+    failedQuestions: failedQuestions.sort((a, b) => a.orderIndex - b.orderIndex),
+  };
+}
+
 function isImageFile(file: File) {
   return file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp|gif|avif)$/i.test(file.name);
 }
@@ -474,6 +622,7 @@ async function compressImage(item: UploadableImage): Promise<PreparedImage> {
   const height = image.naturalHeight || image.height;
 
   if (!width || !height) {
+    image.src = "";
     throw new Error("无法读取图片尺寸。");
   }
 
@@ -486,39 +635,48 @@ async function compressImage(item: UploadableImage): Promise<PreparedImage> {
 
   const context = canvas.getContext("2d", { alpha: targetMime === "image/png" || targetMime === "image/webp" });
   if (!context) {
+    image.src = "";
+    canvas.width = 0;
+    canvas.height = 0;
     throw new Error("浏览器无法创建图片压缩画布。");
   }
 
-  context.drawImage(image, 0, 0, outputWidth, outputHeight);
-
-  let blob: Blob;
   try {
-    blob = await canvasToBlob(canvas, targetMime, quality);
-  } catch (error) {
-    if (targetMime !== "image/webp") {
-      throw error;
+    context.drawImage(image, 0, 0, outputWidth, outputHeight);
+
+    let blob: Blob;
+    try {
+      blob = await canvasToBlob(canvas, targetMime, quality);
+    } catch (error) {
+      if (targetMime !== "image/webp") {
+        throw error;
+      }
+
+      blob = await canvasToBlob(canvas, "image/jpeg", quality);
     }
 
-    blob = await canvasToBlob(canvas, "image/jpeg", quality);
-  }
+    if (blob.size >= item.size) {
+      return {
+        blob: item.file,
+        uploadName: item.name,
+        rawBytes: item.size,
+        uploadBytes: item.size,
+        usedOriginal: true,
+      };
+    }
 
-  if (blob.size >= item.size) {
     return {
-      blob: item.file,
-      uploadName: item.name,
+      blob,
+      uploadName: replaceExtension(item.name, extensionForMime(blob.type || targetMime, item.name)),
       rawBytes: item.size,
-      uploadBytes: item.size,
-      usedOriginal: true,
+      uploadBytes: blob.size,
+      usedOriginal: false,
     };
+  } finally {
+    image.src = "";
+    canvas.width = 0;
+    canvas.height = 0;
   }
-
-  return {
-    blob,
-    uploadName: replaceExtension(item.name, extensionForMime(blob.type || targetMime, item.name)),
-    rawBytes: item.size,
-    uploadBytes: blob.size,
-    usedOriginal: false,
-  };
 }
 
 function loadImageFromBlob(blob: Blob) {

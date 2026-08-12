@@ -95,7 +95,6 @@ const MUTATION_NAMES = new Set([
   "cancelCurrentRound",
   "cancelPresenterSetup",
   "createUploadedQuestionSet",
-  "createQuestionSetFromUrlText",
   "prepareQuestionSetForStart",
   "updateRoomGameSettings",
   "updateRoomNotice",
@@ -128,8 +127,7 @@ const MUTATION_NAMES = new Set([
   "returnRoomToLobby",
 ]);
 
-const LONG_ACTION_NAMES = new Set(["createUploadedQuestionSet", "createQuestionSetFromUrlText"]);
-const HTTP_ONLY_ACTION_NAMES = new Set(["createQuestionSetFromUrlText"]);
+const LONG_ACTION_NAMES = new Set(["createUploadedQuestionSet"]);
 const WS_QUERY_NAMES = new Set([
   "getAnswerForPlayerRound",
   "getAnswersForQuestion",
@@ -698,7 +696,7 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
 }
 
 export async function callGameRpc<T>(name: string, args: unknown[] = []) {
-  if ((MUTATION_NAMES.has(name) || WS_QUERY_NAMES.has(name)) && !HTTP_ONLY_ACTION_NAMES.has(name)) {
+  if (MUTATION_NAMES.has(name) || WS_QUERY_NAMES.has(name)) {
     const topic = inferActionTopic(name, args);
     if (topic) {
       try {

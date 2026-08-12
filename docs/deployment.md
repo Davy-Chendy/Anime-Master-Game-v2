@@ -7,7 +7,7 @@
 - 实时房间：Durable Objects
 - 持久化：Cloudflare D1
 - 图片：Cloudflare R2
-- 远端 URL 图片压缩：Cloudflare Images binding
+- 远端 URL 图片获取兜底：Worker 有界代理，图片压缩在浏览器完成
 
 生产环境推荐使用自定义域名同源路由：
 
@@ -147,15 +147,9 @@ npx wrangler r2 bucket create anime-master-game-images
 binding = "IMAGE_BUCKET"
 bucket_name = "anime-master-game-images"
 
-[images]
-binding = "IMAGES"
 ```
 
-URL/JSONL 导入会在 Worker 内抓取远端图片、通过 Cloudflare Images 压缩，再写入 R2。它还需要一个签名密钥保存重试状态，使用 Wrangler secret 配置，不要写进仓库：
-
-```bash
-npx wrangler secret put REMOTE_IMPORT_STATE_SECRET
-```
+URL/JSONL 导入优先由浏览器直接获取图片；遇到 CORS 或普通防盗链时，由 Worker 在校验当前房间出题人身份后有界获取原图。缩放、压缩和 WebP 编码全部在浏览器完成，再通过现有上传接口写入 R2，不需要 Cloudflare Images binding 或额外签名密钥。
 
 执行远程 D1 迁移：
 

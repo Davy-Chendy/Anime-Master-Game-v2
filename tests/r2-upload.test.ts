@@ -27,6 +27,24 @@ type CleanupTestEnvOptions = {
   publicBaseUrl?: string;
 };
 
+function createRemoteSourceEnv(roomAllowed = true) {
+  return {
+    DB: {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() {
+            return { results: roomAllowed ? [{ id: "room" }] : [] };
+          },
+          async first() {
+            return roomAllowed ? { id: "room" } : null;
+          },
+        };
+      },
+    },
+  } as unknown as Env;
+}
+
 const D1_LIKE_PATTERN_MAX_BYTES = 50;
 
 function createR2TestEnv() {
@@ -296,6 +314,84 @@ test("cleanup avoids D1 LIKE limits and preserves an image referenced by another
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms WHERE id='active-room'").get().count, 1);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='expired-set'").get().count, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets WHERE id='active-set'").get().count, 1);
+});
+
+test("authorized remote source fetch returns original bytes without Images or R2", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(new Uint8Array([1, 2, 3]), {
+    headers: { "content-type": "image/jpeg", "content-length": "3" },
+  });
+  try {
+    const response = await worker.fetch(new Request("https://api.example.com/api/remote-image-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId: "room", presenterPlayerId: "host", imageUrl: "https://source.example.com/a.jpg" }),
+    }), createRemoteSourceEnv());
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/jpeg");
+    assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [1, 2, 3]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("remote source fetch rejects unauthorized presenters before contacting the source", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response(); };
+  try {
+    const response = await worker.fetch(new Request("https://api.example.com/api/remote-image-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId: "room", presenterPlayerId: "wrong", imageUrl: "https://source.example.com/a.jpg" }),
+    }), createRemoteSourceEnv(false));
+    assert.equal(response.status, 400);
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("remote source fetch blocks private hosts and SVG responses", async () => {
+  const privateResponse = await worker.fetch(new Request("https://api.example.com/api/remote-image-source", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ roomId: "room", presenterPlayerId: "host", imageUrl: "http://127.0.0.1/a.jpg" }),
+  }), createRemoteSourceEnv());
+  assert.equal(privateResponse.status, 400);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } });
+  try {
+    const svgResponse = await worker.fetch(new Request("https://api.example.com/api/remote-image-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId: "room", presenterPlayerId: "host", imageUrl: "https://source.example.com/a.svg" }),
+    }), createRemoteSourceEnv());
+    assert.equal(svgResponse.status, 400);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("remote source fetch rejects redirects to private hosts", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/private.jpg" } });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://api.example.com/api/remote-image-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId: "room", presenterPlayerId: "host", imageUrl: "https://source.example.com/a.jpg" }),
+    }), createRemoteSourceEnv());
+    assert.equal(response.status, 400);
+    assert.equal(fetchCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("expired-room cleanup deletes more than 1000 associated images in bounded R2 batches", async () => {

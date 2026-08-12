@@ -234,7 +234,6 @@ export type QuestionUrlImportInput = {
 export type PreparedQuestionUrlImport = QuestionUrlImportInput & {
   originalImageUrl: string;
   r2Key?: string | null;
-  importToken?: string;
   rawBytes?: number | null;
   uploadBytes?: number | null;
   usedOriginal?: boolean;
@@ -243,26 +242,6 @@ export type PreparedQuestionUrlImport = QuestionUrlImportInput & {
 export type FailedQuestionUrlImport = QuestionUrlImportInput & {
   error: string;
 };
-
-export type QuestionSetUrlImportResult =
-  | {
-      status: "created";
-      questionSet: QuestionSet;
-      importedCount: number;
-      fallbackCount: number;
-    }
-  | {
-      status: "prepared";
-      preparedQuestions: PreparedQuestionUrlImport[];
-      importedCount: number;
-      fallbackCount: number;
-    }
-  | {
-      status: "needs_decision";
-      preparedQuestions: PreparedQuestionUrlImport[];
-      failedQuestions: FailedQuestionUrlImport[];
-      totalCount: number;
-    };
 
 export type GameSession = {
   id: string;

@@ -12,6 +12,7 @@ import {
   readDroppedUploadFiles,
   removeLocalUploadDraftQuestion,
   toUploadSourceFiles,
+  uploadRemoteImagesToR2,
 } from "../src/lib/r2Upload";
 
 type TestEntry = {
@@ -158,6 +159,70 @@ test("prepared URL imports become stable editable drafts", () => {
   ]);
   assert.deepEqual(draft.map((question) => question.labelText), ["答案一", null, null]);
   assert.equal(new Set(draft.map((question) => question.key)).size, draft.length);
+});
+
+test("remote imports preserve order and labels while processing mobile-sized pools sequentially", async () => {
+  const inputs = Array.from({ length: 30 }, (_, orderIndex) => ({
+    imageUrl: `https://source.example.com/${orderIndex}.jpg`,
+    labelText: `答案${orderIndex}`,
+    orderIndex,
+  }));
+  let active = 0;
+  let maxActive = 0;
+  const result = await uploadRemoteImagesToR2(inputs, "room", "presenter", () => {}, {
+    concurrency: 1,
+    async fetchSource(input) {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return { blob: new Blob([String(input.orderIndex)], { type: "image/jpeg" }), name: `${input.orderIndex}.jpg` };
+    },
+    async prepare(source) {
+      return { blob: source.blob, uploadName: source.name, rawBytes: source.blob.size, uploadBytes: source.blob.size, usedOriginal: true };
+    },
+    async upload(prepared) {
+      const index = prepared.uploadName.replace(".jpg", "");
+      return { key: `question-images/${index}.jpg`, url: `https://assets.example.com/${index}.jpg`, publicId: index };
+    },
+  });
+
+  assert.equal(maxActive, 1);
+  assert.equal(result.failedQuestions.length, 0);
+  assert.deepEqual(result.preparedQuestions.map((item) => item.orderIndex), inputs.map((item) => item.orderIndex));
+  assert.deepEqual(result.preparedQuestions.map((item) => item.labelText), inputs.map((item) => item.labelText));
+});
+
+test("remote import retries can target only failures without repeating successful uploads", async () => {
+  const inputs = [0, 1, 2].map((orderIndex) => ({ imageUrl: `https://source.example.com/${orderIndex}.jpg`, orderIndex }));
+  const attempts = new Map<number, number>();
+  const dependencies = {
+    concurrency: 2,
+    async fetchSource(input: { imageUrl: string; orderIndex: number }) {
+      attempts.set(input.orderIndex, (attempts.get(input.orderIndex) ?? 0) + 1);
+      if (input.orderIndex === 1 && attempts.get(1) === 1) throw new Error("temporary failure");
+      return { blob: new Blob([String(input.orderIndex)], { type: "image/jpeg" }), name: `${input.orderIndex}.jpg` };
+    },
+    async prepare(source: { blob: Blob; name: string }) {
+      return { blob: source.blob, uploadName: source.name, rawBytes: source.blob.size, uploadBytes: source.blob.size, usedOriginal: true };
+    },
+    async upload(prepared: { uploadName: string }) {
+      return { key: prepared.uploadName, url: `https://assets.example.com/${prepared.uploadName}`, publicId: prepared.uploadName };
+    },
+  };
+  const first = await uploadRemoteImagesToR2(inputs, "room", "presenter", () => {}, dependencies);
+  assert.deepEqual(first.preparedQuestions.map((item) => item.orderIndex), [0, 2]);
+  assert.deepEqual(first.failedQuestions.map((item) => item.orderIndex), [1]);
+
+  const retry = await uploadRemoteImagesToR2(
+    first.failedQuestions.map(({ error: _error, ...item }) => item),
+    "room",
+    "presenter",
+    () => {},
+    dependencies,
+  );
+  assert.deepEqual(retry.preparedQuestions.map((item) => item.orderIndex), [1]);
+  assert.deepEqual(Object.fromEntries(attempts), { 0: 1, 1: 2, 2: 1 });
 });
 
 test("local upload drop targets cover card edges, grid gaps, and trailing blank space", () => {

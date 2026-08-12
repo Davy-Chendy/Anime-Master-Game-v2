@@ -29,17 +29,13 @@ import {
 import type {
   Answer,
   BuzzerAnswer,
-  FailedQuestionUrlImport,
   GameBootstrapSnapshot,
   GameResultSnapshot,
   GameSession,
-  PreparedQuestionUrlImport,
   PlayerScore,
   Question,
   QuestionResult,
   QuestionSet,
-  QuestionSetUrlImportResult,
-  QuestionUrlImportInput,
   PublicRoomSummary,
   RealtimeDelta,
   Room,
@@ -54,16 +50,11 @@ export interface Env {
   ROOM_OBJECTS: DurableObjectNamespace;
   ROOM_OBJECTS_V3: DurableObjectNamespace;
   IMAGE_BUCKET: R2Bucket;
-  IMAGES?: ImagesBinding;
   ALLOWED_ORIGIN?: string;
   R2_IMAGE_PREFIX?: string;
   R2_PUBLIC_BASE_URL?: string;
   R2_EXISTING_IMAGE_LIMIT?: string;
   REMOTE_IMAGE_PROXY_CANDIDATES?: string;
-  REMOTE_IMPORT_STATE_SECRET?: string;
-  REMOTE_UPLOAD_IMAGE_MAX_SIZE?: string;
-  REMOTE_UPLOAD_IMAGE_QUALITY?: string;
-  REMOTE_UPLOAD_IMAGE_FORMAT?: string;
 }
 
 type RpcBody = {
@@ -251,11 +242,6 @@ const BUSINESS_ALARM_RECOVERY_RETRY_DELAY_MS = 30_000;
 const BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS = 1000;
 const REMOTE_IMAGE_FETCH_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
-const REMOTE_IMPORT_CONCURRENCY = 2;
-const QUESTION_URL_IMPORT_MAX_COUNT = 30;
-const REMOTE_UPLOAD_IMAGE_MAX_SIZE = 1600;
-const REMOTE_UPLOAD_IMAGE_QUALITY = 78;
-const REMOTE_UPLOAD_IMAGE_FORMAT = "image/webp";
 const ROOM_CLEANUP_IDLE_MS = 48 * 60 * 60 * 1000;
 const ROOM_CLEANUP_MAX_ROOMS_PER_RUN = 50;
 const ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN = 100;
@@ -315,7 +301,6 @@ const MUTATION_REGISTRY = {
   cancelCurrentRound: { deadline: "authoritative-post-state" },
   cancelPresenterSetup: { deadline: "authoritative-post-state" },
   createUploadedQuestionSet: { deadline: "none" },
-  createQuestionSetFromUrlText: { deadline: "none" },
   prepareQuestionSetForStart: { deadline: "none" },
   updateRoomGameSettings: { deadline: "none" },
   updateRoomNotice: { deadline: "none" },
@@ -382,6 +367,7 @@ type CallableGameServiceName = {
 }[keyof typeof gameService] & string;
 type InternalGameServiceName =
   | "dissolveRoomOnPageExit"
+  | "createQuestionSetFromUrlText"
   | "getDeadlineStateForRoomId"
   | "getRoomIdForGameSession"
   | "parseImageUrlsText"
@@ -716,10 +702,6 @@ async function callGameFunction(name: string, args: unknown[], receivedAtMs?: nu
 }
 
 async function callGameFunctionWithEnv(name: string, args: unknown[], request: Request, env: Env, receivedAtMs?: number) {
-  if (name === "createQuestionSetFromUrlText") {
-    return await createQuestionSetFromUrlTextWithRemoteImages(args[0], request, env);
-  }
-
   return await callGameFunction(name, args, receivedAtMs);
 }
 
@@ -1738,97 +1720,12 @@ async function putR2Image(
   };
 }
 
-type CreateQuestionSetFromUrlTextParams = {
-  roomId?: string;
-  presenterPlayerId?: string;
-  title?: string;
-  description?: string;
-  imageUrlsText?: string;
-  retryQuestions?: unknown;
-  preparedQuestions?: unknown;
-  fallbackToOriginalUrls?: boolean;
-  prepareOnly?: boolean;
-};
-
 type RemoteFetchResult = {
   body: ArrayBuffer;
   contentType: string;
 };
 
-function asCreateQuestionSetFromUrlTextParams(value: unknown): CreateQuestionSetFromUrlTextParams {
-  if (!isRecord(value)) {
-    throw new Error("创建题库参数无效。");
-  }
-  return value as CreateQuestionSetFromUrlTextParams;
-}
-
-function normalizeImportInput(value: unknown, fallbackOrderIndex: number): QuestionUrlImportInput | null {
-  if (!isRecord(value) || typeof value.imageUrl !== "string") {
-    return null;
-  }
-
-  const imageUrl = value.imageUrl.trim();
-  if (!isHttpImageUrl(imageUrl)) {
-    return null;
-  }
-
-  const orderIndex = typeof value.orderIndex === "number" && Number.isInteger(value.orderIndex) && value.orderIndex >= 0 ? value.orderIndex : fallbackOrderIndex;
-  return {
-    imageUrl,
-    labelText: typeof value.labelText === "string" ? value.labelText.trim() || null : null,
-    orderIndex,
-  };
-}
-
-function normalizePreparedQuestion(value: unknown, fallbackOrderIndex: number): PreparedQuestionUrlImport | null {
-  const input = normalizeImportInput(value, fallbackOrderIndex);
-  if (!input || !isRecord(value)) {
-    return null;
-  }
-
-  const originalImageUrl = typeof value.originalImageUrl === "string" && value.originalImageUrl.trim() ? value.originalImageUrl.trim() : input.imageUrl;
-  return {
-    ...input,
-    originalImageUrl,
-    r2Key: typeof value.r2Key === "string" ? value.r2Key : null,
-    importToken: typeof value.importToken === "string" ? value.importToken : undefined,
-    rawBytes: typeof value.rawBytes === "number" ? value.rawBytes : null,
-    uploadBytes: typeof value.uploadBytes === "number" ? value.uploadBytes : null,
-    usedOriginal: Boolean(value.usedOriginal),
-  };
-}
-
-function parseRetryQuestions(params: CreateQuestionSetFromUrlTextParams) {
-  if (Array.isArray(params.retryQuestions)) {
-    return params.retryQuestions
-      .map((item, index) => normalizeImportInput(item, index))
-      .filter((item): item is QuestionUrlImportInput => Boolean(item));
-  }
-
-  return gameService.parseQuestionImportText(params.imageUrlsText ?? "").map((item, index) => ({
-    imageUrl: item.imageUrl,
-    labelText: item.labelText ?? null,
-    orderIndex: index,
-  }));
-}
-
-async function parsePreparedQuestions(params: CreateQuestionSetFromUrlTextParams, env: Env) {
-  if (!Array.isArray(params.preparedQuestions)) {
-    return [];
-  }
-
-  const preparedQuestions = params.preparedQuestions
-    .map((item, index) => normalizePreparedQuestion(item, index))
-    .filter((item): item is PreparedQuestionUrlImport => Boolean(item));
-
-  for (const item of preparedQuestions) {
-    if (!(await verifyPreparedQuestionToken(params, item, env))) {
-      throw new Error("远端图片导入状态已失效，请重新导入题单。");
-    }
-  }
-
-  return preparedQuestions;
-}
+class RemoteImageTargetBlockedError extends Error {}
 
 function isHttpImageUrl(value: string) {
   try {
@@ -1839,83 +1736,6 @@ function isHttpImageUrl(value: string) {
   }
 }
 
-function getRemoteUploadMaxSize(env: Env) {
-  const value = Number(env.REMOTE_UPLOAD_IMAGE_MAX_SIZE);
-  return Number.isFinite(value) && value >= 100 ? value : REMOTE_UPLOAD_IMAGE_MAX_SIZE;
-}
-
-function getRemoteUploadQuality(env: Env) {
-  const value = Number(env.REMOTE_UPLOAD_IMAGE_QUALITY);
-  if (Number.isFinite(value) && value > 0) {
-    return value <= 1 ? Math.round(value * 100) : Math.min(100, Math.round(value));
-  }
-  return REMOTE_UPLOAD_IMAGE_QUALITY;
-}
-
-function getRemoteUploadFormat(env: Env) {
-  const value = (env.REMOTE_UPLOAD_IMAGE_FORMAT ?? REMOTE_UPLOAD_IMAGE_FORMAT).trim().toLowerCase();
-  return ["image/webp", "image/jpeg", "image/png", "image/avif"].includes(value) ? (value as ImageOutputOptions["format"]) : REMOTE_UPLOAD_IMAGE_FORMAT;
-}
-
-function bytesToHex(bytes: ArrayBuffer) {
-  return Array.from(new Uint8Array(bytes))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function getImportStateHmacKey(env: Env) {
-  const secret = env.REMOTE_IMPORT_STATE_SECRET?.trim();
-  if (!secret) {
-    throw new Error("缺少 REMOTE_IMPORT_STATE_SECRET：请用 wrangler secret put 配置远端导入状态签名密钥。");
-  }
-
-  return crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-}
-
-function getPreparedQuestionTokenPayload(params: CreateQuestionSetFromUrlTextParams, item: PreparedQuestionUrlImport) {
-  return JSON.stringify({
-    roomId: params.roomId ?? "",
-    presenterPlayerId: params.presenterPlayerId ?? "",
-    orderIndex: item.orderIndex,
-    imageUrl: item.imageUrl,
-    originalImageUrl: item.originalImageUrl,
-    labelText: item.labelText ?? null,
-    r2Key: item.r2Key ?? null,
-  });
-}
-
-async function signPreparedQuestion(params: CreateQuestionSetFromUrlTextParams, item: PreparedQuestionUrlImport, env: Env) {
-  const key = await getImportStateHmacKey(env);
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(getPreparedQuestionTokenPayload(params, item)));
-  return {
-    ...item,
-    importToken: bytesToHex(signature),
-  };
-}
-
-async function verifyPreparedQuestionToken(params: CreateQuestionSetFromUrlTextParams, item: PreparedQuestionUrlImport, env: Env) {
-  if (!item.importToken) {
-    return false;
-  }
-
-  const key = await getImportStateHmacKey(env);
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(getPreparedQuestionTokenPayload(params, item)));
-  return bytesToHex(signature) === item.importToken;
-}
-
-async function signPreparedQuestions(params: CreateQuestionSetFromUrlTextParams, items: PreparedQuestionUrlImport[], env: Env) {
-  const signedItems: PreparedQuestionUrlImport[] = [];
-  for (const item of items) {
-    signedItems.push(await signPreparedQuestion(params, item, env));
-  }
-  return signedItems;
-}
 
 function getRemoteProxyCandidates(env: Env) {
   const configured = (env.REMOTE_IMAGE_PROXY_CANDIDATES ?? "")
@@ -1956,42 +1776,13 @@ function getSourceFetchHeaders(url: URL) {
   return headers;
 }
 
-function fileNameFromRemoteUrl(rawUrl: string, contentType: string, fallbackFormat: string) {
-  const url = new URL(rawUrl);
-  const pathName = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "image");
-  const ext = pathName.match(/\.[a-z0-9]{1,8}$/i)?.[0];
-  if (ext) {
-    return pathName;
-  }
-
-  if (contentType === "image/webp" || fallbackFormat === "image/webp") return `${pathName}.webp`;
-  if (contentType === "image/png" || fallbackFormat === "image/png") return `${pathName}.png`;
-  if (contentType === "image/avif" || fallbackFormat === "image/avif") return `${pathName}.avif`;
-  if (contentType === "image/gif") return `${pathName}.gif`;
-  return `${pathName}.jpg`;
-}
-
-function replaceFileExtension(fileName: string, contentType: string) {
-  const ext =
-    contentType === "image/webp"
-      ? ".webp"
-      : contentType === "image/png"
-        ? ".png"
-        : contentType === "image/avif"
-          ? ".avif"
-          : contentType === "image/gif"
-            ? ".gif"
-            : ".jpg";
-  return fileName.replace(/\.[^.]+$/, "") + ext;
-}
-
 async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchResult> {
   const targetUrl = new URL(rawUrl);
   if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
     throw new Error("只支持 http/https 图片链接。");
   }
   if (isBlockedRemoteHost(targetUrl.hostname)) {
-    throw new Error("不允许导入本地或私有网络图片。");
+    throw new RemoteImageTargetBlockedError("不允许导入本地或私有网络图片。");
   }
 
   const attempts = [
@@ -2005,15 +1796,28 @@ async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchRe
 
   for (const attempt of attempts) {
     try {
-      const response = await fetch(attempt.url, { method: "GET", headers: attempt.headers });
+      let currentUrl = attempt.url;
+      let response: Response | null = null;
+      for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
+        const parsedAttemptUrl = new URL(currentUrl);
+        if (!["http:", "https:"].includes(parsedAttemptUrl.protocol) || isBlockedRemoteHost(parsedAttemptUrl.hostname)) {
+          throw new RemoteImageTargetBlockedError("远端图片重定向到了不允许的地址。");
+        }
+        response = await fetch(currentUrl, { method: "GET", headers: attempt.headers, redirect: "manual" });
+        if (![301, 302, 303, 307, 308].includes(response.status)) break;
+        const location = response.headers.get("location");
+        if (!location || redirectCount === 3) throw new Error("远端图片重定向次数过多。");
+        currentUrl = new URL(location, currentUrl).toString();
+      }
+      if (!response) throw new Error("远端图片请求失败。");
       if (!response.ok) {
         lastError = `远端返回 HTTP ${response.status}`;
         continue;
       }
 
       const contentType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
-      if (!contentType.startsWith("image/")) {
-        lastError = "远端返回的不是图片。";
+      if (!contentType.startsWith("image/") || contentType === "image/svg+xml") {
+        lastError = "远端返回的不是受支持的位图图片。";
         continue;
       }
 
@@ -2030,6 +1834,7 @@ async function fetchRemoteImage(rawUrl: string, env: Env): Promise<RemoteFetchRe
 
       return { body, contentType };
     } catch (error) {
+      if (error instanceof RemoteImageTargetBlockedError || error instanceof ImageBodyTooLargeError) throw error;
       lastError = error instanceof Error ? error.message : String(error);
     }
   }
@@ -2074,186 +1879,24 @@ async function readBodyWithLimit(body: ReadableStream<Uint8Array> | null, maxByt
   return combined.buffer;
 }
 
-async function compressRemoteImage(rawImage: RemoteFetchResult, env: Env) {
-  if (rawImage.contentType === "image/gif") {
-    return {
-      body: rawImage.body,
-      contentType: rawImage.contentType,
-      usedOriginal: true,
-    };
+async function handleRemoteImageSource(request: Request, env: Env) {
+  const payload = JSON.parse(await readLimitedRequestText(request, 4096)) as Record<string, unknown>;
+  const roomId = typeof payload.roomId === "string" ? payload.roomId.trim() : "";
+  const presenterPlayerId = typeof payload.presenterPlayerId === "string" ? payload.presenterPlayerId.trim() : "";
+  const imageUrl = typeof payload.imageUrl === "string" ? payload.imageUrl.trim() : "";
+  if (!roomId || !presenterPlayerId || !isHttpImageUrl(imageUrl)) {
+    throw new Error("远端图片请求参数无效。");
   }
-
-  if (!env.IMAGES) {
-    throw new Error("缺少 Cloudflare Images binding：请在 wrangler.toml 配置 IMAGES 后再导入远端图片。");
-  }
-
-  const targetFormat = getRemoteUploadFormat(env);
-  const result = await env.IMAGES.input(new Response(rawImage.body).body!).transform({
-    width: getRemoteUploadMaxSize(env),
-    height: getRemoteUploadMaxSize(env),
-    fit: "scale-down",
-  }).output({
-    format: targetFormat,
-    quality: getRemoteUploadQuality(env),
-    anim: true,
+  await runWithGameDatabase(env, () => gameService.assertCanCreateUploadedQuestionSet({ roomId, presenterPlayerId }));
+  const remote = await fetchRemoteImage(imageUrl, env);
+  const headers = new Headers({
+    "content-type": remote.contentType,
+    "content-length": String(remote.body.byteLength),
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
   });
-
-  const transformed = await new Response(result.image()).arrayBuffer();
-  const contentType = result.contentType();
-  if (transformed.byteLength > 0 && transformed.byteLength < rawImage.body.byteLength) {
-    return {
-      body: transformed,
-      contentType,
-      usedOriginal: false,
-    };
-  }
-
-  return {
-    body: rawImage.body,
-    contentType: rawImage.contentType,
-    usedOriginal: true,
-  };
-}
-
-async function importRemoteQuestionImage(input: QuestionUrlImportInput, request: Request, env: Env): Promise<PreparedQuestionUrlImport | FailedQuestionUrlImport> {
-  try {
-    const rawImage = await fetchRemoteImage(input.imageUrl, env);
-    const compressed = await compressRemoteImage(rawImage, env);
-    const uploadName = replaceFileExtension(fileNameFromRemoteUrl(input.imageUrl, rawImage.contentType, compressed.contentType), compressed.contentType);
-    const uploaded = await putR2Image(request, env, compressed.body, compressed.contentType, uploadName, {
-      originalUrl: input.imageUrl,
-      importSource: "url-text",
-    });
-    if (!uploaded.ok) {
-      throw new Error(uploaded.error);
-    }
-
-    return {
-      imageUrl: uploaded.url,
-      originalImageUrl: input.imageUrl,
-      labelText: input.labelText ?? null,
-      orderIndex: input.orderIndex,
-      r2Key: uploaded.key,
-      rawBytes: rawImage.body.byteLength,
-      uploadBytes: compressed.body.byteLength,
-      usedOriginal: compressed.usedOriginal,
-    };
-  } catch (error) {
-    return {
-      imageUrl: input.imageUrl,
-      labelText: input.labelText ?? null,
-      orderIndex: input.orderIndex,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-async function runRemoteImportPool(inputs: QuestionUrlImportInput[], request: Request, env: Env) {
-  const results: Array<PreparedQuestionUrlImport | FailedQuestionUrlImport> = [];
-  let index = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(REMOTE_IMPORT_CONCURRENCY, inputs.length)) }, async () => {
-    while (index < inputs.length) {
-      const current = index;
-      index += 1;
-      results[current] = await importRemoteQuestionImage(inputs[current], request, env);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
-}
-
-function sortPreparedQuestions(items: PreparedQuestionUrlImport[]) {
-  return items.slice().sort((a, b) => a.orderIndex - b.orderIndex);
-}
-
-async function createQuestionSetFromPreparedUrlImport(
-  params: CreateQuestionSetFromUrlTextParams,
-  preparedQuestions: PreparedQuestionUrlImport[],
-  fallbackCount: number,
-): Promise<QuestionSetUrlImportResult> {
-  const sortedQuestions = sortPreparedQuestions(preparedQuestions);
-  if (params.prepareOnly) {
-    return {
-      status: "prepared",
-      preparedQuestions: sortedQuestions,
-      importedCount: Math.max(0, preparedQuestions.length - fallbackCount),
-      fallbackCount,
-    };
-  }
-
-  const questionSet = await gameService.createUploadedQuestionSet({
-    roomId: params.roomId ?? "",
-    presenterPlayerId: params.presenterPlayerId ?? "",
-    title: params.title ?? "",
-    description: params.description,
-    creationMethod: "creation_tool_assisted",
-    questions: sortedQuestions.map((item) => ({
-      imageUrl: item.imageUrl,
-      labelText: item.labelText ?? null,
-    })),
-  });
-
-  return {
-    status: "created",
-    questionSet,
-    importedCount: Math.max(0, preparedQuestions.length - fallbackCount),
-    fallbackCount,
-  };
-}
-
-async function createQuestionSetFromUrlTextWithRemoteImages(value: unknown, request: Request, env: Env): Promise<QuestionSetUrlImportResult> {
-  if (!env.IMAGE_BUCKET) {
-    throw new Error("缺少 R2 存储绑定：请在 wrangler.toml 配置 IMAGE_BUCKET。");
-  }
-
-  const params = asCreateQuestionSetFromUrlTextParams(value);
-  const preparedQuestions = await parsePreparedQuestions(params, env);
-  const retryQuestions = parseRetryQuestions(params);
-
-  if (!params.roomId || !params.presenterPlayerId) {
-    throw new Error("创建题库参数缺少房间或出题人。");
-  }
-
-  if (preparedQuestions.length + retryQuestions.length === 0) {
-    throw new Error("没有检测到有效图片链接。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
-  }
-
-  if (preparedQuestions.length + retryQuestions.length > QUESTION_URL_IMPORT_MAX_COUNT) {
-    throw new Error(`一次最多导入 ${QUESTION_URL_IMPORT_MAX_COUNT} 张图片。`);
-  }
-
-  await gameService.assertCanCreateUploadedQuestionSet({
-    roomId: params.roomId,
-    presenterPlayerId: params.presenterPlayerId,
-  });
-
-  if (params.fallbackToOriginalUrls) {
-    const fallbackQuestions = retryQuestions.map((item) => ({
-      ...item,
-      originalImageUrl: item.imageUrl,
-      usedOriginal: true,
-    }));
-    return createQuestionSetFromPreparedUrlImport(params, [...preparedQuestions, ...fallbackQuestions], fallbackQuestions.length);
-  }
-
-  const imported = await runRemoteImportPool(retryQuestions, request, env);
-  const nextPrepared = [
-    ...preparedQuestions,
-    ...imported.filter((item): item is PreparedQuestionUrlImport => "originalImageUrl" in item),
-  ];
-  const failedQuestions = imported.filter((item): item is FailedQuestionUrlImport => "error" in item);
-
-  if (failedQuestions.length > 0) {
-    return {
-      status: "needs_decision",
-      preparedQuestions: await signPreparedQuestions(params, sortPreparedQuestions(nextPrepared), env),
-      failedQuestions: failedQuestions.slice().sort((a, b) => a.orderIndex - b.orderIndex),
-      totalCount: nextPrepared.length + failedQuestions.length,
-    };
-  }
-
-  return createQuestionSetFromPreparedUrlImport(params, nextPrepared, 0);
+  for (const [name, value] of Object.entries(corsHeaders(request, env))) headers.set(name, value);
+  return new Response(remote.body, { status: 200, headers });
 }
 
 async function handleR2Upload(request: Request, env: Env) {
@@ -5767,6 +5410,10 @@ export default {
 
       if (url.pathname === "/api/r2-upload" && request.method === "POST") {
         return await handleR2Upload(request, env);
+      }
+
+      if (url.pathname === "/api/remote-image-source" && request.method === "POST") {
+        return await handleRemoteImageSource(request, env);
       }
 
       if (url.pathname === "/api/r2-images" && request.method === "GET") {
