@@ -10,7 +10,7 @@ import {
   type StoredRoomChatMessage,
 } from "../src/lib/roomChat";
 import { ROOM_CHAT_MAX_MESSAGES, ROOM_CHAT_MAX_TEXT_CODE_POINTS } from "../src/types/chat";
-import { RoomChatRateLimiter, tryHandleRoomChatMessage, type RoomChatTeamAudience } from "../worker/roomChat";
+import { buildRoomChatTeamAudience, RoomChatRateLimiter, tryHandleRoomChatMessage, type RoomChatTeamAudience } from "../worker/roomChat";
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -147,14 +147,18 @@ test("one inbound message broadcasts once to all 50 same-room sockets only", () 
   assert.equal(otherRoom.sent.length, 0);
 });
 
-test("team chat in a 50-member room broadcasts only to every connection owned by the sender's current team", () => {
+test("team chat in a 50-member room reaches the sender's team, presenter, and spectators only", () => {
   const red = Array.from({ length: 24 }, (_, index) => socket("room:one", `red-${index}`));
   const blue = Array.from({ length: 24 }, (_, index) => socket("room:one", `blue-${index}`));
   const redOneSecondTab = socket("room:one", "red-0");
   const presenter = socket("room:one", "presenter");
   const spectator = socket("room:one", "spectator");
   const otherRoom = socket("room:two", "red-0");
-  const redPlayerIds = new Set(red.map((_, index) => `red-${index}`));
+  const redAudienceIds = new Set([
+    ...red.map((_, index) => `red-${index}`),
+    "presenter",
+    "spectator",
+  ]);
 
   sendChat(
     red[0]!,
@@ -163,19 +167,44 @@ test("team chat in a 50-member room broadcasts only to every connection owned by
     new RoomChatRateLimiter(),
     2000,
     "team",
-    (topic, playerId) => topic === "room:one" && redPlayerIds.has(playerId)
-      ? { team: "red", playerIds: redPlayerIds }
+    (topic, playerId) => topic === "room:one" && playerId === "red-0"
+      ? { team: "red", playerIds: redAudienceIds }
       : null,
   );
 
-  for (const target of [...red, redOneSecondTab]) {
+  for (const target of [...red, redOneSecondTab, presenter, spectator]) {
     assert.equal(target.sent.length, 1);
     const event = JSON.parse(target.sent[0]!);
     assert.equal(event.channel, "team");
     assert.equal(event.team, "red");
     assert.equal(event.text, "只给红队");
   }
-  for (const target of [...blue, presenter, spectator, otherRoom]) assert.equal(target.sent.length, 0);
+  for (const target of [...blue, otherRoom]) assert.equal(target.sent.length, 0);
+});
+
+test("team chat audience includes presenter and spectators but excludes opponents and unassigned players", () => {
+  const audience = buildRoomChatTeamAudience({
+    senderPlayerId: "red-1",
+    teams: { red: ["red-1", "red-2"], blue: ["blue-1"] },
+    players: [
+      { id: "red-1", nickname: "红一", isHost: false, role: "PLAYER", joinedAt: 1 },
+      { id: "red-2", nickname: "红二", isHost: false, role: "PLAYER", joinedAt: 2 },
+      { id: "blue-1", nickname: "蓝一", isHost: false, role: "PLAYER", joinedAt: 3 },
+      { id: "presenter", nickname: "裁判", isHost: true, role: "PLAYER", joinedAt: 4 },
+      { id: "spectator", nickname: "观众", isHost: false, role: "SPECTATOR", joinedAt: 5 },
+      { id: "unassigned", nickname: "未分队", isHost: false, role: "PLAYER", joinedAt: 6 },
+    ],
+    presenterPlayerId: "presenter",
+  });
+
+  assert.equal(audience?.team, "red");
+  assert.deepEqual(audience?.playerIds, new Set(["red-1", "red-2", "presenter", "spectator"]));
+  assert.equal(buildRoomChatTeamAudience({
+    senderPlayerId: "spectator",
+    teams: { red: ["red-1"], blue: ["blue-1"] },
+    players: [{ id: "spectator", nickname: "观众", isHost: false, role: "SPECTATOR", joinedAt: 1 }],
+    presenterPlayerId: "presenter",
+  }), null);
 });
 
 test("presenters, spectators, and unassigned players cannot send team chat", () => {

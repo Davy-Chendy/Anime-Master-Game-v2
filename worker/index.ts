@@ -19,7 +19,7 @@ import {
 import { getRoomNoticeUpdatedDelta } from "./roomNotice";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
 import { getManifestImageUrls } from "./questionSetManifest";
-import { RoomChatRateLimiter, tryHandleRoomChatMessage } from "./roomChat";
+import { buildRoomChatTeamAudience, RoomChatRateLimiter, tryHandleRoomChatMessage } from "./roomChat";
 import {
   isR2ImageUploadTooLarge,
   R2_IMAGE_UPLOAD_MAX_BYTES,
@@ -46,7 +46,6 @@ import type {
   RoomQuestionSource,
   RoomStatus,
   GameMode,
-  TeamBattleTeam,
   RoundSnapshot,
 } from "../src/types/game";
 
@@ -3223,12 +3222,12 @@ export class RoomDurableObjectV3 {
 
     const teams = aggregate.gameSession.teamBattleState?.teams;
     if (!teams) return null;
-    const team: TeamBattleTeam | null = teams.red.includes(playerId)
-      ? "red"
-      : teams.blue.includes(playerId)
-        ? "blue"
-        : null;
-    return team ? { team, playerIds: new Set(teams[team]) } : null;
+    return buildRoomChatTeamAudience({
+      senderPlayerId: playerId,
+      teams,
+      players: aggregate.players,
+      presenterPlayerId: aggregate.gameSession.presenterPlayerId,
+    });
   }
 
   private expireRetiredSocket(socket: WebSocket) {

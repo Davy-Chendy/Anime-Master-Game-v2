@@ -8,7 +8,7 @@ import {
   type RoomChatMessage,
   type RoomChatSendMessage,
 } from "../src/types/chat";
-import type { TeamBattleTeam } from "../src/types/game";
+import type { Player, TeamBattleTeam } from "../src/types/game";
 
 type RoomChatSocketAttachment = {
   topic?: string;
@@ -24,6 +24,26 @@ export type RoomChatTeamAudience = {
   team: TeamBattleTeam;
   playerIds: ReadonlySet<string>;
 };
+
+export function buildRoomChatTeamAudience(options: {
+  senderPlayerId: string;
+  teams: Record<TeamBattleTeam, string[]>;
+  players: readonly Player[];
+  presenterPlayerId: string;
+}): RoomChatTeamAudience | null {
+  const team: TeamBattleTeam | null = options.teams.red.includes(options.senderPlayerId)
+    ? "red"
+    : options.teams.blue.includes(options.senderPlayerId)
+      ? "blue"
+      : null;
+  if (!team) return null;
+
+  const playerIds = new Set(options.teams[team]);
+  for (const player of options.players) {
+    if (player.id === options.presenterPlayerId || player.role === "SPECTATOR") playerIds.add(player.id);
+  }
+  return { team, playerIds };
+}
 
 const CHAT_MESSAGE_TYPE_PATTERN = /"type"\s*:\s*"chat_send"/;
 const CHAT_RATE_WINDOW_MS = 5000;

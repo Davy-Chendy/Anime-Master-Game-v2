@@ -71,7 +71,7 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 ## 房间实时聊天预算（2026-08-10）
 
-聊天复用每名成员已有的 Room DO WebSocket。每条聊天只有发送者产生 1 条入站 WebSocket 消息，并在同一次 DO 事件内广播一次有界 payload；房间频道向同 topic 的全部连接广播，团队对抗游戏中的队内频道只向发送者当前队伍广播，不会因为房间有 50 人而产生 50 条入站请求。按 Free 方案入站 WebSocket 消息 20:1 折算 DO 请求，出站消息不计 DO 请求，但 50 人房间的一条房间消息仍会产生最多 50 次网络投递并消耗少量 CPU/Duration，队内消息通常少于该上限。单条正文限制 200 个 Unicode 字符、1,024 bytes，完整入站 envelope 限制 2,048 bytes；房间和队内频道共用每 socket 5 秒最多 3 条的限制，避免切换频道放大突发。
+聊天复用每名成员已有的 Room DO WebSocket。每条聊天只有发送者产生 1 条入站 WebSocket 消息，并在同一次 DO 事件内广播一次有界 payload；房间频道向同 topic 的全部连接广播，团队对抗游戏中的队内频道向发送者当前队伍、出题人和观战者广播，不会因为房间有 50 人而产生 50 条入站请求。按 Free 方案入站 WebSocket 消息 20:1 折算 DO 请求，出站消息不计 DO 请求；50 人房间的一条消息最多仍产生 50 次网络投递并消耗少量 CPU/Duration，队内消息会排除对方队员，实际投递通常少于该上限。单条正文限制 200 个 Unicode 字符、1,024 bytes，完整入站 envelope 限制 2,048 bytes；房间和队内频道共用每 socket 5 秒最多 3 条的限制，避免切换频道放大突发。
 
 服务端不保存历史，不创建聊天表，不写 D1 或 DO SQLite，不设置 Alarm，不 checkpoint，也不进入游戏 mutation 队列。浏览器只在当前标签页的 `sessionStorage` 保存最近 100 条，因此刷新不产生补拉请求，断线重连也不补发旧消息。聊天不会改变 `scripts/authority-write-budget.mjs` 的 DO/D1 行写入模型。
 
