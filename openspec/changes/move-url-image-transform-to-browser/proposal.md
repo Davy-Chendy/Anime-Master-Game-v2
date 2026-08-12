@@ -14,7 +14,7 @@ Local file uploads already resize, compress, and re-encode images in the browser
 ## Proposed Solution
 
 - Make the browser the only image-transformation layer for local files and URL/JSONL imports.
-- For each URL, first attempt a credential-free browser CORS fetch. If the source does not permit it, call a bounded Worker endpoint that fetches and returns the original image without transforming or storing it.
+- Fetch every external URL through the bounded Worker endpoint so clients without an international proxy do not connect directly to remote image hosts.
 - Reuse the existing Canvas policy: at most 1600 pixels on either axis, WebP quality 0.78, retain the original when conversion is larger, and retain GIF unchanged.
 - Process remote images with concurrency one on mobile and at most two elsewhere; release decoded resources after each image and upload the prepared blob immediately rather than retaining all original blobs.
 - Upload each prepared result through the existing R2 upload endpoint, preserve order/labels, and reuse the existing local draft preview, reorder, delete, and final `createUploadedQuestionSet` flow.
@@ -24,9 +24,9 @@ Local file uploads already resize, compress, and re-encode images in the browser
 
 ### In Scope
 
-- Browser URL fetch, Blob/File normalization, image decoding, Canvas conversion, immediate R2 upload, progress, and per-image retry.
-- A Worker original-image fetch fallback with existing URL validation, private-host blocking, source headers/proxy candidates, content-type validation, and 20 MB response limit.
-- Room/presenter authorization on fallback fetches so the endpoint is not an unauthenticated general-purpose proxy.
+- Worker-proxied URL fetch, Blob/File normalization, browser image decoding, Canvas conversion, immediate R2 upload, progress, and per-image retry.
+- A Worker original-image source endpoint with existing URL validation, private-host blocking, source headers/proxy candidates, content-type validation, and 20 MB response limit.
+- Room/presenter authorization on source fetches so the endpoint is not an unauthenticated general-purpose proxy.
 - Detection of mobile/low-memory clients and bounded sequential processing.
 - Removal of Cloudflare Images from URL imports and deployment configuration.
 - Regression tests and quota/deployment documentation updates.
@@ -52,7 +52,7 @@ Local file uploads already resize, compress, and re-encode images in the browser
 
 ## Architecture Considerations
 
-The fallback endpoint accepts one URL per request and must verify that the room/presenter may create a set before fetching. This is intentionally bounded to one image and 20 MB; redirects must still resolve to HTTP(S), the final response must be an image, and responses use `Cache-Control: no-store`. Browser direct fetches use omitted credentials and no referrer. Worker fetches reuse the established host-specific Referer behavior and proxy candidates.
+The source endpoint accepts one URL per request and must verify that the room/presenter may create a set before fetching. This is intentionally bounded to one image and 20 MB; redirects must still resolve to HTTP(S), the final response must be an image, and responses use `Cache-Control: no-store`. Browsers never request the external source directly. Worker fetches reuse the established host-specific Referer behavior and proxy candidates.
 
 The browser must not accumulate up to 30 decoded originals. Each item follows `fetch -> decode -> convert -> release decoder/canvas -> upload -> retain only R2 metadata`. Existing prepared items are not repeated when one image fails. A retry targets failed items only. Page refresh may leave unreferenced R2 objects, which the existing 72-hour orphan cleanup already handles.
 
@@ -62,8 +62,7 @@ For one 30-image URL question list:
 
 - Cloudflare Images transformations: 0.
 - R2 Class A writes: at most 30, unchanged.
-- Worker requests when every source supports browser CORS: 30 uploads + 1 final creation = 31.
-- Worker requests when every source needs fallback: 30 source fetches + 30 uploads + 1 final creation = 61.
+- Worker requests: 30 source fetches + 30 uploads + 1 final creation = 61.
 - D1 authorization reads in the simple per-image fallback design: at most 30; this may be reduced later with a signed import session only if production metrics justify the added complexity.
 
 At 60 newly imported 30-image sets per day, the all-fallback upper estimate is 3,660 Worker requests/day (3.66% of the 100,000 daily Free limit), 1,800 D1 authorization-row reads/day (0.036% of 5,000,000), and 54,000 R2 Class A writes/month (5.4% of 1,000,000). It does not multiply by room player count and creates no DO request, Alarm, broadcast, or realtime synchronization work.
@@ -72,7 +71,7 @@ At 60 newly imported 30-image sets per day, the all-fallback upper estimate is 3
 
 - [x] A valid 1-30 image JSONL/URL import completes when the account has no remaining Images transformations.
 - [x] No URL import invokes the Images binding or can surface error 9422.
-- [x] Sources with usable CORS download directly; blocked sources transparently use the bounded Worker fallback.
+- [x] Every external source is fetched through the bounded Worker endpoint; browsers do not connect directly to question-list URLs.
 - [x] Remote images use the same size, quality, format, GIF, and “keep smaller result” policy as local uploads.
 - [x] A 30-image mobile import never decodes more than one remote image concurrently and does not retain all original blobs.
 - [x] Retrying after partial failure uploads only failed items; successful R2 items retain order and labels.

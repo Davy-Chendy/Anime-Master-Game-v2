@@ -470,18 +470,6 @@ async function readRemoteResponse(response: Response, imageUrl: string) {
 }
 
 async function fetchRemoteSource(input: QuestionUrlImportInput, roomId: string, presenterPlayerId: string) {
-  let direct: Response | null = null;
-  try {
-    direct = await fetch(input.imageUrl, {
-      method: "GET",
-      mode: "cors",
-      credentials: "omit",
-      referrerPolicy: "no-referrer",
-    });
-  } catch {
-    // Browser CORS/network failures use the authorized Worker source fallback.
-  }
-  if (direct?.ok) return await readRemoteResponse(direct, input.imageUrl);
   const response = await fetch(apiUrl("/api/remote-image-source"), {
     method: "POST",
     headers: { "content-type": "application/json" },

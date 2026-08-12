@@ -225,6 +225,50 @@ test("remote import retries can target only failures without repeating successfu
   assert.deepEqual(Object.fromEntries(attempts), { 0: 1, 1: 2, 2: 1 });
 });
 
+test("external URL imports fetch only through the authorized Worker source endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; body: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    return new Response(new Uint8Array([1, 2, 3]), {
+      status: 200,
+      headers: { "content-type": "image/jpeg", "content-length": "3" },
+    });
+  };
+  try {
+    const result = await uploadRemoteImagesToR2(
+      [{ imageUrl: "https://blocked-overseas.example.com/one.jpg", labelText: "答案", orderIndex: 0 }],
+      "room-1",
+      "presenter-1",
+      () => {},
+      {
+        concurrency: 1,
+        async prepare(source) {
+          return { blob: source.blob, uploadName: source.name, rawBytes: source.blob.size, uploadBytes: source.blob.size, usedOriginal: true };
+        },
+        async upload(prepared) {
+          return { key: prepared.uploadName, url: `https://assets.example.com/${prepared.uploadName}`, publicId: prepared.uploadName };
+        },
+      },
+    );
+    assert.equal(result.failedQuestions.length, 0);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "/api/remote-image-source");
+    assert.equal(calls[0].method, "POST");
+    assert.deepEqual(JSON.parse(calls[0].body), {
+      roomId: "room-1",
+      presenterPlayerId: "presenter-1",
+      imageUrl: "https://blocked-overseas.example.com/one.jpg",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("local upload drop targets cover card edges, grid gaps, and trailing blank space", () => {
   const cardRects = [
     { key: "one", index: 0, left: 0, right: 160, top: 0, bottom: 90 },

@@ -16,7 +16,7 @@
 
 ## Phase 2: Bounded Original-Image Fetch
 
-- [x] 2.1 Add a one-image Worker fallback endpoint with room/presenter authorization.
+- [x] 2.1 Add a one-image Worker source endpoint with room/presenter authorization.
 - [x] 2.2 Reuse URL/private-host validation, source headers, proxy candidates, image content-type checks, redirects, and the 20 MB bounded reader.
 - [x] 2.3 Return the original bytes with normalized content type, filename metadata, and `Cache-Control: no-store`; never call Images or write R2.
 - [x] 2.4 Add tests for direct success, blocked/private URL, non-image response, oversized/missing-length body, source/proxy failure, and unauthorized room role.
@@ -28,7 +28,7 @@
 
 ## Phase 3: URL/JSONL Import Orchestration
 
-- [x] 3.1 Attempt credential-free/no-referrer browser CORS fetch before the Worker fallback.
+- [x] 3.1 Fetch every external source through the authorized Worker source endpoint; never request the original URL from the browser.
 - [x] 3.2 Convert and upload each image immediately with concurrency one on mobile/low-memory clients and no more than two elsewhere.
 - [x] 3.3 Preserve JSONL order and labels and feed successes into the current local draft preview/reorder/delete/confirm flow.
 - [x] 3.4 Preserve successful uploaded items across retry; retry only failures and present separate download/decode/upload messages.
@@ -65,6 +65,8 @@
 ## Completion Checklist
 
 Implementation and automated verification completed on 2026-08-13. The manual scenarios are covered by deterministic endpoint/orchestration tests; no production deployment was performed.
+
+Follow-up on 2026-08-13: all external URL downloads now use the authorized Worker source endpoint by default; a regression test asserts that the browser never requests the original external URL.
 
 
 - [x] All phases complete

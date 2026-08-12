@@ -20,23 +20,23 @@ URL and JSONL imports transform images in the presenter's browser with the same 
 - WHEN the presenter imports its URL
 - THEN the browser preserves the original GIF bytes and uploads them without Canvas conversion
 
-### Requirement: Bounded Source Fetch Fallback
+### Requirement: Bounded Worker Source Fetch
 
-The browser downloads a source directly when CORS permits it. Otherwise an authorized Worker endpoint returns one validated original image without transforming or persisting it.
+An authorized Worker endpoint returns one validated original image without transforming or persisting it. The browser does not connect directly to external question-list URLs.
 
 #### Scenario: Source allows browser CORS
 - GIVEN the source returns an image with usable CORS headers
 - WHEN the presenter imports it
-- THEN the browser obtains it directly and does not call the Worker source-fetch fallback
+- THEN the browser still obtains it through the Worker source endpoint and makes no direct request to the external host
 
 #### Scenario: Source blocks browser CORS
-- GIVEN the browser cannot read the source because of CORS or normal hotlink protection
+- GIVEN the source uses CORS restrictions or normal hotlink protection
 - WHEN the authorized presenter imports it
 - THEN the Worker fetches at most 20 MB using bounded source/proxy attempts and returns the original image with no-store caching
 
 #### Scenario: Invalid fallback target
 - GIVEN a private/local host, non-HTTP URL, non-image response, empty body, or body exceeding 20 MB
-- WHEN the fallback endpoint is called
+- WHEN the Worker source endpoint is called
 - THEN it rejects the request without returning arbitrary content, invoking Images, or writing R2
 
 ### Requirement: Mobile-Bounded Processing
@@ -73,7 +73,7 @@ Remote imports consume ordinary Worker requests and R2 writes but no Cloudflare 
 #### Scenario: Import one 30-image set through fallback
 - GIVEN all 30 sources require the Worker fallback
 - WHEN the presenter imports and confirms the set
-- THEN the operation uses at most 30 fallback fetches, 30 R2 uploads, and one final creation request
+- THEN the operation uses at most 30 Worker source fetches, 30 R2 uploads, and one final creation request
 - AND it remains independent of the number of players in the room
 
 ## REMOVED
@@ -81,4 +81,3 @@ Remote imports consume ordinary Worker requests and R2 writes but no Cloudflare 
 ### Requirement: Worker-Side Cloudflare Images Transformation
 
 The URL/JSONL import path no longer requires an Images binding or exposes Images quota error 9422.
-

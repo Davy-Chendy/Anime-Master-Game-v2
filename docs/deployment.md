@@ -149,7 +149,7 @@ bucket_name = "anime-master-game-images"
 
 ```
 
-URL/JSONL 导入优先由浏览器直接获取图片；遇到 CORS 或普通防盗链时，由 Worker 在校验当前房间出题人身份后有界获取原图。缩放、压缩和 WebP 编码全部在浏览器完成，再通过现有上传接口写入 R2，不需要 Cloudflare Images binding 或额外签名密钥。
+URL/JSONL 导入统一由 Worker 在校验当前房间出题人身份后有界获取外部原图，避免未配置代理的手机直接连接海外图床；浏览器不会直接请求题单中的外链。缩放、压缩和 WebP 编码仍全部在浏览器完成，再通过现有上传接口写入 R2，不需要 Cloudflare Images binding 或额外签名密钥。
 
 执行远程 D1 迁移：
 
