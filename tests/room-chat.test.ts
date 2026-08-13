@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clampRoomChatPanelHeight } from "../src/components/RoomChat";
+import { clampRoomChatPanelHeight, isRoomChatNearBottom } from "../src/components/RoomChat";
 import {
   appendRoomChatMessage,
   clearAllRoomChatMessages,
@@ -283,4 +283,17 @@ test("expanded panel height stays within the viewport allowance", () => {
   assert.equal(clampRoomChatPanelHeight(20, 800), 84);
   assert.equal(clampRoomChatPanelHeight(240, 800), 240);
   assert.equal(clampRoomChatPanelHeight(900, 800), 400);
+});
+
+test("chat bottom detection tolerates one message row of layout rounding", () => {
+  assert.equal(isRoomChatNearBottom({ scrollHeight: 500, scrollTop: 260, clientHeight: 200 }), true);
+  assert.equal(isRoomChatNearBottom({ scrollHeight: 500, scrollTop: 259, clientHeight: 200 }), false);
+});
+
+test("latest chat message identity changes after capped history rolls over", () => {
+  let messages = Array.from({ length: ROOM_CHAT_MAX_MESSAGES }, (_, index) => stored(index));
+  const previousLatestMessageId = messages.at(-1)?.messageId;
+  messages = appendRoomChatMessage(messages, stored(ROOM_CHAT_MAX_MESSAGES));
+  assert.equal(messages.length, ROOM_CHAT_MAX_MESSAGES);
+  assert.notEqual(messages.at(-1)?.messageId, previousLatestMessageId);
 });

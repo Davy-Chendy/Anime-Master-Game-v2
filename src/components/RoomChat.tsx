@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { sendRoomChatMessage, subscribeRoomChat } from "@/lib/cloudflareClient";
 import {
@@ -17,10 +17,23 @@ export type RoomChatDisplayMode = "closed" | "compact" | "expanded";
 const ROOM_CHAT_PANEL_HEIGHT_STORAGE_KEY = "anime-master:room-chat-panel-height";
 const ROOM_CHAT_PANEL_MIN_HEIGHT = 84;
 const ROOM_CHAT_PANEL_DEFAULT_HEIGHT = 240;
+const ROOM_CHAT_BOTTOM_THRESHOLD = 40;
 
 export function clampRoomChatPanelHeight(height: number, viewportHeight = 800) {
   const maximum = Math.max(ROOM_CHAT_PANEL_MIN_HEIGHT, Math.floor(viewportHeight * 0.5));
   return Math.max(ROOM_CHAT_PANEL_MIN_HEIGHT, Math.min(maximum, Math.round(height)));
+}
+
+export function isRoomChatNearBottom({
+  scrollHeight,
+  scrollTop,
+  clientHeight,
+}: {
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+}) {
+  return scrollHeight - scrollTop - clientHeight <= ROOM_CHAT_BOTTOM_THRESHOLD;
 }
 
 function loadPanelHeight() {
@@ -192,22 +205,32 @@ export function RoomChatBar({
   const [isSending, setIsSending] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const shouldFollowLatestRef = useRef(true);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const recentMessages = controller.messages.slice(-compactMessageCount);
+  const latestMessageId = controller.messages.at(-1)?.messageId;
   const isExpanded = controller.mode === "expanded";
 
   const scrollToBottom = useCallback(() => {
     const list = listRef.current;
     if (!list) return;
+    shouldFollowLatestRef.current = true;
     list.scrollTop = list.scrollHeight;
     setIsNearBottom(true);
   }, []);
 
-  useEffect(() => {
-    if (controller.mode !== "expanded" || !isNearBottom) return;
-    const frame = window.requestAnimationFrame(scrollToBottom);
-    return () => window.cancelAnimationFrame(frame);
-  }, [controller.messages.length, controller.mode, isNearBottom, scrollToBottom]);
+  useLayoutEffect(() => {
+    if (controller.mode !== "expanded") return;
+    const list = listRef.current;
+    if (!list) return;
+    if (shouldFollowLatestRef.current) {
+      scrollToBottom();
+      return;
+    }
+    const nearBottom = isRoomChatNearBottom(list);
+    shouldFollowLatestRef.current = nearBottom;
+    setIsNearBottom(nearBottom);
+  }, [controller.mode, controller.panelHeight, latestMessageId, scrollToBottom]);
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
 
@@ -283,8 +306,9 @@ export function RoomChatBar({
             className="min-h-0 flex-1 overflow-y-auto py-1"
             ref={listRef}
             onScroll={(event) => {
-              const target = event.currentTarget;
-              setIsNearBottom(target.scrollHeight - target.scrollTop - target.clientHeight < 32);
+              const nearBottom = isRoomChatNearBottom(event.currentTarget);
+              shouldFollowLatestRef.current = nearBottom;
+              setIsNearBottom(nearBottom);
             }}
           >
             {controller.messages.length > 0 ? controller.messages.map((message) => (
