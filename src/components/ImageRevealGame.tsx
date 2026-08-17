@@ -2503,16 +2503,22 @@ export function ImageRevealGame({
   }, [teamBattleState?.revealVotes]);
   const teamBattleGuessOptions = useMemo(() => {
     const options = new Map<string, { key: string; label: string; vote: TeamBattleGuessVote; count: number; proposerName: string }>();
+    const proposalByAnswer = new Map(
+      (teamBattleState?.guessProposals ?? []).map((proposal) => [proposal.answerText, proposal]),
+    );
     for (const [voterId, vote] of Object.entries(teamBattleState?.guessVotes ?? {})) {
-      const key = vote.type === "skip" ? "__skip__" : `guess:${vote.answerText}`;
-      const label = vote.type === "skip" ? "不猜" : vote.answerText ?? "";
+      const answerText = vote.answerText?.trim() ?? "";
+      const key = vote.type === "skip" ? "__skip__" : `guess:${answerText}`;
+      const label = vote.type === "skip" ? "不猜" : answerText;
       const current = options.get(key);
+      const proposal = vote.type === "guess" ? proposalByAnswer.get(answerText) : undefined;
       options.set(key, {
         key,
         label,
         vote,
         count: (current?.count ?? 0) + 1,
         proposerName:
+          proposal?.proposerName ??
           current?.proposerName ??
           teamBattleState?.teamMemberNames?.[voterId] ??
           activePlayerById.get(voterId)?.nickname ??
@@ -2520,7 +2526,7 @@ export function ImageRevealGame({
       });
     }
     return Array.from(options.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-  }, [activePlayerById, teamBattleState?.guessVotes, teamBattleState?.teamMemberNames]);
+  }, [activePlayerById, teamBattleState?.guessProposals, teamBattleState?.guessVotes, teamBattleState?.teamMemberNames]);
   const activeGuesserIds = useMemo(
     () => eligibleGuesserIds.filter((guesserId) => !correctPlayerSet.has(guesserId)),
     [correctPlayerSet, eligibleGuesserIds],

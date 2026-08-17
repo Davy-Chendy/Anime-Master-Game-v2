@@ -2098,6 +2098,7 @@ test("legacy journal recovery does not switch teams while TEAM_BATTLE waits on a
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [{ answerText: "已消失答案", proposerPlayerId: "p0", proposerName: "Red" }],
     previousTurnAction: { team: "red", type: "skip" },
     pendingGuess: null,
     teamScores: { red: 0, blue: 0 },
@@ -2128,6 +2129,7 @@ test("legacy journal recovery does not switch teams while TEAM_BATTLE waits on a
   assert.equal(recovered.phase, "TURN_RESULT");
   assert.equal(recovered.activeTeam, "red");
   assert.deepEqual(recovered.previousTurnAction, { team: "red", type: "skip" });
+  assert.deepEqual(recovered.guessProposals, []);
   assert.equal(recovered.voteDeadlineAt, null);
 });
 
@@ -2388,6 +2390,115 @@ test("TEAM_BATTLE keeps the winning guess proposer through review, checkpoint re
   );
   assert.equal(advanced.error, undefined);
   assert.equal(restored.getAggregate()!.gameSession!.teamBattleState?.correctGuess, null);
+});
+
+test("TEAM_BATTLE keeps an answer proposer fixed across follow votes, edits, leave, and checkpoint recovery", async () => {
+  const { state, authority } = createAuthority(3, fakeD1, 1, () => 0);
+  const aggregate = authority.getAggregate()!;
+  aggregate.gameSession!.gameMode = "TEAM_BATTLE";
+  aggregate.gameSession!.teamBattleState = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] },
+    initialTeams: { red: ["p0", "p1"], blue: ["p2"] },
+    teamMemberNames: { p0: "P0", p1: "P1", p2: "P2" },
+    activeTeam: "red",
+    phase: "GUESS_VOTE",
+    revealBlockCount: 45,
+    revealLimit: 1,
+    turnNumber: 1,
+    voteDeadlineAt: new Date(10_000).toISOString(),
+    revealVotes: {},
+    guessVotes: {},
+    previousTurnAction: null,
+    pendingGuess: null,
+    teamScores: { red: 0, blue: 0 },
+  };
+  aggregate.deadline = { kind: "team-vote", gameId: "g1", questionIndex: 0, phaseKey: "GUESS_VOTE:1", runAtMs: 10_000 };
+
+  authority.handleMutation(socketFor(state, "p1"), envelope("p1", 1, "submitTeamBattleGuessVote", {
+    playerId: "p1",
+    vote: { type: "skip" },
+  }), 100);
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, "submitTeamBattleGuessVote", {
+    playerId: "p0",
+    vote: { type: "guess", answerText: "  答案 A  " },
+  }), 200);
+  authority.handleMutation(socketFor(state, "p1"), envelope("p1", 2, "submitTeamBattleGuessVote", {
+    playerId: "p1",
+    vote: { type: "guess", answerText: "答案 A" },
+  }), 300);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.guessProposals, [{
+    answerText: "答案 A",
+    proposerPlayerId: "p0",
+    proposerName: "P0",
+  }]);
+
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 2, "submitTeamBattleGuessVote", {
+    playerId: "p0",
+    vote: { type: "guess", answerText: "答案 B" },
+  }), 400);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.guessProposals, [
+    { answerText: "答案 A", proposerPlayerId: "p0", proposerName: "P0" },
+    { answerText: "答案 B", proposerPlayerId: "p0", proposerName: "P0" },
+  ]);
+
+  authority.handleMutation(socketFor(state, "p0"), envelope("p0", 3, "leaveRoom", { playerId: "p0" }), 500);
+  assert.deepEqual(aggregate.gameSession!.teamBattleState.guessProposals, [
+    { answerText: "答案 A", proposerPlayerId: "p0", proposerName: "P0" },
+  ]);
+  assert.equal(aggregate.gameSession!.teamBattleState.teamMemberNames?.p0, undefined);
+
+  await authority.forceCheckpoint("phase-boundary");
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  const restoredAggregate = restored.getAggregate()!;
+  assert.equal(restoredAggregate.gameSession!.teamBattleState?.guessProposals?.[0]?.proposerPlayerId, "p0");
+
+  const deadline = restoredAggregate.gameSession!.teamBattleState!.voteDeadlineAt!;
+  restored.handleMutation(
+    socketFor(state, "host"),
+    envelope("host", 1, "finalizeTeamBattleVote", {
+      presenterPlayerId: "host",
+      expectedPhase: "GUESS_VOTE",
+      expectedTurnNumber: 1,
+      expectedVoteDeadlineAt: deadline,
+    }),
+    new Date(deadline).getTime(),
+  );
+  assert.deepEqual(restoredAggregate.gameSession!.teamBattleState!.pendingGuess, {
+    team: "red",
+    answerText: "答案 A",
+    proposerPlayerId: "p0",
+    proposerName: "P0",
+  });
+});
+
+test("TEAM_BATTLE retains a proposal after its proposer leaves while a follower still votes for it", () => {
+  const state = {
+    teams: { red: ["p0", "p1"], blue: ["p2"] },
+    initialTeams: { red: ["p0", "p1"], blue: ["p2"] },
+    teamMemberNames: { p0: "P0", p1: "P1", p2: "P2" },
+    activeTeam: "red" as const,
+    phase: "GUESS_VOTE" as const,
+    revealBlockCount: 45,
+    revealLimit: 1,
+    turnNumber: 1,
+    revealVoteSeconds: 15,
+    guessVoteSeconds: 50,
+    voteDeadlineAt: new Date(20_000).toISOString(),
+    revealVotes: {},
+    guessVotes: {
+      p0: { type: "guess" as const, answerText: "答案" },
+      p1: { type: "guess" as const, answerText: "答案" },
+    },
+    guessProposals: [{ answerText: "答案", proposerPlayerId: "p0", proposerName: "P0" }],
+    previousTurnAction: null,
+    pendingGuess: null,
+    teamScores: { red: 0, blue: 0 },
+  };
+
+  const next = removePlayerFromTeamBattleState(state, "p0", 5_000);
+  assert.deepEqual(next.guessVotes, { p1: { type: "guess", answerText: "答案" } });
+  assert.deepEqual(next.guessProposals, [{ answerText: "答案", proposerPlayerId: "p0", proposerName: "P0" }]);
 });
 
 test("TEAM_BATTLE new questions wait for one presenter block selection without an Alarm", async () => {

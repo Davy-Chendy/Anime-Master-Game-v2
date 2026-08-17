@@ -21,10 +21,17 @@ export type TeamBattlePhase = "PRESENTER_BLOCK" | "REVEAL_VOTE" | "GUESS_VOTE" |
 export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 25;
 export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
 export const TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS = 5;
+export const MAX_TEAM_BATTLE_GUESS_LENGTH = 80;
 
 export type TeamBattleGuessVote = {
   type: "skip" | "guess";
   answerText?: string;
+};
+
+export type TeamBattleGuessProposal = {
+  answerText: string;
+  proposerPlayerId: string;
+  proposerName: string;
 };
 
 export type TeamBattleResolvedGuess = {
@@ -61,6 +68,7 @@ export type TeamBattleState = {
   voteDeadlineAt?: string | null;
   revealVotes: Record<string, number[]>;
   guessVotes: Record<string, TeamBattleGuessVote>;
+  guessProposals?: TeamBattleGuessProposal[];
   previousTurnAction?: TeamBattlePreviousTurnAction | null;
   pendingGuess?: TeamBattleResolvedGuess | null;
   correctGuess?: TeamBattleResolvedGuess | null;

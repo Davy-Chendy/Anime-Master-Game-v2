@@ -44,6 +44,18 @@ test("team battle review renders the correct guess proposer in the visible revie
   );
 });
 
+test("team battle live guess options read the authoritative fixed proposal", () => {
+  const source = readFileSync(new URL("../src/components/ImageRevealGame.tsx", import.meta.url), "utf8");
+  const optionsStart = source.indexOf("const teamBattleGuessOptions = useMemo");
+  const optionsEnd = source.indexOf("const activeGuesserIds", optionsStart);
+  const proposalLookup = source.indexOf("teamBattleState?.guessProposals", optionsStart);
+  const proposerRead = source.indexOf("proposal?.proposerName", optionsStart);
+
+  assert.ok(optionsStart >= 0 && optionsEnd > optionsStart, "expected the live guess option aggregation");
+  assert.ok(proposalLookup > optionsStart && proposalLookup < optionsEnd, "expected authoritative proposals in the live option aggregation");
+  assert.ok(proposerRead > proposalLookup && proposerRead < optionsEnd, "expected the fixed proposal name to win over voter order");
+});
+
 test("team battle can open the shared previous-question review", () => {
   const source = readFileSync(new URL("../src/components/ImageRevealGame.tsx", import.meta.url), "utf8");
   const handlerStart = source.indexOf("function handleOpenPreviousQuestionReview");

@@ -15,6 +15,7 @@ import type {
   Room,
   RoundSnapshot,
   TeamBattleGuessVote,
+  TeamBattleGuessProposal,
   TeamBattleState,
   TeamBattleTeam,
 } from "../src/types/game";
@@ -22,6 +23,7 @@ import type { DbQuestionSet } from "../src/types/game";
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  MAX_TEAM_BATTLE_GUESS_LENGTH,
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
 } from "../src/types/game";
 import {
@@ -338,6 +340,53 @@ function teamVoteSeconds(state: TeamBattleState, phase: "REVEAL_VOTE" | "GUESS_V
   return phase === "REVEAL_VOTE"
     ? normalizeTeamVoteSeconds(state.revealVoteSeconds, DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS)
     : normalizeTeamVoteSeconds(state.guessVoteSeconds, DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS);
+}
+
+function normalizeTeamGuessAnswer(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function rebuildTeamGuessProposals(
+  state: TeamBattleState,
+  resolvePlayerName: (playerId: string) => string | undefined,
+) {
+  const proposals: TeamBattleGuessProposal[] = [];
+  const proposalByAnswer = new Map<string, TeamBattleGuessProposal>();
+  for (const proposal of state.guessProposals ?? []) {
+    const answerText = normalizeTeamGuessAnswer(proposal.answerText);
+    if (!answerText || proposalByAnswer.has(answerText)) continue;
+    const normalized = { ...proposal, answerText };
+    proposals.push(normalized);
+    proposalByAnswer.set(answerText, normalized);
+  }
+  for (const [voterId, vote] of Object.entries(state.guessVotes)) {
+    if (vote.type !== "guess") continue;
+    const answerText = normalizeTeamGuessAnswer(vote.answerText);
+    if (!answerText) continue;
+    let proposal = proposalByAnswer.get(answerText);
+    if (!proposal) {
+      proposal = {
+        answerText,
+        proposerPlayerId: voterId,
+        proposerName: resolvePlayerName(voterId) ?? "已离开玩家",
+      };
+      proposals.push(proposal);
+      proposalByAnswer.set(answerText, proposal);
+    }
+    vote.answerText = proposal.answerText;
+  }
+  state.guessProposals = proposals;
+  return proposalByAnswer;
+}
+
+function pruneUnusedTeamGuessProposals(state: TeamBattleState) {
+  const activeAnswers = new Set(
+    Object.values(state.guessVotes)
+      .filter((vote) => vote.type === "guess")
+      .map((vote) => normalizeTeamGuessAnswer(vote.answerText))
+      .filter(Boolean),
+  );
+  state.guessProposals = (state.guessProposals ?? []).filter((proposal) => activeAnswers.has(proposal.answerText));
 }
 
 function teamDeadlineFromSession(session: GameSession): VNextDeadline {
@@ -1179,6 +1228,7 @@ export class RoomAuthorityVNext {
     state.disabledBlocks = disabledBlocks;
     state.revealVotes = {};
     state.guessVotes = {};
+    state.guessProposals = [];
     state.pendingGuess = null;
     const selectable = selectableTeamBlocks(session, state, blockCount);
     const nextPhase = selectable.length > 0 ? "REVEAL_VOTE" : "GUESS_VOTE";
@@ -1211,13 +1261,33 @@ export class RoomAuthorityVNext {
   }
 
   private teamGuessVote(action: VNextPendingMutation): VNextMutationOutcome {
-    const session = this.requireActive().gameSession!;
+    const aggregate = this.requireActive();
+    const session = aggregate.gameSession!;
     this.assertTeamVoter(action.actorId, "GUESS_VOTE", action.serverReceivedAtMs);
     const state = session.teamBattleState!;
+    const proposalByAnswer = rebuildTeamGuessProposals(
+      state,
+      (playerId) => state.teamMemberNames?.[playerId] ?? aggregate.players.find((player) => player.id === playerId)?.nickname,
+    );
     const rawVote = isRecord(action.payload.vote) ? action.payload.vote : {};
-    const vote: TeamBattleGuessVote = rawVote.type === "skip" ? { type: "skip" } : { type: "guess", answerText: getString(rawVote.answerText) ?? "" };
+    const answerText = normalizeTeamGuessAnswer(getString(rawVote.answerText));
+    const vote: TeamBattleGuessVote = rawVote.type === "skip" ? { type: "skip" } : { type: "guess", answerText };
     if (vote.type === "guess" && !vote.answerText) throw new TerminalMutationError("请输入要猜的答案。");
+    if (vote.type === "guess" && vote.answerText.length > MAX_TEAM_BATTLE_GUESS_LENGTH) throw new TerminalMutationError(`猜测答案不能超过 ${MAX_TEAM_BATTLE_GUESS_LENGTH} 个字符。`);
+    if (vote.type === "guess") {
+      let proposal = proposalByAnswer.get(vote.answerText);
+      if (!proposal) {
+        proposal = {
+          answerText: vote.answerText,
+          proposerPlayerId: action.actorId,
+          proposerName: state.teamMemberNames?.[action.actorId] ?? aggregate.players.find((player) => player.id === action.actorId)?.nickname ?? "已离开玩家",
+        };
+        state.guessProposals!.push(proposal);
+      }
+      vote.answerText = proposal.answerText;
+    }
     state.guessVotes[action.actorId] = vote;
+    pruneUnusedTeamGuessProposals(state);
     const deadlineChanged = this.shortenTeamVoteDeadlineIfComplete(state, action.serverReceivedAtMs);
     return this.directSessionOutcome(session, deadlineChanged ? "phase-boundary" : undefined, deadlineChanged);
   }
@@ -1242,6 +1312,7 @@ export class RoomAuthorityVNext {
       const availableTeam = oppositeTeam(state.activeTeam);
       state.revealVotes = {};
       state.guessVotes = {};
+      state.guessProposals = [];
       state.pendingGuess = null;
       if (getTeamMembers(state, availableTeam).length) {
         state.activeTeam = availableTeam;
@@ -1286,6 +1357,7 @@ export class RoomAuthorityVNext {
         phase: "GUESS_VOTE",
         revealVotes: {},
         guessVotes: {},
+        guessProposals: [],
         pendingGuess: null,
         message: `${teamName(state.activeTeam)}打开了 ${selected.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
       });
@@ -1293,19 +1365,17 @@ export class RoomAuthorityVNext {
       return this.publicSessionOutcome(session, "phase-boundary", true);
     }
     if (state.phase !== "GUESS_VOTE") return this.publicSessionOutcome(session);
-    const options = new Map<string, { vote: TeamBattleGuessVote; count: number; proposerPlayerId?: string; proposerName?: string }>();
-    for (const [voterId, vote] of Object.entries(state.guessVotes)) {
+    const proposalByAnswer = rebuildTeamGuessProposals(
+      state,
+      (playerId) => state.teamMemberNames?.[playerId] ?? aggregate.players.find((player) => player.id === playerId)?.nickname,
+    );
+    const options = new Map<string, { vote: TeamBattleGuessVote; count: number }>();
+    for (const vote of Object.values(state.guessVotes)) {
       const key = vote.type === "skip" ? "skip" : `guess:${vote.answerText?.trim()}`;
       const current = options.get(key);
       options.set(key, {
         vote,
         count: (current?.count ?? 0) + 1,
-        proposerPlayerId: current?.proposerPlayerId ?? (vote.type === "guess" ? voterId : undefined),
-        proposerName:
-          current?.proposerName ??
-          (vote.type === "guess"
-            ? state.teamMemberNames?.[voterId] ?? aggregate.players.find((player) => player.id === voterId)?.nickname
-            : undefined),
       });
     }
     const noVotes = options.size === 0;
@@ -1331,12 +1401,13 @@ export class RoomAuthorityVNext {
       state.voteDeadlineAt = null;
       aggregate.deadline = null;
     } else {
+      const winningProposal = proposalByAnswer.get(normalizeTeamGuessAnswer(winner.answerText));
       state.phase = "JUDGING";
       state.pendingGuess = {
         team: state.activeTeam,
         answerText: winner.answerText?.trim() ?? "",
-        proposerPlayerId: winningOption?.proposerPlayerId,
-        proposerName: winningOption?.proposerName,
+        proposerPlayerId: winningProposal?.proposerPlayerId,
+        proposerName: winningProposal?.proposerName,
       };
       state.message = `${teamName(state.activeTeam)}决定猜「${state.pendingGuess.answerText}」。${tieMessage}`;
       state.voteDeadlineAt = null;
@@ -1344,6 +1415,7 @@ export class RoomAuthorityVNext {
     }
     state.revealVotes = {};
     state.guessVotes = {};
+    state.guessProposals = [];
     return this.publicSessionOutcome(session, "phase-boundary", true);
   }
 
@@ -1380,6 +1452,7 @@ export class RoomAuthorityVNext {
     if (state.phase === "REVIEW") state.voteDeadlineAt = null;
     state.revealVotes = {};
     state.guessVotes = {};
+    state.guessProposals = [];
     if (state.phase === "REVIEW") aggregate.deadline = null;
     const outcome = this.publicSessionOutcome(session, "phase-boundary", true);
     if (scoredPlayerIds.length) {
@@ -1423,6 +1496,7 @@ export class RoomAuthorityVNext {
     session.currentRevealRound += 1;
     state.revealVotes = {};
     state.guessVotes = {};
+    state.guessProposals = [];
     state.pendingGuess = null;
     state.message = nextPhase === "REVEAL_VOTE"
       ? `${teamName(nextTeam)}本回合可以打开 ${state.revealLimit} 个方块。`
@@ -1437,7 +1511,7 @@ export class RoomAuthorityVNext {
     this.assertPresenter(action.actorId);
     const state = session.teamBattleState;
     if (!state) throw new TerminalMutationError("当前不是红蓝对抗模式。");
-    Object.assign(state, { phase: "REVIEW", voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, pendingGuess: null });
+    Object.assign(state, { phase: "REVIEW", voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, guessProposals: [], pendingGuess: null });
     session.revealedBlocks = ALL_REVEALED_BLOCKS;
     session.roundStartedAt = null;
     aggregate.deadline = null;
@@ -1623,6 +1697,7 @@ export class RoomAuthorityVNext {
       state.teams.blue = state.teams.blue.filter((id) => id !== targetPlayerId);
       delete state.revealVotes[targetPlayerId];
       delete state.guessVotes[targetPlayerId];
+      pruneUnusedTeamGuessProposals(state);
       if (state.teamMemberNames) delete state.teamMemberNames[targetPlayerId];
       if (
         state.phase !== "TURN_RESULT" &&
@@ -1632,6 +1707,7 @@ export class RoomAuthorityVNext {
         state.activeTeam = oppositeTeam(state.activeTeam);
         state.revealVotes = {};
         state.guessVotes = {};
+        state.guessProposals = [];
         state.pendingGuess = null;
         if (state.phase === "REVEAL_VOTE" || state.phase === "GUESS_VOTE") {
           this.startTeamVoteDeadline(state, state.phase, action.serverReceivedAtMs);
@@ -1655,6 +1731,7 @@ export class RoomAuthorityVNext {
         state.voteDeadlineAt = null;
         state.revealVotes = {};
         state.guessVotes = {};
+        state.guessProposals = [];
         state.pendingGuess = null;
         state.message = "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。";
         aggregate.deadline = null;
@@ -2414,6 +2491,7 @@ export class RoomAuthorityVNext {
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
+      guessProposals: [],
       previousTurnAction: null,
       pendingGuess: null,
       correctGuess: null,

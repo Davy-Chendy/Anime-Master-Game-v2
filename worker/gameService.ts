@@ -4,6 +4,7 @@ import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
 import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  MAX_TEAM_BATTLE_GUESS_LENGTH,
   MAX_ROOM_NOTICE_LENGTH,
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
 } from "../src/types/game";
@@ -51,6 +52,7 @@ import type {
   RoomQuestionSource,
   RoomVisibility,
   TeamBattleGuessVote,
+  TeamBattleGuessProposal,
   TeamBattlePreviousTurnAction,
   TeamBattleResolvedGuess,
   TeamBattleState,
@@ -446,6 +448,7 @@ function parseTeamBattleState(value: unknown): TeamBattleState | null {
     voteDeadlineAt: typeof record.voteDeadlineAt === "string" ? record.voteDeadlineAt : null,
     revealVotes: normalizeRevealVotes(record.revealVotes),
     guessVotes: normalizeGuessVotes(record.guessVotes),
+    guessProposals: normalizeGuessProposals(record.guessProposals),
     previousTurnAction: normalizePreviousTurnAction(record.previousTurnAction),
     pendingGuess: normalizeResolvedTeamGuess(record.pendingGuess),
     correctGuess: normalizeResolvedTeamGuess(record.correctGuess),
@@ -550,6 +553,63 @@ function normalizeGuessVotes(value: unknown) {
   return votes;
 }
 
+function normalizeGuessProposals(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const proposals: TeamBattleGuessProposal[] = [];
+  const seenAnswers = new Set<string>();
+  for (const proposal of value) {
+    if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) continue;
+    const record = proposal as Partial<TeamBattleGuessProposal>;
+    const answerText = typeof record.answerText === "string" ? record.answerText.trim() : "";
+    if (
+      !answerText ||
+      seenAnswers.has(answerText) ||
+      typeof record.proposerPlayerId !== "string" ||
+      typeof record.proposerName !== "string"
+    ) continue;
+    seenAnswers.add(answerText);
+    proposals.push({
+      answerText,
+      proposerPlayerId: record.proposerPlayerId,
+      proposerName: record.proposerName,
+    });
+  }
+  return proposals;
+}
+
+function rebuildTeamGuessProposals(state: TeamBattleState) {
+  const proposals = normalizeGuessProposals(state.guessProposals);
+  const proposalByAnswer = new Map(proposals.map((proposal) => [proposal.answerText, proposal]));
+  for (const [voterId, vote] of Object.entries(state.guessVotes)) {
+    if (vote.type !== "guess") continue;
+    const answerText = vote.answerText?.trim() ?? "";
+    if (!answerText) continue;
+    let proposal = proposalByAnswer.get(answerText);
+    if (!proposal) {
+      proposal = {
+        answerText,
+        proposerPlayerId: voterId,
+        proposerName: state.teamMemberNames?.[voterId] ?? "已离开玩家",
+      };
+      proposals.push(proposal);
+      proposalByAnswer.set(answerText, proposal);
+    }
+    vote.answerText = proposal.answerText;
+  }
+  state.guessProposals = proposals;
+  return proposalByAnswer;
+}
+
+function pruneUnusedTeamGuessProposals(state: TeamBattleState) {
+  const activeAnswers = new Set(
+    Object.values(state.guessVotes)
+      .filter((vote) => vote.type === "guess")
+      .map((vote) => vote.answerText?.trim() ?? "")
+      .filter(Boolean),
+  );
+  state.guessProposals = (state.guessProposals ?? []).filter((proposal) => activeAnswers.has(proposal.answerText));
+}
+
 function randomInt(maxExclusive: number) {
   return Math.floor(Math.random() * maxExclusive);
 }
@@ -643,6 +703,7 @@ function createInitialTeamBattleState(
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     previousTurnAction: null,
     pendingGuess: null,
     correctGuess: null,
@@ -720,6 +781,7 @@ async function resetTeamBattleStateForQuestion(
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     previousTurnAction: null,
     pendingGuess: null,
     correctGuess: null,
@@ -793,6 +855,7 @@ export function removePlayerFromTeamBattleState(
     revealVotes,
     guessVotes,
   };
+  pruneUnusedTeamGuessProposals(nextState);
 
   if (nextState.phase !== "TURN_RESULT" && teams[nextState.activeTeam].length === 0) {
     const nextTeam = getOpposingTeam(nextState.activeTeam);
@@ -803,6 +866,7 @@ export function removePlayerFromTeamBattleState(
         voteDeadlineAt: null,
         revealVotes: {},
         guessVotes: {},
+        guessProposals: [],
         pendingGuess: null,
         message: `${getTeamName(getOpposingTeam(nextTeam))}没有在线队员，轮到${getTeamName(nextTeam)}。`,
       };
@@ -826,6 +890,7 @@ export function removePlayerFromTeamBattleState(
         voteDeadlineAt: null,
         revealVotes: {},
         guessVotes: {},
+        guessProposals: [],
         pendingGuess: null,
         message: "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。",
       };
@@ -5603,6 +5668,7 @@ export async function completeTeamBattleBlockSelection(params: {
     disabledBlocks,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     pendingGuess: null,
   };
   const selectableBlocks = getSelectableTeamBattleBlocks(session, stateWithDisabledBlocks, revealBlockCount);
@@ -5735,6 +5801,23 @@ export async function submitTeamBattleGuessVote(params: {
   if (vote.type === "guess" && !vote.answerText) {
     throw new Error("请输入要猜的答案，或选择跳过。");
   }
+  if (vote.type === "guess" && vote.answerText.length > MAX_TEAM_BATTLE_GUESS_LENGTH) {
+    throw new Error(`猜测答案不能超过 ${MAX_TEAM_BATTLE_GUESS_LENGTH} 个字符。`);
+  }
+
+  const proposalByAnswer = rebuildTeamGuessProposals(state);
+  if (vote.type === "guess") {
+    let proposal = proposalByAnswer.get(vote.answerText);
+    if (!proposal) {
+      proposal = {
+        answerText: vote.answerText,
+        proposerPlayerId: params.playerId,
+        proposerName: state.teamMemberNames?.[params.playerId] ?? "已离开玩家",
+      };
+      state.guessProposals!.push(proposal);
+    }
+    vote.answerText = proposal.answerText;
+  }
 
   const guessVotes = {
     ...state.guessVotes,
@@ -5745,6 +5828,7 @@ export async function submitTeamBattleGuessVote(params: {
     guessVotes,
     message: `${getTeamName(state.activeTeam)}正在投票决定是否猜测。`,
   }, getServerReceivedAtMs(params));
+  pruneUnusedTeamGuessProposals(nextState);
   const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
 
   if (error) {
@@ -5789,6 +5873,7 @@ export async function finalizeTeamBattleVote(params: {
           activeTeam: availableTeam,
           revealVotes: {},
           guessVotes: {},
+          guessProposals: [],
           pendingGuess: null,
           message: `${getTeamName(state.activeTeam)}没有在线队员，轮到${getTeamName(availableTeam)}。`,
         }, state.phase)
@@ -5797,6 +5882,7 @@ export async function finalizeTeamBattleVote(params: {
           voteDeadlineAt: null,
           revealVotes: {},
           guessVotes: {},
+          guessProposals: [],
           pendingGuess: null,
           message: "双方都没有在线队员，已停止自动投票，请出题人公布答案或结束游戏。",
         };
@@ -5851,6 +5937,7 @@ export async function finalizeTeamBattleVote(params: {
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
+      guessProposals: [],
       pendingGuess: null,
       message: `${getTeamName(state.activeTeam)}打开了 ${selectedBlocks.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
     }, "GUESS_VOTE");
@@ -5865,15 +5952,14 @@ export async function finalizeTeamBattleVote(params: {
     return { gameSession: toGameSession(updatedGameSession) };
   }
 
-  const optionCounts = new Map<string, { count: number; vote: TeamBattleGuessVote; proposerPlayerId?: string; proposerName?: string }>();
-  for (const [voterId, vote] of Object.entries(state.guessVotes)) {
+  const proposalByAnswer = rebuildTeamGuessProposals(state);
+  const optionCounts = new Map<string, { count: number; vote: TeamBattleGuessVote }>();
+  for (const vote of Object.values(state.guessVotes)) {
     const key = vote.type === "skip" ? "__skip__" : `guess:${vote.answerText?.trim() ?? ""}`;
     const existing = optionCounts.get(key);
     optionCounts.set(key, {
       count: (existing?.count ?? 0) + 1,
       vote,
-      proposerPlayerId: existing?.proposerPlayerId ?? (vote.type === "guess" ? voterId : undefined),
-      proposerName: existing?.proposerName ?? (vote.type === "guess" ? state.teamMemberNames?.[voterId] : undefined),
     });
   }
 
@@ -5897,6 +5983,7 @@ export async function finalizeTeamBattleVote(params: {
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
+      guessProposals: [],
       previousTurnAction: {
         team: state.activeTeam,
         type: "skip",
@@ -5914,17 +6001,19 @@ export async function finalizeTeamBattleVote(params: {
   }
 
   const answerText = winningOption.vote.answerText?.trim() ?? "";
+  const winningProposal = proposalByAnswer.get(answerText);
   const nextState: TeamBattleState = {
     ...state,
     phase: "JUDGING",
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     pendingGuess: {
       team: state.activeTeam,
       answerText,
-      proposerPlayerId: winningOption.proposerPlayerId,
-      proposerName: winningOption.proposerName,
+      proposerPlayerId: winningProposal?.proposerPlayerId,
+      proposerName: winningProposal?.proposerName,
     },
     message: `${getTeamName(state.activeTeam)}决定猜「${answerText}」。${tieMessage}`,
   };
@@ -5974,6 +6063,7 @@ export async function judgeTeamBattleGuess(params: {
       voteDeadlineAt: null,
       revealVotes: {},
       guessVotes: {},
+      guessProposals: [],
       previousTurnAction: {
         team: state.pendingGuess.team,
         type: "guess",
@@ -6022,6 +6112,7 @@ export async function judgeTeamBattleGuess(params: {
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     correctGuess: { ...state.pendingGuess },
     pendingGuess: null,
     teamScores: nextScores,
@@ -6094,6 +6185,7 @@ export async function advanceTeamBattleTurn(params: {
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     pendingGuess: null,
     turnNumber: state.turnNumber + 1,
     message: nextPhase === "REVEAL_VOTE"
@@ -6137,6 +6229,7 @@ export async function revealTeamBattleAnswer(params: {
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
+    guessProposals: [],
     pendingGuess: null,
     message: "出题人公布答案，本题双方都不加分。",
   };
