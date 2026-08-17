@@ -17,6 +17,10 @@ const GITHUB_REPO_URL = "https://github.com/Davy-Chendy/Anime-Master-Game-v2";
 const INTRO_VIDEO_URL = "https://www.bilibili.com/video/BV1ZQug6SEKP/?share_source=copy_web&vd_source=adcd58a56c0c896937ee4c3fe22de339";
 const FEEDBACK_QQ_GROUP_URL = "https://qm.qq.com/q/bHJQIRplmg";
 const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
+const FRIEND_LINKS = [
+  { label: "二次元笑传之猜猜呗", href: "https://ccb.baka.website/" },
+  { label: "BakaGame", href: "https://game.baka.website/" },
+] as const;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
 const SHOW_MAINTENANCE_ANNOUNCEMENT = false;
@@ -100,10 +104,11 @@ type HomeFooterLinkItemProps = {
   label: string;
   href: string | null;
   icon: HomeFooterIcon;
+  external?: boolean;
   wide?: boolean;
 };
 
-function HomeFooterLinkItem({ label, href, icon, wide = false }: HomeFooterLinkItemProps) {
+function HomeFooterLinkItem({ label, href, icon, external = false, wide = false }: HomeFooterLinkItemProps) {
   const iconNode =
     icon === "video" ? (
       <svg aria-hidden="true" className="home-footer-icon" viewBox="0 0 24 24">
@@ -137,7 +142,15 @@ function HomeFooterLinkItem({ label, href, icon, wide = false }: HomeFooterLinkI
   const content = (
     <>
       {iconNode}
-      <span>{label}</span>
+      <span className="home-footer-link-text">
+        <span>{label}</span>
+        {external ? (
+          <svg aria-hidden="true" className="home-footer-external-mark" viewBox="0 0 16 16">
+            <path d="M5 11 11 5" />
+            <path d="M6.5 5H11v4.5" />
+          </svg>
+        ) : null}
+      </span>
     </>
   );
 
@@ -154,6 +167,34 @@ function HomeFooterLinkItem({ label, href, icon, wide = false }: HomeFooterLinkI
     >
       {content}
     </a>
+  );
+}
+
+function HomeFriendLinks() {
+  return (
+    <section aria-labelledby="home-friend-links-title" className="home-friend-links">
+      <h2 className="home-friend-links-title" id="home-friend-links-title">
+        友情链接
+      </h2>
+      <div className="home-friend-links-list">
+        {FRIEND_LINKS.map((friendLink) => (
+          <a
+            aria-label={`${friendLink.label}（在新标签页打开）`}
+            className="home-friend-link"
+            href={friendLink.href}
+            key={friendLink.href}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            <span>{friendLink.label}</span>
+            <svg aria-hidden="true" className="home-friend-link-icon" viewBox="0 0 16 16">
+              <path d="M5 11 11 5" />
+              <path d="M6.5 5H11v4.5" />
+            </svg>
+          </a>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -478,12 +519,15 @@ export default function HomePage() {
         </div>
 
         <footer className="home-footer" aria-label="相关信息">
-          <div className="home-footer-grid">
-            <HomeFooterLinkItem href={INTRO_VIDEO_URL} icon="video" label="视频介绍" />
-            <HomeFooterLinkItem href={null} icon="rules" label="文字规则（待补）" />
-            <HomeFooterLinkItem href={GITHUB_REPO_URL} icon="github" label="Github 仓库" />
-            <HomeFooterLinkItem href={FEEDBACK_QQ_GROUP_URL} icon="group" label="交流反馈Q群" />
-            <HomeFooterLinkItem href={OTHER_GAME_URL} icon="spark" label="作者其他动漫高手游戏：截码战" wide />
+          <div className="home-footer-content">
+            <div className="home-footer-grid">
+              <HomeFooterLinkItem href={INTRO_VIDEO_URL} icon="video" label="视频介绍" />
+              <HomeFooterLinkItem href={null} icon="rules" label="文字规则（待补）" />
+              <HomeFooterLinkItem href={GITHUB_REPO_URL} icon="github" label="Github 仓库" />
+              <HomeFooterLinkItem href={FEEDBACK_QQ_GROUP_URL} icon="group" label="游戏QQ群" />
+              <HomeFooterLinkItem external href={OTHER_GAME_URL} icon="spark" label="更多游戏：动漫高手截码战" wide />
+            </div>
+            <HomeFriendLinks />
           </div>
         </footer>
       </div>
