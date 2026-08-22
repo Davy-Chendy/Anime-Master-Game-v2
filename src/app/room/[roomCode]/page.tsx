@@ -12,6 +12,7 @@ import { RoomChatBar, useRoomChat } from "@/components/RoomChat";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, isRoomVersionExpiredError, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import { clearAllRoomChatMessages, clearRoomChatMessages } from "@/lib/roomChat";
+import { completesAuthorityLobbyHandoff } from "@/lib/roomRealtimeVersion";
 import { GAME_MODE_LABELS } from "@/lib/gameModeLabels";
 import { ROOM_VERSION_EXPIRED_EVENT, ROOM_VERSION_EXPIRED_MESSAGE } from "@/lib/roomRuntime";
 import {
@@ -2301,6 +2302,12 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       `room:${room.id}`,
       (message) => {
         const messageVersion = getRealtimeVersion(message);
+        const realtimeDeltas = getRealtimeDeltas(message);
+        const roomDelta = realtimeDeltas.find(isRoomUpdatedDelta);
+        const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
+        const completedLobbyHandoff = Boolean(
+          pushedRoom && pushedRoom.id === room.id && completesAuthorityLobbyHandoff(message, pushedRoom),
+        );
         if (message.name === "authorityCutover") {
           lastRoomRealtimeVersionRef.current = null;
           missedRoomRealtimeVersionRef.current = true;
@@ -2316,7 +2323,11 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           void refreshLatestRoom();
           return;
         }
-        if (messageVersion != null) {
+        if (completedLobbyHandoff) {
+          lastRoomRealtimeVersionRef.current = null;
+          missedRoomRealtimeVersionRef.current = false;
+          roomCatchUpTargetVersionRef.current = null;
+        } else if (messageVersion != null) {
           const lastVersion = lastRoomRealtimeVersionRef.current;
           if (lastVersion != null && messageVersion <= lastVersion) {
             return;
@@ -2343,16 +2354,14 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           return;
         }
 
-        const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
+        const dissolvedDelta = realtimeDeltas.find(isRoomDissolvedDelta);
         if (dissolvedDelta?.roomId === room.id) {
           markRoomDissolved();
           return;
         }
 
-        const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
-        const roomNoticeDelta = getRealtimeDeltas(message).find(isRoomNoticeUpdatedDelta);
+        const roomNoticeDelta = realtimeDeltas.find(isRoomNoticeUpdatedDelta);
         cacheGameResultSnapshot(getBroadcastGameResultSnapshot(message));
-        const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
         if (pushedRoom && pushedRoom.id === room.id) {
           applyRoomUpdate(pushedRoom);
           return;
