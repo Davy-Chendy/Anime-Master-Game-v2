@@ -136,8 +136,8 @@ function initialTeamState(players: Player[], questionIndex = 0): TeamBattleState
     disabledBlocks: [],
     revealLimit: 1,
     turnNumber: 1,
-    revealVoteSeconds: 25,
-    guessVoteSeconds: 50,
+    revealVoteSeconds: 12,
+    guessVoteSeconds: 35,
     voteDeadlineAt: null,
     revealVotes: {},
     guessVotes: {},
@@ -688,12 +688,12 @@ test("TEAM_BATTLE fixed timers settle zero and partial submissions without early
   const sim = new FullGameSimulator({ mode: "TEAM_BATTLE", playerCount: 6, spectatorCount: 1, questionCount: 1 });
   await completeTeamBlockSelection(sim);
   const initialDeadline = sim.session.teamBattleState?.voteDeadlineAt;
-  assert.equal(initialDeadline, new Date(1_025_000).toISOString());
+  assert.equal(initialDeadline, new Date(1_012_000).toISOString());
 
   await sim.runDeadline();
   assert.equal(sim.session.revealedBlocks.length, 1, "zero reveal votes must randomly open one cell");
   assert.equal(sim.session.teamBattleState?.phase, "GUESS_VOTE");
-  assert.equal(new Date(sim.session.teamBattleState!.voteDeadlineAt!).getTime(), new Date(initialDeadline!).getTime() + 50_000);
+  assert.equal(new Date(sim.session.teamBattleState!.voteDeadlineAt!).getTime(), new Date(initialDeadline!).getTime() + 35_000);
 
   await sim.runDeadline();
   assert.equal(sim.session.teamBattleState?.previousTurnAction?.type, "skip", "zero guess votes must skip");

@@ -338,8 +338,8 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
 
   await runWithGameDatabase(db, async () => {
     const room = await createRoom("host-defaults", "Host");
-    assert.equal(room.teamRevealVoteSeconds, 25);
-    assert.equal(room.teamGuessVoteSeconds, 50);
+    assert.equal(room.teamRevealVoteSeconds, 12);
+    assert.equal(room.teamGuessVoteSeconds, 35);
     assert.equal(room.teamPresenterBlockEnabled, false);
     assert.equal(room.spectatorQuestionPreviewEnabled, true);
     assert.equal(room.spectatorPlayerAnswersEnabled, true);
@@ -349,8 +349,8 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
 
     const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_spectator_question_preview_enabled, lobby_spectator_player_answers_enabled, lobby_player_capacity, lobby_spectator_capacity, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
       .get(room.id);
-    assert.equal(stored.lobby_team_reveal_vote_seconds, 25);
-    assert.equal(stored.lobby_team_guess_vote_seconds, 50);
+    assert.equal(stored.lobby_team_reveal_vote_seconds, 12);
+    assert.equal(stored.lobby_team_guess_vote_seconds, 35);
     assert.equal(stored.lobby_team_presenter_block_enabled, 0);
     assert.equal(stored.lobby_spectator_question_preview_enabled, 1);
     assert.equal(stored.lobby_spectator_player_answers_enabled, 1);
@@ -372,8 +372,8 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
       maxRevealRounds: 3,
       roundSeconds: 45,
       roundScores: [5, 3, 1],
-      teamRevealVoteSeconds: 25,
-      teamGuessVoteSeconds: 50,
+      teamRevealVoteSeconds: 12,
+      teamGuessVoteSeconds: 35,
       teamAssignmentMode: "MANUAL",
     });
     assert.equal(Number(db.sqlite.prepare("SELECT total_changes() changes").get().changes), changesBeforeNoOps);

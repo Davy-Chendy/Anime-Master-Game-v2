@@ -18,8 +18,8 @@ export type TeamBattleTeam = "red" | "blue";
 export type TeamAssignmentMode = "AUTO" | "MANUAL";
 export const MAX_ROOM_NOTICE_LENGTH = 80;
 export type TeamBattlePhase = "PRESENTER_BLOCK" | "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "TURN_RESULT" | "REVIEW";
-export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 25;
-export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 50;
+export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 12;
+export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 35;
 export const TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS = 5;
 export const MAX_TEAM_BATTLE_GUESS_LENGTH = 80;
 
