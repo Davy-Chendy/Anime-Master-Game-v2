@@ -221,6 +221,30 @@ test("public room directory uses an opaque cursor to load additional bounded pag
   assert.equal(boundQueries[1].at(-1), 21);
 });
 
+test("public room directory omits the next cursor when authoritative filtering leaves the page underfilled", async () => {
+  const rows = [
+    room("playing-stale", "PLAYING", "2026-08-09T09:59:00Z", 3),
+    ...Array.from({ length: 20 }, (_, index) => room(
+      `lobby-filtered-${String(index).padStart(2, "0")}`,
+      "LOBBY",
+      new Date(Date.UTC(2026, 7, 9, 9, 58 - index)).toISOString(),
+    )),
+  ];
+  const { env, fetchedTopics } = createEnv([rows], {
+    "room:playing-stale": Response.json({
+      status: "PLAYING",
+      playerCount: 3,
+      updatedAt: "2026-08-09T08:59:59Z",
+    }),
+  });
+
+  const page = await listPublicRooms(env, null, NOW);
+
+  assert.equal(page.rooms.length, 19);
+  assert.equal(page.nextCursor, null);
+  assert.deepEqual(fetchedTopics, ["room:playing-stale"]);
+});
+
 test("public room directory rejects malformed cursors without querying storage", async () => {
   const { env, boundQueries } = createEnv([[]], {});
   await assert.rejects(() => listPublicRooms(env, "not-a-cursor", NOW), /公开房间游标无效/);

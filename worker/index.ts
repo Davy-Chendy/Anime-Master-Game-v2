@@ -2389,12 +2389,13 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
     }
   });
   const cutoffMs = now - PUBLIC_ROOM_ACTIVITY_WINDOW_MS;
+  const visibleRooms = enrichedRooms.filter((room) => {
+    const updatedAtMs = Date.parse(room.updatedAt);
+    return Number.isFinite(updatedAtMs) && updatedAtMs >= cutoffMs;
+  });
   return {
-    rooms: enrichedRooms.filter((room) => {
-      const updatedAtMs = Date.parse(room.updatedAt);
-      return Number.isFinite(updatedAtMs) && updatedAtMs >= cutoffMs;
-    }),
-    nextCursor: candidates.length > PUBLIC_ROOM_PAGE_SIZE && pageCandidates.length > 0
+    rooms: visibleRooms,
+    nextCursor: visibleRooms.length === PUBLIC_ROOM_PAGE_SIZE && candidates.length > PUBLIC_ROOM_PAGE_SIZE
       ? encodePublicRoomCursor(pageCandidates[pageCandidates.length - 1])
       : null,
   };
