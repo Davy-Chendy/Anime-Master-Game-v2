@@ -88,8 +88,8 @@ export function QuestionAnswerEditorDialog({
     if (fillableCount === 0) {
       setNotice(
         invalidFilenameCount > 0
-          ? "有文件名为空或超过 80 字，请手动填写。"
-          : "没有需要填入的空白答案。",
+          ? "有文件名为空或超过 80 字，请手动填写"
+          : "没有需要填入的空白答案",
       );
       return;
     }
@@ -97,8 +97,8 @@ export function QuestionAnswerEditorDialog({
     onQuestionsChange(fillBlankDraftAnswersFromFilenames(questions));
     setNotice(
       invalidFilenameCount > 0
-        ? `已填入 ${fillableCount} 个答案，另有 ${invalidFilenameCount} 个文件名需要手动处理。`
-        : `已从文件名填入 ${fillableCount} 个答案。`,
+        ? `已填入 ${fillableCount} 个答案，另有 ${invalidFilenameCount} 个文件名需要手动处理`
+        : `已从文件名填入 ${fillableCount} 个答案`,
     );
   }
 
@@ -121,11 +121,11 @@ export function QuestionAnswerEditorDialog({
       >
         <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-4 py-4 sm:px-5">
           <div className="min-w-0">
-            <h2 className="text-lg font-semibold text-slate-950" id={titleId}>预设答案</h2>
-            <p className="mt-1 text-sm leading-5 text-[var(--muted)]">
-              建议在游戏中确认答案，可直接选用玩家回答；容易忘记的题也可提前填写。
+            <h2 className="text-xl font-semibold text-slate-950" id={titleId}>预设答案</h2>
+            <p className="mt-1 text-base leading-6 text-[var(--muted)]">
+              建议在游戏中确认答案，可直接选用玩家回答；容易忘记的题也可提前填写
             </p>
-            <p className="mt-2 text-xs font-medium text-slate-600">已预设 {answerCount}/{questions.length} 个答案</p>
+            <p className="mt-2 text-sm font-medium text-slate-600">已预设 {answerCount}/{questions.length} 个答案</p>
           </div>
           <button
             aria-label="关闭答案编辑"
@@ -139,8 +139,8 @@ export function QuestionAnswerEditorDialog({
         </div>
 
         <div className="flex flex-col gap-3 border-b border-[var(--line)] bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-          <p aria-live="polite" className="min-h-5 text-sm text-[var(--muted)]">
-            {notice || (hasSourceFilenames ? "只填空白项，不覆盖已编辑答案。" : "答案可留空。")}
+          <p aria-live="polite" className="min-h-6 text-base text-[var(--muted)]">
+            {notice || (hasSourceFilenames ? "只填空白项，不覆盖已编辑答案" : "答案可留空")}
           </p>
           {hasSourceFilenames ? (
             <Button className="shrink-0" type="button" variant="secondary" onClick={handleFillFromFilenames}>
@@ -150,25 +150,25 @@ export function QuestionAnswerEditorDialog({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {questions.map((question, index) => (
-              <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 rounded-md border border-[var(--line)] bg-slate-50 p-3 sm:grid-cols-[8rem_minmax(0,1fr)]" key={question.key}>
+              <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3" key={question.key}>
                 <img
                   alt={`第 ${index + 1} 题预览`}
                   className="aspect-video w-full rounded bg-black object-contain"
                   src={question.imageUrl}
                 />
-                <label className="min-w-0">
+                <label className="mt-3 block min-w-0">
                   <span className="flex min-w-0 items-baseline gap-2">
-                    <span className="shrink-0 text-sm font-semibold text-slate-950">第 {index + 1} 题</span>
+                    <span className="shrink-0 text-base font-semibold text-slate-950">第 {index + 1} 题</span>
                     {question.sourceFileName ? (
-                      <span className="min-w-0 truncate text-xs text-[var(--muted)]" title={question.sourceFileName}>
+                      <span className="min-w-0 truncate text-sm text-[var(--muted)]" title={question.sourceFileName}>
                         {question.sourceFileName}
                       </span>
                     ) : null}
                   </span>
                   <input
-                    className="mt-2 h-10 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                    className="mt-2 h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                     maxLength={80}
                     placeholder="留空则在游戏中确认"
                     value={question.labelText ?? ""}

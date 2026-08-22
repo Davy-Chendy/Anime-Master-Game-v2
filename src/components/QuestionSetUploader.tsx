@@ -576,7 +576,7 @@ export function QuestionSetUploader({
         const shouldRetry = window.confirm(
           `有 ${result.failedQuestions.length} 张图片导入失败。\n\n${failedSummary}${
             result.failedQuestions.length > 5 ? "\n..." : ""
-          }\n\n点击“确定”只重试失败图片；点击“取消”保留已成功图片并生成预览。`,
+          }\n\n点击“确定”只重试失败图片；点击“取消”保留已成功图片并生成预览`,
         );
 
         if (shouldRetry) {
@@ -924,7 +924,7 @@ export function QuestionSetUploader({
           <div className="space-y-4">
             {!configStatus.isReady ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                图片上传服务未就绪，无法上传新图片。
+                图片上传服务未就绪，无法上传新图片
               </div>
             ) : null}
             <div
@@ -955,7 +955,9 @@ export function QuestionSetUploader({
                   已识别 {recognizedLabelCount} 个工具答案
                 </p>
               ) : null}
-              <p className="mt-2 text-xs text-[var(--muted)]">文件名可在预览时一键填入答案。</p>
+              <p className="mt-2 text-xs text-[var(--muted)]">
+                上传完成后，可在“编辑答案”中将图片文件名批量填入空白答案
+              </p>
               <input
                 ref={fileInputRef}
                 className="hidden"
@@ -1298,7 +1300,7 @@ export function QuestionSetUploader({
                 </p>
                 {localUploadDraft !== null && localUploadDraft.length > 0 ? (
                   <p className="mt-2 max-w-2xl text-sm leading-5 text-[var(--muted)]">
-                    建议在游戏中确认答案，可直接选用玩家回答；容易忘记的题也可提前填写。
+                    建议在游戏中确认答案，可直接选用玩家回答；容易忘记的题也可提前填写
                   </p>
                 ) : null}
               </div>
@@ -1399,7 +1401,7 @@ export function QuestionSetUploader({
               ))}
               {localUploadDraft?.length === 0 ? (
                 <p className="col-span-full rounded-md border border-dashed border-[var(--line)] px-4 py-6 text-center text-sm text-[var(--muted)]">
-                  已删除全部图片，请重新上传后再确认。
+                  已删除全部图片，请重新上传后再确认
                 </p>
               ) : null}
             </div>
