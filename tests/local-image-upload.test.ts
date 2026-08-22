@@ -5,8 +5,10 @@ import {
   buildLocalUploadQuestionImport,
   buildPreparedUrlImportDraft,
   extractCreationToolLabelFromFilename,
+  fillBlankDraftAnswersFromFilenames,
   findNearestLocalUploadDropTarget,
   filesToUploadableImages,
+  getAnswerCandidateFromFilename,
   getLocalUploadCreationMethod,
   moveLocalUploadDraftQuestionToIndex,
   readDroppedUploadFiles,
@@ -80,6 +82,49 @@ test("creation-tool filenames extract the full answer between the ordinal and mo
   assert.equal(extractCreationToolLabelFromFilename("001-答案-mosaic.txt"), null);
 });
 
+test("ordinary filenames become explicit answer candidates without being applied automatically", () => {
+  assert.equal(getAnswerCandidateFromFilename("孤独摇滚.jpg"), "孤独摇滚");
+  assert.equal(getAnswerCandidateFromFilename("folder/葬送的芙莉莲.PNG"), "葬送的芙莉莲");
+  assert.equal(getAnswerCandidateFromFilename("folder\\轻音少女.jpeg"), "轻音少女");
+  assert.equal(getAnswerCandidateFromFilename("01-轻音少女.webp"), "01-轻音少女");
+  assert.equal(getAnswerCandidateFromFilename("archive.name.final.jpeg"), "archive.name.final");
+  assert.equal(getAnswerCandidateFromFilename(".jpg"), null);
+  assert.equal(getAnswerCandidateFromFilename("   "), null);
+  assert.equal(getAnswerCandidateFromFilename(`${"答".repeat(81)}.jpg`), null);
+});
+
+test("filename fill only populates blank draft answers and preserves existing labels", () => {
+  const questions = [
+    { key: "one", imageUrl: "https://assets.example.com/one.webp", labelText: null, sourceFileName: "孤独摇滚.jpg" },
+    { key: "two", imageUrl: "https://assets.example.com/two.webp", labelText: "工具答案", sourceFileName: "不应覆盖.png" },
+    { key: "three", imageUrl: "https://assets.example.com/three.webp", labelText: "  ", sourceFileName: "轻音少女.webp" },
+    { key: "four", imageUrl: "https://assets.example.com/four.webp", labelText: null, sourceFileName: null },
+    { key: "five", imageUrl: "https://assets.example.com/five.webp", labelText: null, sourceFileName: `${"长".repeat(81)}.jpg` },
+  ];
+
+  const filled = fillBlankDraftAnswersFromFilenames(questions);
+
+  assert.deepEqual(filled.map((question) => question.labelText), ["孤独摇滚", "工具答案", "轻音少女", null, null]);
+  assert.equal(questions[0]?.labelText, null);
+  assert.equal(filled[1], questions[1]);
+  assert.equal(filled[3], questions[3]);
+});
+
+test("filename fill handles a full 30-question local draft without changing question identity or order", () => {
+  const questions = Array.from({ length: 30 }, (_, index) => ({
+    key: `question-${index}`,
+    imageUrl: `https://assets.example.com/${index}.webp`,
+    labelText: null,
+    sourceFileName: `动画${index + 1}.jpg`,
+  }));
+
+  const filled = fillBlankDraftAnswersFromFilenames(questions);
+
+  assert.deepEqual(filled.map((question) => question.key), questions.map((question) => question.key));
+  assert.deepEqual(filled.map((question) => question.imageUrl), questions.map((question) => question.imageUrl));
+  assert.deepEqual(filled.map((question) => question.labelText), Array.from({ length: 30 }, (_, index) => `动画${index + 1}`));
+});
+
 test("local uploads are tool-assisted only when every successful image has an extracted answer", () => {
   assert.equal(getLocalUploadCreationMethod(["答案一", "答案二"]), "creation_tool_assisted");
   assert.equal(getLocalUploadCreationMethod(["答案一", null]), "player_manual");
@@ -110,8 +155,8 @@ test("successful upload results stay paired with filenames and determine the who
     successResult("questions/002-答案二.jpg", "https://assets.example.com/two.webp"),
   ]);
   assert.deepEqual(mixed.questions, [
-    { key: "questions/001-答案一-mosaic.jpg", imageUrl: "https://assets.example.com/one.webp", labelText: "答案一" },
-    { key: "questions/002-答案二.jpg", imageUrl: "https://assets.example.com/two.webp", labelText: null },
+    { key: "questions/001-答案一-mosaic.jpg", imageUrl: "https://assets.example.com/one.webp", labelText: "答案一", sourceFileName: "001-答案一-mosaic.jpg" },
+    { key: "questions/002-答案二.jpg", imageUrl: "https://assets.example.com/two.webp", labelText: null, sourceFileName: "002-答案二.jpg" },
   ]);
   assert.equal(mixed.creationMethod, "player_manual");
 
@@ -124,9 +169,9 @@ test("successful upload results stay paired with filenames and determine the who
 
 test("local upload drafts can be reordered without mutating the original list", () => {
   const questions = [
-    { key: "easy.jpg", imageUrl: "https://assets.example.com/easy.webp", labelText: null },
-    { key: "medium.jpg", imageUrl: "https://assets.example.com/medium.webp", labelText: null },
-    { key: "hard.jpg", imageUrl: "https://assets.example.com/hard.webp", labelText: null },
+    { key: "easy.jpg", imageUrl: "https://assets.example.com/easy.webp", labelText: null, sourceFileName: "easy.jpg" },
+    { key: "medium.jpg", imageUrl: "https://assets.example.com/medium.webp", labelText: null, sourceFileName: "medium.jpg" },
+    { key: "hard.jpg", imageUrl: "https://assets.example.com/hard.webp", labelText: null, sourceFileName: "hard.jpg" },
   ];
 
   const reordered = moveLocalUploadDraftQuestionToIndex(questions, "hard.jpg", 0);
@@ -158,6 +203,7 @@ test("prepared URL imports become stable editable drafts", () => {
     "https://assets.example.com/two.webp",
   ]);
   assert.deepEqual(draft.map((question) => question.labelText), ["答案一", null, null]);
+  assert.deepEqual(draft.map((question) => question.sourceFileName), [null, null, null]);
   assert.equal(new Set(draft.map((question) => question.key)).size, draft.length);
 });
 

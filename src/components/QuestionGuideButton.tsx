@@ -61,7 +61,7 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
             <div className="mt-5 space-y-4 text-sm leading-6 text-slate-700">
               <section className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
                 <h3 className="font-semibold text-slate-950">方法一：自行准备题库</h3>
-                <p className="mt-2">先把图片放进一个文件夹。游戏时上传这个文件夹中的图片即可</p>
+                <p className="mt-2">将图片整理到同一文件夹，可用动画名作为文件名；上传后可一键填入答案</p>
               </section>
 
               <section className="rounded-md border border-[var(--line)] bg-slate-50 p-4">

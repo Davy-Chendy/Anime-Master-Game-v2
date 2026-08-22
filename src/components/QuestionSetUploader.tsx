@@ -2,6 +2,7 @@
 
 import { DragEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
+import { QuestionAnswerEditorDialog } from "@/components/QuestionAnswerEditorDialog";
 import {
   buildLocalUploadQuestionImport,
   buildPreparedUrlImportDraft,
@@ -234,6 +235,7 @@ export function QuestionSetUploader({
   const [loadingCommunitySelectionId, setLoadingCommunitySelectionId] = useState<string | null>(null);
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
   const [isConfirmingQuestionSet, setIsConfirmingQuestionSet] = useState(false);
+  const [isAnswerEditorOpen, setIsAnswerEditorOpen] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
   const [questionSet, setQuestionSet] = useState<QuestionSet | CommunityQuestionSetSummary | null>(null);
   const configStatus = getR2UploadConfigStatus();
@@ -274,6 +276,10 @@ export function QuestionSetUploader({
     () => items.filter((item) => extractCreationToolLabelFromFilename(item.name)).length,
     [items],
   );
+  const draftAnswerCount = useMemo(
+    () => localUploadDraft?.filter((question) => Boolean(question.labelText?.trim())).length ?? 0,
+    [localUploadDraft],
+  );
 
   useEffect(() => {
     if (mode !== "community") {
@@ -306,6 +312,7 @@ export function QuestionSetUploader({
     setQuestionSet(null);
     setLocalUploadDraft(null);
     setDraftCreationMethod("player_manual");
+    setIsAnswerEditorOpen(false);
     draggedDraftKeyRef.current = null;
     setDraggedDraftKey(null);
     setDraftDropTarget(null);
@@ -714,6 +721,7 @@ export function QuestionSetUploader({
       communityDetailCacheRef.current.set(detail.id, detail);
       setLocalUploadDraft(null);
       setDraftCreationMethod("player_manual");
+      setIsAnswerEditorOpen(false);
       setQuestionSet(detail);
       clearError();
       scrollToPreview();
@@ -851,6 +859,7 @@ export function QuestionSetUploader({
         });
         setQuestionSet(selectedQuestionSet);
         setLocalUploadDraft(null);
+        setIsAnswerEditorOpen(false);
       }
 
       if (!selectedQuestionSet) {
@@ -941,11 +950,12 @@ export function QuestionSetUploader({
               <p className="mt-3 text-xs text-[var(--muted)]">
                 文件夹只取当前层图片，不读取子文件夹；单张不超过 {formatBytes(maxUploadImageBytes)}，最多 {maxUploadImageCount} 张
               </p>
-              {items.length > 0 ? (
+              {recognizedLabelCount > 0 ? (
                 <p className="mt-2 text-xs font-medium text-slate-700">
-                  已从文件名识别 {recognizedLabelCount}/{items.length} 个答案
+                  已识别 {recognizedLabelCount} 个工具答案
                 </p>
               ) : null}
+              <p className="mt-2 text-xs text-[var(--muted)]">文件名可在预览时一键填入答案。</p>
               <input
                 ref={fileInputRef}
                 className="hidden"
@@ -1257,7 +1267,7 @@ export function QuestionSetUploader({
                     <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={item.url} />
                     <figcaption className="mt-2 text-xs text-[var(--muted)]">
                       第 {item.index + 1} 张
-                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "未填写答案"}</span>
+                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "游戏中确认"}</span>
                     </figcaption>
                   </figure>
                 ))}
@@ -1275,25 +1285,44 @@ export function QuestionSetUploader({
 
         {localUploadDraft !== null || questionSet ? (
           <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <p className="font-semibold text-slate-950">
                   {localUploadDraft !== null ? getDraftQuestionSetTitle(room) : questionSet?.title}
                 </p>
                 <p className="mt-1 text-sm text-[var(--muted)]">
                   {localUploadDraft !== null
-                    ? `${localUploadDraft.length} 张图片，尚未确认题库`
+                    ? `${localUploadDraft.length} 张图片${draftAnswerCount > 0 ? `，已预设 ${draftAnswerCount} 个答案` : ""}，尚未确认题库`
                     : `${questionSet?.imageCount ?? 0} 张图片，${questionSet?.isPublic ? "社区公开题库" : "未发布题库"}`}
                   {questionSet?.isPublic ? `，上传者：${getQuestionSetUploaderName(questionSet)}` : ""}
                 </p>
+                {localUploadDraft !== null && localUploadDraft.length > 0 ? (
+                  <p className="mt-2 max-w-2xl text-sm leading-5 text-[var(--muted)]">
+                    建议在游戏中确认答案，可直接选用玩家回答；容易忘记的题也可提前填写。
+                  </p>
+                ) : null}
               </div>
-              <Button
-                type="button"
-                onClick={handleConfirmQuestionSet}
-                disabled={isConfirmingQuestionSet || localUploadDraft?.length === 0}
-              >
-                {isConfirmingQuestionSet ? "确认中…" : "确认使用这个题库"}
-              </Button>
+              <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+                {localUploadDraft !== null && localUploadDraft.length > 0 ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setIsAnswerEditorOpen(true)}
+                    disabled={isConfirmingQuestionSet}
+                  >
+                    {draftAnswerCount > 0
+                      ? `编辑答案（${draftAnswerCount}/${localUploadDraft.length}）`
+                      : "编辑答案（可选）"}
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  onClick={handleConfirmQuestionSet}
+                  disabled={isConfirmingQuestionSet || localUploadDraft?.length === 0}
+                >
+                  {isConfirmingQuestionSet ? "确认中…" : "确认使用这个题库"}
+                </Button>
+              </div>
             </div>
             <div
               className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4"
@@ -1363,8 +1392,8 @@ export function QuestionSetUploader({
                     draggable={false}
                     src={item.url}
                   />
-                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写答案"}>
-                    {item.labelText?.trim() || "未填写答案"}
+                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "游戏中确认"}>
+                    {item.labelText?.trim() || "游戏中确认"}
                   </figcaption>
                 </figure>
               ))}
@@ -1399,6 +1428,14 @@ export function QuestionSetUploader({
           </div>
         )}
       </section>
+
+      {isAnswerEditorOpen && localUploadDraft && localUploadDraft.length > 0 ? (
+        <QuestionAnswerEditorDialog
+          questions={localUploadDraft}
+          onQuestionsChange={(questions) => setLocalUploadDraft(questions)}
+          onClose={() => setIsAnswerEditorOpen(false)}
+        />
+      ) : null}
 
       {onCancelPresenterSetup ? (
         <div className="flex justify-end border-t border-[var(--line)] pt-5">

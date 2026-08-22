@@ -69,6 +69,7 @@ export type LocalUploadDraftQuestion = {
   key: string;
   imageUrl: string;
   labelText: string | null;
+  sourceFileName: string | null;
 };
 
 export type LocalUploadDropCardRect = {
@@ -93,6 +94,7 @@ export function buildPreparedUrlImportDraft(
     key: `url-import:${index}:${question.r2Key ?? question.imageUrl}`,
     imageUrl: question.imageUrl,
     labelText: question.labelText?.trim() || null,
+    sourceFileName: null,
   }));
 }
 
@@ -189,6 +191,24 @@ export function extractCreationToolLabelFromFilename(filename: string) {
   return label || null;
 }
 
+export function getAnswerCandidateFromFilename(filename: string | null | undefined) {
+  const basename = (filename ?? "").replace(/^.*[\\/]/, "").trim();
+  const lastDotIndex = basename.lastIndexOf(".");
+  const stem = (lastDotIndex >= 0 ? basename.slice(0, lastDotIndex) : basename).trim();
+  return stem && stem.length <= 80 ? stem : null;
+}
+
+export function fillBlankDraftAnswersFromFilenames(questions: LocalUploadDraftQuestion[]) {
+  return questions.map((question) => {
+    if (question.labelText?.trim()) {
+      return question;
+    }
+
+    const labelText = getAnswerCandidateFromFilename(question.sourceFileName);
+    return labelText ? { ...question, labelText } : question;
+  });
+}
+
 export function getLocalUploadCreationMethod(labelTexts: Array<string | null>) {
   return labelTexts.length > 0 && labelTexts.every((labelText) => Boolean(labelText?.trim()))
     ? "creation_tool_assisted" as const
@@ -206,6 +226,7 @@ export function buildLocalUploadQuestionImport(
       key: result.path,
       imageUrl: result.url,
       labelText: extractCreationToolLabelFromFilename(itemByPath.get(result.path)?.name ?? ""),
+      sourceFileName: itemByPath.get(result.path)?.name ?? null,
     }));
 
   return {
