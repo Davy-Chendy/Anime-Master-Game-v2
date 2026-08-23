@@ -289,6 +289,7 @@ export type GameSession = {
   roundScores: number[];
   eligiblePlayerIds?: string[];
   roundStartedAt?: string | null;
+  roundEndedEarlyAt?: string | null;
   serverNow?: string;
   teamBattleState?: TeamBattleState | null;
   createdAt: string;
@@ -368,6 +369,11 @@ export type PublicAnswerProgress = Omit<Answer, "answerText"> & {
 
 export type PublicBuzzerAnswerProgress = Omit<BuzzerAnswer, "answerText">;
 
+export type ConnectionPresenceChange = {
+  playerId: string;
+  disconnectedAt: number | null;
+};
+
 export type RealtimeDelta =
   | {
       scope: "room";
@@ -385,6 +391,12 @@ export type RealtimeDelta =
       scope: "room";
       type: "room_dissolved";
       roomId: string;
+    }
+  | {
+      scope: "room";
+      type: "connection_presence_changed";
+      changes: ConnectionPresenceChange[];
+      replace?: boolean;
     }
   | {
       scope: "game";

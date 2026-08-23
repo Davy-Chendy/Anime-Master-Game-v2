@@ -12,6 +12,7 @@
     "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
     "test:authority-budget": "node scripts/authority-write-budget.mjs",
     "test:room-chat": "tsx --test tests/room-chat.test.ts",
+    "test:connection-presence": "tsx --test tests/connection-presence.test.ts",
     "test:authority-vnext": "tsx --test tests/authority-vnext.test.ts",
     "test:authority-outbox": "tsx --test tests/authority-outbox.test.ts",
     "test:room-runtime-cutover": "tsx --test tests/room-runtime-cutover.test.ts",

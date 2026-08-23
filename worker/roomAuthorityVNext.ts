@@ -72,6 +72,7 @@ const QUESTION_SCOPED_MUTATION_NAMES = new Set([
   "markPendingRoundAnswersWrong",
   "settleBuzzerRound",
   "autoForfeitExpiredRound",
+  "endRoundEarly",
   "gradeAnswersAndAdvance",
   "completeTeamBattleBlockSelection",
   "submitTeamBattleRevealVote",
@@ -610,6 +611,7 @@ export class RoomAuthorityVNext {
       ...bootstrap.gameSession,
       personalRevealState: normalizePersonalRevealState(bootstrap.gameSession.personalRevealState),
       eligiblePlayerIds: bootstrap.gameSession.eligiblePlayerIds ?? this.eligiblePlayers(players, bootstrap.gameSession.presenterPlayerId),
+      roundEndedEarlyAt: null,
     };
     const normalizedTeam = normalizeTeamSessionDeadline(gameSession, Date.now());
     const aggregate: VNextAggregate = {
@@ -922,6 +924,7 @@ export class RoomAuthorityVNext {
       case "markPendingRoundAnswersWrong": outcome = this.setJudgements(action, true); break;
       case "settleBuzzerRound": outcome = this.settleRound(action); break;
       case "autoForfeitExpiredRound": outcome = this.autoForfeit(action); break;
+      case "endRoundEarly": outcome = this.endRoundEarly(action); break;
       case "gradeAnswersAndAdvance": outcome = this.gradeRoundReveal(action); break;
       case "completeTeamBattleBlockSelection": outcome = this.completeTeamBlockSelection(action); break;
       case "submitTeamBattleRevealVote": outcome = this.teamRevealVote(action); break;
@@ -967,6 +970,7 @@ export class RoomAuthorityVNext {
     if (nextBlocks.length === session.revealedBlocks.length) throw new TerminalMutationError("请至少选择一个尚未打开的方块。");
     session.revealedBlocks = nextBlocks.length >= 45 ? ALL_REVEALED_BLOCKS : nextBlocks;
     session.roundStartedAt = nowIso(action.serverReceivedAtMs);
+    session.roundEndedEarlyAt = null;
     session.serverNow = session.roundStartedAt;
     const runAtMs = action.serverReceivedAtMs + session.roundSeconds * 1000 + 3000;
     aggregate.deadline = { kind: "round", gameId: session.id, questionIndex: session.currentQuestionIndex, phaseKey: `round:${session.currentRevealRound}`, runAtMs };
@@ -997,6 +1001,7 @@ export class RoomAuthorityVNext {
     state.fullyRevealed = revealRectsCoverImage(state.regions);
     session.personalRevealState = state;
     session.roundStartedAt = nowIso(action.serverReceivedAtMs);
+    session.roundEndedEarlyAt = null;
     session.serverNow = session.roundStartedAt;
     aggregate.deadline = {
       kind: "round",
@@ -1176,6 +1181,7 @@ export class RoomAuthorityVNext {
     if (session.gameMode === "BUZZER_FIRST_CORRECT" && current.some((answer) => answer.status === "correct")) {
       this.revealFully(session);
       session.roundStartedAt = null;
+      session.roundEndedEarlyAt = null;
       aggregate.deadline = null;
       sessionChanged = true;
     }
@@ -1219,6 +1225,7 @@ export class RoomAuthorityVNext {
       else this.revealFully(session);
     }
     session.roundStartedAt = null;
+    session.roundEndedEarlyAt = null;
     aggregate.deadline = null;
     return this.publicSessionOutcome(session, "phase-boundary", true);
   }
@@ -1227,9 +1234,47 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActive();
     const session = aggregate.gameSession!;
     if (!aggregate.deadline || action.serverReceivedAtMs < aggregate.deadline.runAtMs) return this.publicSessionOutcome(session);
+    return this.closePersonalRound(action, false);
+  }
+
+  private endRoundEarly(action: VNextPendingMutation): VNextMutationOutcome {
+    const aggregate = this.requireActive();
+    const session = aggregate.gameSession!;
+    this.assertPresenter(action.actorId);
+    if (session.gameMode === "TEAM_BATTLE") throw new TerminalMutationError("红蓝对抗模式不能提前结束个人答题轮次。");
+    const expectedQuestionIndex = getInteger(action.payload.expectedQuestionIndex);
+    const expectedRevealRound = getInteger(action.payload.expectedRevealRound);
+    if (expectedQuestionIndex !== session.currentQuestionIndex || expectedRevealRound !== session.currentRevealRound) {
+      throw new TerminalMutationError("题目或轮次已变化，请刷新后重试。");
+    }
+    const deadline = aggregate.deadline;
+    if (
+      !session.roundStartedAt ||
+      !deadline ||
+      deadline.kind !== "round" ||
+      deadline.gameId !== session.id ||
+      deadline.questionIndex !== session.currentQuestionIndex ||
+      deadline.phaseKey !== `round:${session.currentRevealRound}`
+    ) {
+      throw new TerminalMutationError("当前轮已经结束或尚未开始。");
+    }
+    if (action.serverReceivedAtMs >= deadline.runAtMs) {
+      throw new TerminalMutationError("本轮答题时间已经结束。");
+    }
+    return this.closePersonalRound(action, true);
+  }
+
+  private closePersonalRound(action: VNextPendingMutation, endedEarly: boolean): VNextMutationOutcome {
+    const aggregate = this.requireActive();
+    const session = aggregate.gameSession!;
+    if (session.gameMode === "TEAM_BATTLE") throw new TerminalMutationError("当前不是个人答题轮次。");
     const addedForfeits = this.addMissingForfeits(action);
+    if (endedEarly && !addedForfeits.length) {
+      throw new TerminalMutationError("当前轮所有玩家均已行动，无需提前结束。");
+    }
+    session.roundEndedEarlyAt = endedEarly ? nowIso(action.serverReceivedAtMs) : null;
     aggregate.deadline = null;
-    const outcome = this.publicSessionOutcome(session, "deadline", true);
+    const outcome = this.publicSessionOutcome(session, endedEarly ? "phase-boundary" : "deadline", true);
     if (addedForfeits.length) outcome.publicDeltas.push(this.publicAnswerProgress(addedForfeits, []));
     return outcome;
   }
@@ -1252,6 +1297,7 @@ export class RoomAuthorityVNext {
     this.recalculateScores();
     const allCorrect = eligible.size > 0 && [...eligible].every((id) => aggregate.questionResults.some((result) => result.questionIndex === session.currentQuestionIndex && result.playerId === id));
     session.roundStartedAt = null;
+    session.roundEndedEarlyAt = null;
     aggregate.deadline = null;
     if (allCorrect) this.revealFully(session);
     const data = { gameSession: clone(session), room: null, newlyScoredPlayerIds: newly };
@@ -1624,6 +1670,7 @@ export class RoomAuthorityVNext {
     session.endedAt = endedAt;
     session.completedNormallyAt = completedNormally ? endedAt : null;
     session.roundStartedAt = null;
+    session.roundEndedEarlyAt = null;
     aggregate.deadline = null;
     aggregate.cutoverState = "ended";
     aggregate.finalQuestionResults = clone(aggregate.questionResults);
@@ -2396,6 +2443,9 @@ export class RoomAuthorityVNext {
     parsed.questionSetManifestVersion ??= null;
     if (parsed.gameSession) {
       parsed.gameSession.personalRevealState = normalizePersonalRevealState(parsed.gameSession.personalRevealState);
+      parsed.gameSession.roundEndedEarlyAt = typeof parsed.gameSession.roundEndedEarlyAt === "string"
+        ? parsed.gameSession.roundEndedEarlyAt
+        : null;
     }
     return parsed;
   }
@@ -2434,7 +2484,15 @@ export class RoomAuthorityVNext {
     const session = aggregate.gameSession!;
     if (playerId === session.presenterPlayerId || !session.eligiblePlayerIds?.includes(playerId)) throw new TerminalMutationError("你不是当前题的答题者。");
     if (!session.roundStartedAt) throw new TerminalMutationError("本轮尚未开始。");
-    if (receivedAtMs > new Date(session.roundStartedAt).getTime() + session.roundSeconds * 1000 + 3000) throw new TerminalMutationError("本轮答题时间已结束。");
+    const deadline = aggregate.deadline;
+    if (
+      !deadline ||
+      deadline.kind !== "round" ||
+      deadline.gameId !== session.id ||
+      deadline.questionIndex !== session.currentQuestionIndex ||
+      deadline.phaseKey !== `round:${session.currentRevealRound}` ||
+      receivedAtMs >= deadline.runAtMs
+    ) throw new TerminalMutationError("本轮答题时间已结束。");
   }
 
   private assertTeamVoter(playerId: string, phase: "REVEAL_VOTE" | "GUESS_VOTE", receivedAtMs: number) {
@@ -2794,6 +2852,7 @@ export class RoomAuthorityVNext {
         break;
       case "settleBuzzerRound":
       case "autoForfeitExpiredRound":
+      case "endRoundEarly":
       case "completeTeamBattleBlockSelection":
       case "finalizeTeamBattleVote":
       case "judgeTeamBattleGuess":
@@ -2928,6 +2987,7 @@ export class RoomAuthorityVNext {
     const mode = session.gameMode === "TEAM_BATTLE" ? "GRID" : this.getRevealState(session).mode;
     session.revealedBlocks = [];
     session.personalRevealState = createPersonalRevealState(mode);
+    session.roundEndedEarlyAt = null;
   }
 
   private publicSessionOutcome(session: GameSession, forceCheckpoint?: CheckpointTrigger, deadlineChanged = false): VNextMutationOutcome {

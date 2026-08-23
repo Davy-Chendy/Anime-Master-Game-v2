@@ -334,6 +334,13 @@ export const submitForfeitAnswer = (params: { gameSessionId: string; playerId: s
 export const autoForfeitExpiredRound = (params: { gameSessionId: string }) =>
   rpc<{ gameSession: GameSession }>("autoForfeitExpiredRound", params);
 
+export const endRoundEarly = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+}) => rpc<{ gameSession: GameSession; roundSnapshot?: RoundSnapshot }>("endRoundEarly", params);
+
 export const cancelForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
   rpc<{ gameSession: GameSession; canceledAnswerId: string }>("cancelForfeitAnswer", params);
 

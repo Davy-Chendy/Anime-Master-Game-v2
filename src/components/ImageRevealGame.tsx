@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { FreeRevealEditor, FreeRevealMask } from "@/components/FreeRevealEditor";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic, updateGameSessionRealtimeQuestion } from "@/lib/cloudflareClient";
 import { normalizePersonalRevealState } from "@/lib/freeRevealGeometry";
+import { applyConnectionPresenceChanges, CONNECTION_DISCONNECTED_GRACE_MS, isConnectionDisconnected } from "@/lib/connectionPresence";
 import {
   advanceTeamBattleTurn,
   advanceReviewedQuestion,
@@ -14,6 +15,7 @@ import {
   completeTeamBattleBlockSelection,
   confirmRevealBlocks,
   confirmRevealRegions,
+  endRoundEarly,
   finalizeTeamBattleVote,
   getGameBootstrapSnapshot,
   getQuestionSetById,
@@ -454,6 +456,7 @@ type ResultPublishNextAction = "advanceReviewedQuestion" | "skipQuestion";
 type StandardScoreRowProps = {
   playerId: string;
   nickname: string;
+  isDisconnected: boolean;
   rank: number;
   score: number;
   correctCount: number;
@@ -735,6 +738,7 @@ function getLegacyBroadcastGameSession(result: unknown) {
 const StandardScoreRow = memo(function StandardScoreRow({
   playerId,
   nickname,
+  isDisconnected,
   rank,
   score,
   correctCount,
@@ -761,8 +765,8 @@ const StandardScoreRow = memo(function StandardScoreRow({
       }}
     >
       <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 font-semibold text-slate-950">
-          #{rank} {nickname}
+        <div className="min-w-0 truncate font-semibold text-slate-950" title={isDisconnected ? `[断线] ${nickname}` : nickname}>
+          #{rank} {isDisconnected ? <span className="text-slate-500">[断线] </span> : null}{nickname}
         </div>
         <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
       </div>
@@ -892,6 +896,7 @@ function getCompactScoreStatus({
 const CompactScoreRow = memo(function CompactScoreRow({
   playerId,
   nickname,
+  isDisconnected,
   rank,
   score,
   alreadyCorrect,
@@ -921,8 +926,8 @@ const CompactScoreRow = memo(function CompactScoreRow({
       }}
     >
       <span className="text-right text-xs font-semibold tabular-nums text-slate-500">{rank}</span>
-      <span className={`min-w-0 truncate font-semibold leading-none text-slate-950 ${getCompactNameClass(nickname)}`} title={nickname}>
-        {nickname}
+      <span className={`min-w-0 truncate font-semibold leading-none text-slate-950 ${getCompactNameClass(nickname)}`} title={isDisconnected ? `[断线] ${nickname}` : nickname}>
+        {isDisconnected ? <span className="text-slate-500">[断线] </span> : null}{nickname}
       </span>
       <span
         aria-label={status.label}
@@ -1349,6 +1354,8 @@ export function ImageRevealGame({
   const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [resultPublishCreationMethod, setResultPublishCreationMethod] = useState<QuestionSetCreationMethod>("player_manual");
   const [scores, setScores] = useState<PlayerScore[]>([]);
+  const [connectionPresenceByPlayerId, setConnectionPresenceByPlayerId] = useState<Record<string, number>>({});
+  const [connectionPresenceClockMs, setConnectionPresenceClockMs] = useState(() => Date.now());
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
   const [hasRoundDeadlineGraceExpired, setHasRoundDeadlineGraceExpired] = useState(false);
@@ -1358,6 +1365,7 @@ export function ImageRevealGame({
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
+  const [isEndingRoundEarly, setIsEndingRoundEarly] = useState(false);
   const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
   const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingTeamBattleTurn, setIsAdvancingTeamBattleTurn] = useState(false);
@@ -1884,6 +1892,12 @@ export function ImageRevealGame({
 
   const applyRealtimeDelta = useCallback(
     (delta: RealtimeDelta) => {
+      if (delta.scope === "room" && delta.type === "connection_presence_changed") {
+        setConnectionPresenceByPlayerId((current) => applyConnectionPresenceChanges(current, delta.changes, delta.replace));
+        setConnectionPresenceClockMs(Date.now());
+        return;
+      }
+
       if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
         onRoomUpdatedRef.current?.(delta.room);
         return;
@@ -2084,6 +2098,26 @@ export function ImageRevealGame({
     },
     [applyRoundSnapshot, isPresenter, playerId, room.currentGameId, room.id, showAnswerBubble],
   );
+
+  useEffect(() => {
+    const now = Date.now();
+    let nextBoundary = Number.POSITIVE_INFINITY;
+    for (const disconnectedAt of Object.values(connectionPresenceByPlayerId)) {
+      const boundary = disconnectedAt + CONNECTION_DISCONNECTED_GRACE_MS;
+      if (boundary > now && boundary < nextBoundary) nextBoundary = boundary;
+    }
+    if (!Number.isFinite(nextBoundary)) return;
+    const timer = window.setTimeout(
+      () => setConnectionPresenceClockMs(Date.now()),
+      Math.max(1, nextBoundary - now + 20),
+    );
+    return () => window.clearTimeout(timer);
+  }, [connectionPresenceByPlayerId, connectionPresenceClockMs]);
+
+  useEffect(() => {
+    setConnectionPresenceByPlayerId({});
+    setConnectionPresenceClockMs(Date.now());
+  }, [room.id]);
 
   useEffect(() => {
     if (!room.id || !room.currentGameId) {
@@ -2401,8 +2435,9 @@ export function ImageRevealGame({
   const teamBattleState = gameSession?.teamBattleState ?? null;
   const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
-  const isRoundActive = hasRoundStarted && remainingSeconds > 0;
-  const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
+  const isRoundEndedEarly = Boolean(gameSession?.roundEndedEarlyAt);
+  const isRoundActive = hasRoundStarted && remainingSeconds > 0 && !isRoundEndedEarly;
+  const isRoundEnded = hasRoundStarted && (remainingSeconds === 0 || isRoundEndedEarly);
   const displayRound = currentRound;
   const displayScore =
     gameSession?.roundScores[displayRound - 1] ?? Math.max(1, maxRevealRounds - displayRound + 1);
@@ -2862,6 +2897,16 @@ export function ImageRevealGame({
   }
 
   const areAllGuessersCorrect = eligibleGuesserIds.length > 0 && eligibleGuesserIds.every((guesserId) => correctPlayerSet.has(guesserId));
+  const canEndRoundEarly =
+    isPresenter &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    isRoundActive &&
+    activeGuesserIds.length > 0 &&
+    !allActiveGuessersUsedRoundChance &&
+    !hasFirstCorrectAnswer &&
+    !areAllGuessersCorrect &&
+    Boolean(gameSession);
   const isRoundCompleteForDisplay =
     hasRoundStarted &&
     (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect);
@@ -4060,6 +4105,27 @@ export function ImageRevealGame({
     }
   }
 
+  async function handleEndRoundEarly() {
+    if (!gameSession || !canEndRoundEarly) return;
+    const unansweredCount = Math.max(0, standardTotalCount - standardSubmittedCount);
+    if (!window.confirm(`还有 ${unansweredCount} 名玩家未作答。提前结束后，他们将自动放弃本轮，是否继续？`)) return;
+
+    setIsEndingRoundEarly(true);
+    try {
+      const ended = await endRoundEarly({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+        expectedQuestionIndex: gameSession.currentQuestionIndex,
+        expectedRevealRound: gameSession.currentRevealRound,
+      });
+      applyRoundSnapshotFromResult(ended) || applyGameSession(ended.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提前结束本轮失败");
+    } finally {
+      setIsEndingRoundEarly(false);
+    }
+  }
+
   async function performSkipQuestion() {
     if (!gameSession) {
       return;
@@ -4293,6 +4359,11 @@ export function ImageRevealGame({
     !isTeamBattleMode && ((isSpectator && canSpectatorViewPlayerAnswers) || (!isPresenter && isCurrentPlayerCorrect));
   const showPlayerAnswersInScoreboard =
     canViewPlayerAnswers && isAnswerViewEnabled && !isScoreboardCompact;
+  const disconnectedPlayerIds = new Set(
+    Object.entries(connectionPresenceByPlayerId)
+      .filter(([, disconnectedAt]) => isConnectionDisconnected(disconnectedAt, connectionPresenceClockMs))
+      .map(([disconnectedPlayerId]) => disconnectedPlayerId),
+  );
 
   const scorePanel = (
     <div
@@ -4379,7 +4450,13 @@ export function ImageRevealGame({
                         key={member.id}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 truncate font-semibold text-slate-950">{member.nickname}</span>
+                          <span
+                            className="min-w-0 truncate font-semibold text-slate-950"
+                            title={disconnectedPlayerIds.has(member.id) ? `[断线] ${member.nickname}` : member.nickname}
+                          >
+                            {disconnectedPlayerIds.has(member.id) ? <span className="text-slate-500">[断线] </span> : null}
+                            {member.nickname}
+                          </span>
                           {member.hasActed ? (
                             <span
                               aria-label={`${member.nickname}已行动`}
@@ -4434,6 +4511,7 @@ export function ImageRevealGame({
                   isBuzzerMode={isBuzzerMode}
                   isLeadingPendingBuzzerAnswer={isLeadingPendingBuzzerAnswer}
                   key={player.id}
+                  isDisconnected={disconnectedPlayerIds.has(player.id)}
                   nickname={player.nickname}
                   onRowRef={registerScoreRow}
                   playerId={player.id}
@@ -5192,8 +5270,15 @@ export function ImageRevealGame({
                   按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 查看玩家视角
                 </p>
               ) : null}
-              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
-                {isSettlingBuzzerRound ? "处理中…" : standardSettleActionText}
+              <Button
+                type="button"
+                variant={canEndRoundEarly ? "secondary" : undefined}
+                onClick={canEndRoundEarly ? handleEndRoundEarly : handleSettleBuzzerRound}
+                disabled={canEndRoundEarly ? isEndingRoundEarly : !canSettleBuzzerRound || isSettlingBuzzerRound}
+              >
+                {canEndRoundEarly
+                  ? isEndingRoundEarly ? "结束中…" : "提前结束本轮"
+                  : isSettlingBuzzerRound ? "处理中…" : standardSettleActionText}
               </Button>
               <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
                 {isSkippingQuestion ? "跳过中…" : "跳过本题"}
@@ -5413,6 +5498,12 @@ export function ImageRevealGame({
           </>
         )}
       </div>
+
+      {!isTeamBattleMode && gameSession?.roundEndedEarlyAt && hasRoundStarted ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-center text-sm font-semibold text-amber-800" role="status">
+          出题人已提前结束本轮，未作答玩家已自动放弃
+        </p>
+      ) : null}
 
       <div className={playingGridClass}>
         {scorePanel}

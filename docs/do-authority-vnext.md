@@ -104,7 +104,9 @@
 
 ## 四模式转换与房间 mutation
 
-- `confirmRevealBlocks` 开始绝对 deadline；`submit/forfeit/cancel` 只改当前轮；deadline `autoForfeit` 只锁提交并补未行动者放弃，保留当前轮等待主持人判定；仅手动 `settle/grade` 决定下一轮或答案复盘并强制 checkpoint。
+- `confirmRevealBlocks/confirmRevealRegions` 开始绝对 deadline；`submit/forfeit/cancel` 只改当前轮；deadline `autoForfeit` 只锁提交并补未行动者放弃，保留当前轮等待主持人判定；仅手动 `settle/grade` 决定下一轮或答案复盘并强制 checkpoint。
+- 个人模式 `endRoundEarly(expectedQuestionIndex, expectedRevealRound)` 仅允许当前出题人在匹配的权威 round deadline 尚未截止且至少一名当前轮有效玩家未行动时执行。它与 `autoForfeit` 共享关闭函数：补一次缺失放弃、清除 deadline、保留待判答案和题目/轮次，并以 persist-first phase-boundary checkpoint 保存 `roundEndedEarlyAt` 后向全房广播；下一轮、复盘、下一题或游戏结束时清除该字段。TEAM_BATTLE、旧题/旧轮、全员已行动、deadline 不匹配及截止后请求均为 terminal rejection。
+- 答案、放弃和取消放弃必须同时匹配当前 `gameId/questionIndex/round phaseKey` 的权威 round deadline 且到达时间早于 `runAtMs`；提前结束清除 deadline 后不能再用 `roundStartedAt` 推算窗口并接受晚到操作。提交、提前结束与 Alarm 由 DO 单队列排序；先关闭者生效，后续事件 no-op 或终止拒绝，actionId/clientSeq 重放返回已持久化契约而不重复补放弃。
 - `ROUND_REVEAL` 的 `gradeAnswersAndAdvance` 按 roundScores 仅给首次正确者计分；全员正确进 REVIEW，否则停表等待下轮。
 - `setAnswerJudgements/markPendingWrong/judgeBuzzerAnswer` 可在答案继续到达时执行；按 actionId 去重并从结果重算累计分数。
 - `BUZZER_FIRST_CORRECT` 按 orderToken 判定；更早 pending 未判不得接受后项正确；首个正确强制 checkpoint 后进 REVIEW。
@@ -133,6 +135,7 @@
 ## 写入量和观测目标
 
 - 50人×30题：DO changed rows 目标150–300；普通答案/判定0行；每题边界约2行；rolling checkpoint约1行。
+- 每次个人轮次提前结束增加1条出题人 WebSocket mutation，但其 phase-boundary checkpoint、两类公开状态 delta 和 Alarm 取消替代该轮原本的自然 deadline 结算，不增加 D1、最终投影或每玩家写入；50人不会形成入站请求放大。
 - TEAM_BATTLE 默认关闭禁选，因此默认预算不增加主持人 mutation、广播或 phase-boundary checkpoint。开启时每题增加1个主持人 mutation 和1行 phase-boundary checkpoint；首个投票 Alarm 从题目建立时延后到禁选完成时设置，不增加每题 Alarm 总数。30题增加30个 mutation/30行，60局每天增加1,800个 mutation/1,800行。
 - TEAM_BATTLE 每个未结束本题的猜测阶段最多增加1个 `advanceTeamBattleTurn` 主持人 mutation、1次小广播和1行 phase-boundary checkpoint；不增加 Alarm、D1 或轮询，50名玩家不会放大。
 - 当前 legacy 普通答案约7–9行；判定为固定 journal/版本写加每目标2行及全员积分重算，最坏数十行。

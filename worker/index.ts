@@ -20,6 +20,7 @@ import { getRoomNoticeUpdatedDelta } from "./roomNotice";
 import type { GameDatabase, GameDatabaseMutationTracker } from "./d1QueryCompat";
 import { getManifestImageUrls } from "./questionSetManifest";
 import { buildRoomChatTeamAudience, RoomChatRateLimiter, tryHandleRoomChatMessage } from "./roomChat";
+import { RoomConnectionPresence } from "./roomConnectionPresence";
 import {
   isR2ImageUploadTooLarge,
   R2_IMAGE_UPLOAD_MAX_BYTES,
@@ -289,6 +290,7 @@ const SERVER_RECEIVED_AT_ACTION_NAMES = new Set([
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",
   "autoForfeitExpiredRound",
+  "endRoundEarly",
   "settleBuzzerRound",
 ]);
 
@@ -313,6 +315,7 @@ const MUTATION_REGISTRY = {
   submitAnswer: { deadline: "none" },
   submitForfeitAnswer: { deadline: "none" },
   autoForfeitExpiredRound: { deadline: "authoritative-post-state" },
+  endRoundEarly: { deadline: "authoritative-post-state" },
   cancelForfeitAnswer: { deadline: "none" },
   submitBuzzerAnswer: { deadline: "none" },
   judgeBuzzerAnswer: { deadline: "authoritative-post-state" },
@@ -400,6 +403,7 @@ const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "confirmRevealBlocks",
   "confirmRevealRegions",
   "autoForfeitExpiredRound",
+  "endRoundEarly",
   "settleBuzzerRound",
   "completeTeamBattleBlockSelection",
   "finalizeTeamBattleVote",
@@ -437,7 +441,7 @@ const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
   "getAnswersForQuestion", "getAnswersForQuestionRound", "getAnswerForPlayerRound", "getBuzzerAnswersForQuestion",
   "getBuzzerAnswersForQuestionRound", "getBuzzerAnswerForPlayerRound", "getQuestionsByQuestionSetId",
   "confirmRevealBlocks", "confirmRevealRegions", "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "submitBuzzerAnswer",
-  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "completeTeamBattleBlockSelection", "submitTeamBattleRevealVote",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "endRoundEarly", "completeTeamBattleBlockSelection", "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "updateQuestionLabel", "skipCurrentQuestion",
   "endCurrentGameEarly", "returnRoomToLobby",
@@ -490,12 +494,12 @@ const AUTHORITY_PROJECTION_BOUNDARY_NAMES = new Set<string>([
 ]);
 const AUTHORITY_HANDOFF_NAMES = new Set(["returnRoomToLobby", "cancelCurrentRound", "dissolveRoom"]);
 const AUTHORITY_JOURNALED_NAMES = new Set([
-  "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound",
+  "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "endRoundEarly",
   "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer", "gradeAnswersAndAdvance",
   "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", "joinRoom", "leaveRoom", "kickPlayerFromRoom", "updatePlayerRole", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 const AUTHORITY_PERSIST_RESULT_NAMES = new Set([
-  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "endRoundEarly", "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 
@@ -2831,11 +2835,27 @@ export class RoomDurableObjectV3 {
   private deadlineReconcileAfterAlarm = false;
   private lastActionReceivedAtMs = 0;
   private projectionFlushQueue: Promise<void> = Promise.resolve();
+  private readonly connectionPresence: RoomConnectionPresence;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.authority = new RoomGameAuthority(state.storage, env.DB);
     this.authorityVNext = new RoomAuthorityVNext(state, env.DB);
     this.runtime = new RoomRuntimeV3Storage(state.storage);
+    this.connectionPresence = new RoomConnectionPresence(
+      state,
+      () => this.authorityTopic,
+      (changes) => this.sendVNextDelta("connectionPresence", {
+        scope: "room",
+        type: "connection_presence_changed",
+        changes,
+      }),
+      () => {
+        const aggregate = this.authorityVNext.getAggregate();
+        if (!aggregate) return null;
+        if (aggregate.dissolved || !aggregate.room) return new Set<string>();
+        return new Set(aggregate.players.map((player) => player.id));
+      },
+    );
     state.blockConcurrencyWhile(async () => this.runtime.initializeSchema());
   }
 
@@ -3101,6 +3121,7 @@ export class RoomDurableObjectV3 {
       } catch (error) {
         logAuxiliaryFailure("websocket_attachment_initialize_failed", error, { topic, playerId: playerId ?? null });
       }
+      const connectionPresenceSnapshot = await this.connectionPresence.handleConnect(playerId);
       const connectedAggregate = this.authorityVNext.getAggregate();
       const connectedGameId = connectedAggregate && (
         connectedAggregate.cutoverState === "active" ||
@@ -3113,6 +3134,18 @@ export class RoomDurableObjectV3 {
         authorityVersion: connectedAggregate ? 2 : 1,
         gameId: connectedGameId,
         committedSeqByActor: connectedGameId ? connectedAggregate?.committedSeqByActor : undefined,
+      }));
+      server.send(JSON.stringify({
+        type: "change",
+        name: "connectionPresenceSnapshot",
+        topic,
+        authorityVersion: connectedAggregate ? 2 : 1,
+        deltas: [{
+          scope: "room",
+          type: "connection_presence_changed",
+          changes: connectionPresenceSnapshot,
+          replace: true,
+        } satisfies RealtimeDelta],
       }));
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -3432,10 +3465,15 @@ export class RoomDurableObjectV3 {
       try { socket.close(code, reason); } catch { /* The peer may already be closed. */ }
       return;
     }
+    try {
+      const attachment = socket.deserializeAttachment() as VNextSocketAttachment | null;
+      if (attachment?.topic) this.authorityTopic = attachment.topic;
+    } catch { /* Presence ignores sockets without a readable attachment. */ }
     if (this.authorityVNext.hasStoredState()) {
       const receipt = await this.authorityVNext.handleSocketClose(socket);
       if (receipt) this.broadcastVNextDurableAck(receipt);
     }
+    this.connectionPresence.handleDisconnect(socket);
     try { socket.close(code, reason); } catch { /* The peer may already be closed. */ }
   }
 
@@ -3444,10 +3482,15 @@ export class RoomDurableObjectV3 {
       this.expireRetiredSocket(socket);
       return;
     }
+    try {
+      const attachment = socket.deserializeAttachment() as VNextSocketAttachment | null;
+      if (attachment?.topic) this.authorityTopic = attachment.topic;
+    } catch { /* Presence ignores sockets without a readable attachment. */ }
     if (this.authorityVNext.hasStoredState()) {
       const receipt = await this.authorityVNext.handleSocketClose(socket);
       if (receipt) this.broadcastVNextDurableAck(receipt);
     }
+    this.connectionPresence.handleDisconnect(socket);
     try { socket.close(1011, "实时连接异常。"); } catch { /* The peer may already be closed. */ }
   }
 
@@ -4012,6 +4055,11 @@ export class RoomDurableObjectV3 {
   }
 
   private sendVNextOutcome(name: string, outcome: VNextMutationOutcome) {
+    if (name === "leaveRoom" || name === "kickPlayerFromRoom" || name === "dissolveRoom") {
+      this.state.waitUntil(this.connectionPresence.handleRosterChanged().catch((error) => {
+        logAuxiliaryFailure("connection_presence_roster_cleanup_failed", error, { name });
+      }));
+    }
     if (outcome.publicDeltas.length) this.sendVNextPublicDeltas(name, outcome.publicDeltas);
     const aggregate = this.authorityVNext.getAggregate();
     const presenterId = aggregate?.gameSession?.presenterPlayerId;

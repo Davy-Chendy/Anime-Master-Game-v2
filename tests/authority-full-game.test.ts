@@ -100,6 +100,7 @@ type PublicView = {
   revealRound: number;
   revealedBlocks: number[];
   roundStartedAt: string | null;
+  roundEndedEarlyAt: string | null;
   scores: Record<string, number>;
 };
 
@@ -223,6 +224,7 @@ class FullGameSimulator {
       revealRound: this.session.currentRevealRound,
       revealedBlocks: [...this.session.revealedBlocks],
       roundStartedAt: this.session.roundStartedAt ?? null,
+      roundEndedEarlyAt: this.session.roundEndedEarlyAt ?? null,
       scores: Object.fromEntries(this.aggregate.scores.map((score) => [score.playerId, score.score])),
     };
   }
@@ -247,6 +249,7 @@ class FullGameSimulator {
       client.view.revealRound = session.currentRevealRound;
       client.view.revealedBlocks = [...session.revealedBlocks];
       client.view.roundStartedAt = session.roundStartedAt ?? null;
+      client.view.roundEndedEarlyAt = session.roundEndedEarlyAt ?? null;
     }
     for (const score of value.scores ?? value.snapshot?.scores ?? []) client.view.scores[score.playerId] = score.score;
   }
@@ -575,6 +578,62 @@ test("ROUND_REVEAL completes three questions with late join, spectator exclusion
   sim.assertPublicPayloadDoesNotContain(...secrets);
 });
 
+test("ROUND_REVEAL presenter early end converges for 10 players and resumes the normal manual flow after restore", async () => {
+  const sim = new FullGameSimulator({ mode: "ROUND_REVEAL", playerCount: 10, spectatorCount: 2, questionCount: 1 });
+  const onlinePlayerIds = Array.from({ length: 8 }, (_, index) => `p${index}`);
+  const missingPlayerIds = ["p8", "p9"];
+  try {
+    await openRound(sim, 0);
+    const answers = await submitPersonalAnswers(sim, onlinePlayerIds, "early-end-secret");
+    const ended = await sim.act("host", "endRoundEarly", {
+      presenterPlayerId: "host",
+      expectedQuestionIndex: 0,
+      expectedRevealRound: 1,
+    });
+    assert.equal(ended.error, undefined);
+    assert.ok(sim.session.roundEndedEarlyAt);
+    assert.equal(sim.authority.getDeadline(), null);
+    assert.equal(sim.session.currentQuestionIndex, 0);
+    assert.equal(sim.session.currentRevealRound, 1);
+    assert.equal(sim.aggregate.buzzerAnswers.filter((answer) => answer.status === "pending").length, onlinePlayerIds.length);
+    assert.deepEqual(
+      sim.aggregate.answers
+        .filter((answer) => answer.answerText === "__FORFEIT__")
+        .map((answer) => answer.playerId)
+        .sort(),
+      missingPlayerIds,
+    );
+
+    await sim.hibernateAndRestore(true);
+    sim.replayLast("host");
+    const lateAnswer = await sim.act("p8", "submitAnswer", { playerId: "p8", answerText: "too-late" });
+    assert.equal(lateAnswer.terminal, true);
+    assert.match(lateAnswer.error ?? "", /答题时间已结束/);
+
+    await judgeAnswers(sim, answers, onlinePlayerIds);
+    await settlePersonalRound(sim);
+    assert.equal(sim.session.currentRevealRound, 2);
+    assert.equal(sim.session.roundEndedEarlyAt, null);
+    assert.equal(sim.session.roundStartedAt, null);
+
+    await openRound(sim, 1);
+    const finalAnswers = await submitPersonalAnswers(sim, missingPlayerIds, "remaining-secret");
+    await judgeAnswers(sim, finalAnswers, missingPlayerIds);
+    await settlePersonalRound(sim);
+    assert.deepEqual(sim.session.revealedBlocks, ALL_BLOCKS);
+    await labelAndAdvance(sim, "early end answer");
+    assert.equal(sim.session.status, "GAME_RESULT");
+    assert.equal(sim.session.roundEndedEarlyAt, null);
+    sim.assertPublicPayloadDoesNotContain(
+      ...onlinePlayerIds.map((id) => `early-end-secret-${id}`),
+      ...missingPlayerIds.map((id) => `remaining-secret-${id}`),
+      "too-late",
+    );
+  } finally {
+    sim.dispose();
+  }
+});
+
 test("BUZZER_FIRST_CORRECT completes a two-question game only after ordered presenter judgements", async () => {
   const sim = new FullGameSimulator({ mode: "BUZZER_FIRST_CORRECT", playerCount: 5, spectatorCount: 1, questionCount: 2 });
   const secrets: string[] = [];
@@ -803,7 +862,12 @@ async function runRoundRevealRandomScenario(seed: number) {
         const finalRound = round === 3;
         const correctCount = finalRound ? order.length : Math.max(1, Math.floor(random() * Math.max(1, order.length)));
         const correct = new Set(order.slice(0, correctCount));
-        const answerers = finalRound ? order : order.filter((playerId) => correct.has(playerId) || random() >= 0.3);
+        const shouldEndEarly = !finalRound && (seed + question + round) % 2 === 0;
+        let answerers = finalRound ? order : order.filter((playerId) => correct.has(playerId) || random() >= 0.3);
+        if (shouldEndEarly) {
+          const intentionallyMissing = [...order].reverse().find((playerId) => !correct.has(playerId));
+          if (intentionallyMissing) answerers = answerers.filter((playerId) => playerId !== intentionallyMissing);
+        }
         const answerIds = new Map<string, string>();
         for (const playerId of answerers) {
           const answerText = `round-${seed}-${question}-${round}-${playerId}`;
@@ -813,8 +877,20 @@ async function runRoundRevealRandomScenario(seed: number) {
           answerIds.set(playerId, (outcome.data as { buzzerAnswer: { id: string } }).buzzerAnswer.id);
           sim.advanceTime(1);
         }
-        for (const playerId of order.filter((id) => !answerIds.has(id))) {
-          assert.equal((await sim.act(playerId, "submitForfeitAnswer", { playerId })).error, undefined);
+        const missingPlayerIds = order.filter((id) => !answerIds.has(id));
+        if (shouldEndEarly && missingPlayerIds.length) {
+          const ended = await sim.act("host", "endRoundEarly", {
+            presenterPlayerId: "host",
+            expectedQuestionIndex: sim.session.currentQuestionIndex,
+            expectedRevealRound: sim.session.currentRevealRound,
+          });
+          assert.equal(ended.error, undefined);
+          assert.ok(sim.session.roundEndedEarlyAt);
+          assert.equal(sim.authority.getDeadline(), null);
+        } else {
+          for (const playerId of missingPlayerIds) {
+            assert.equal((await sim.act(playerId, "submitForfeitAnswer", { playerId })).error, undefined);
+          }
         }
 
         if (question === 0 && round === 1 && answerers.length) await sim.hibernateAndRestore(false);
