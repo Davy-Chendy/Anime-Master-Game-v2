@@ -280,6 +280,7 @@ export function QuestionSetUploader({
     () => localUploadDraft?.filter((question) => Boolean(question.labelText?.trim())).length ?? 0,
     [localUploadDraft],
   );
+  const emptyPreviewAnswerText = localUploadDraft !== null ? "游戏中确认" : "未填写答案";
 
   useEffect(() => {
     if (mode !== "community") {
@@ -1270,7 +1271,7 @@ export function QuestionSetUploader({
                     <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={item.url} />
                     <figcaption className="mt-2 text-xs text-[var(--muted)]">
                       第 {item.index + 1} 张
-                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "游戏中确认"}</span>
+                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "未填写答案"}</span>
                     </figcaption>
                   </figure>
                 ))}
@@ -1395,8 +1396,8 @@ export function QuestionSetUploader({
                     draggable={false}
                     src={item.url}
                   />
-                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "游戏中确认"}>
-                    {item.labelText?.trim() || "游戏中确认"}
+                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || emptyPreviewAnswerText}>
+                    {item.labelText?.trim() || emptyPreviewAnswerText}
                   </figcaption>
                 </figure>
               ))}
