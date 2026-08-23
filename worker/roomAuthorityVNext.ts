@@ -1570,11 +1570,22 @@ export class RoomAuthorityVNext {
   }
 
   private advanceQuestion(action: VNextPendingMutation, skipped: boolean): VNextMutationOutcome {
-    const aggregate = this.requireActive();
+    const aggregate = this.requireActiveOrEnded();
     const session = aggregate.gameSession!;
-    this.assertPresenter(action.actorId);
+    if (session.presenterPlayerId !== action.actorId) throw new TerminalMutationError("只有出题人可以执行此操作。");
     const expected = getInteger(action.payload.expectedQuestionIndex);
     if (expected != null && expected !== session.currentQuestionIndex) throw new TerminalMutationError("题目已变化，请刷新后重试。");
+    if (aggregate.cutoverState === "ended") {
+      if (session.status !== "GAME_RESULT") throw new TerminalMutationError("当前游戏已经结束，本次操作未生效。");
+      return {
+        data: { gameSession: clone(session), room: clone(aggregate.room ?? null), skipped },
+        provisional: true,
+        publicDeltas: [],
+        presenterDeltas: [],
+        playerDeltas: [],
+        forceCheckpoint: "replay",
+      };
+    }
     if (!skipped && (session.roundStartedAt || !this.isFullyRevealed(session))) {
       throw new TerminalMutationError("当前还没有进入完整图片复盘阶段，不能进入下一题。");
     }
@@ -2402,7 +2413,7 @@ export class RoomAuthorityVNext {
 
   private requireActive() {
     const aggregate = this.aggregate ?? this.readAggregate();
-    if (!aggregate || aggregate.cutoverState !== "active" || !aggregate.gameSession) throw new Error("authority vNext 游戏未处于活动状态。");
+    if (!aggregate || aggregate.cutoverState !== "active" || !aggregate.gameSession) throw new TerminalMutationError("authority vNext 游戏未处于活动状态。");
     this.aggregate = aggregate;
     return aggregate;
   }

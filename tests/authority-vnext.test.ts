@@ -1525,6 +1525,59 @@ test("game completion broadcasts both final results and GAME_RESULT room state",
   }
 });
 
+test("a new-action retry after game completion is idempotent and commits its sequence", async () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  enterReview(authority);
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }, "finish-game"), Date.now());
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+  const archiveWrites = state.storage.sql.archiveWrites;
+
+  const retried = authority.handleMutation(host, envelope("host", 2, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }, "retry-finished-game"), Date.now() + 1);
+  const retriedData = retried.data as { gameSession?: GameSession; room?: Room | null };
+  assert.equal(retried.error, undefined);
+  assert.equal(retried.forceCheckpoint, "replay");
+  assert.equal(retriedData.gameSession?.status, "GAME_RESULT");
+  assert.equal(retriedData.room?.status, "GAME_RESULT");
+  assert.equal(state.storage.sql.archiveWrites, archiveWrites);
+
+  await authority.forceCheckpoint(retried.forceCheckpoint!);
+  assert.equal(authority.getAggregate()?.committedSeqByActor.host, 2);
+  assert.equal(state.storage.sql.archiveWrites, archiveWrites);
+});
+
+test("an inactive-game terminal rejection does not leave a clientSeq gap", async () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  enterReview(authority);
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  const rejected = authority.handleMutation(host, envelope("host", 2, "confirmRevealBlocks", {
+    presenterPlayerId: "host",
+    selectedBlocks: [0],
+  }), Date.now() + 1);
+  assert.equal(rejected.terminal, true);
+  assert.match(rejected.error ?? "", /游戏未处于活动状态/);
+  assert.equal(authority.getAggregate()?.seenSeqByActor.host, 2);
+
+  const next = authority.handleMutation(host, envelope("host", 3, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }, "retry-after-rejection"), Date.now() + 2);
+  assert.equal(next.error, undefined);
+  assert.equal(next.forceCheckpoint, "replay");
+});
+
 test("completed games without answering participants do not increment question-set plays", async () => {
   const { state, authority, d1 } = createSqliteProjectionAuthority(0);
   const host = socketFor(state, "host");

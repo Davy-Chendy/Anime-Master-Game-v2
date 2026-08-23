@@ -4735,9 +4735,24 @@ export function ImageRevealGame({
               <p className="mt-1 text-sm text-[var(--muted)]">
                 {isPresenter ? "确认后进入下一步" : "等待出题人进入下一步"}
               </p>
-          <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-            <p className="font-semibold text-slate-950">正确答案</p>
-            <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "未填写"}</p>
+          <div
+            className={[
+              "mt-3 rounded-md p-3 text-sm",
+              currentQuestionLabel ? "border-2 border-emerald-300 bg-emerald-50" : "border border-[var(--line)] bg-white",
+            ].join(" ")}
+          >
+            <p className={currentQuestionLabel ? "font-semibold text-emerald-800" : "font-semibold text-slate-950"}>
+              正确答案
+            </p>
+            <p
+              className={
+                currentQuestionLabel
+                  ? "mt-1 break-words text-xl font-bold leading-snug text-slate-950"
+                  : "mt-1 text-[var(--muted)]"
+              }
+            >
+              {currentQuestionLabel || "未填写"}
+            </p>
           </div>
           {isTeamBattleMode && teamBattleState?.correctGuess ? (
             <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm">
