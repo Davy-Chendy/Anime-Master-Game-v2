@@ -9,6 +9,7 @@ import type {
   DbRoom,
   GameBootstrapSnapshot,
   GameMode,
+  PersonalRevealMode,
   GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
@@ -24,6 +25,7 @@ import type {
   RoundSnapshot,
   Room,
   RoomVisibility,
+  RevealRect,
   TeamBattleGuessVote,
 } from "@/types/game";
 
@@ -202,6 +204,7 @@ export const updateRoomGameSettings = (params: {
   roomId: string;
   hostPlayerId: string;
   gameMode: GameMode;
+  personalRevealMode?: PersonalRevealMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
@@ -225,6 +228,7 @@ export const startGameWithQuestionSet = (params: {
   presenterPlayerId: string;
   questionSetId: string;
   gameMode?: GameMode;
+  personalRevealMode?: PersonalRevealMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
@@ -245,6 +249,12 @@ export const confirmRevealBlocks = (params: {
   selectedBlocks: number[];
   revealBlockCount?: number;
 }) => rpc<GameSession & { roundSnapshot?: RoundSnapshot }>("confirmRevealBlocks", params);
+
+export const confirmRevealRegions = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  regions: RevealRect[];
+}) => rpc<GameSession & { roundSnapshot?: RoundSnapshot }>("confirmRevealRegions", params);
 
 export const getAnswersForQuestionRound = (params: {
   gameSessionId: string;

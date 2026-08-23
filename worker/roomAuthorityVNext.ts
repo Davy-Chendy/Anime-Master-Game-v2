@@ -11,6 +11,8 @@ import type {
   Question,
   QuestionResult,
   QuestionSet,
+  RevealRect,
+  RevealRegion,
   RealtimeDelta,
   Room,
   RoundSnapshot,
@@ -24,8 +26,16 @@ import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
   MAX_TEAM_BATTLE_GUESS_LENGTH,
+  MAX_FREE_REVEAL_REGIONS_PER_ROUND,
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
 } from "../src/types/game";
+import {
+  createPersonalRevealState,
+  normalizePersonalRevealState,
+  normalizeRevealRect,
+  revealRectsAddVisibleArea,
+  revealRectsCoverImage,
+} from "../src/lib/freeRevealGeometry";
 import {
   decodeQuestionSetManifest,
   encodeDbQuestionSetManifest,
@@ -52,6 +62,7 @@ const PORTRAIT_REVEAL_BLOCK_COUNT = 35;
 const ALL_REVEALED_BLOCKS = Array.from({ length: 45 }, (_, index) => index);
 const QUESTION_SCOPED_MUTATION_NAMES = new Set([
   "confirmRevealBlocks",
+  "confirmRevealRegions",
   "submitAnswer",
   "submitForfeitAnswer",
   "cancelForfeitAnswer",
@@ -597,6 +608,7 @@ export class RoomAuthorityVNext {
       .map((player) => ({ id: `${bootstrap.gameSession.id}:${player.id}`, gameSessionId: bootstrap.gameSession.id, playerId: player.id, score: 0, correctCount: 0 }));
     const gameSession = {
       ...bootstrap.gameSession,
+      personalRevealState: normalizePersonalRevealState(bootstrap.gameSession.personalRevealState),
       eligiblePlayerIds: bootstrap.gameSession.eligiblePlayerIds ?? this.eligiblePlayers(players, bootstrap.gameSession.presenterPlayerId),
     };
     const normalizedTeam = normalizeTeamSessionDeadline(gameSession, Date.now());
@@ -900,6 +912,7 @@ export class RoomAuthorityVNext {
     let outcome: VNextMutationOutcome;
     switch (action.name) {
       case "confirmRevealBlocks": outcome = this.confirmRevealBlocks(action); break;
+      case "confirmRevealRegions": outcome = this.confirmRevealRegions(action); break;
       case "submitAnswer": outcome = this.submitAnswer(action); break;
       case "submitForfeitAnswer": outcome = this.submitForfeit(action); break;
       case "cancelForfeitAnswer": outcome = this.cancelForfeit(action); break;
@@ -944,6 +957,9 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActive();
     const session = aggregate.gameSession!;
     this.assertPresenter(action.actorId);
+    if (session.gameMode !== "TEAM_BATTLE" && this.getRevealState(session).mode === "FREE_RECT") {
+      throw new TerminalMutationError("当前游戏已开启自由框选。");
+    }
     if (session.roundStartedAt) throw new TerminalMutationError("本轮已经开始。");
     const raw = Array.isArray(action.payload.selectedBlocks) ? action.payload.selectedBlocks : [];
     const selected = raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value < 45);
@@ -954,6 +970,41 @@ export class RoomAuthorityVNext {
     session.serverNow = session.roundStartedAt;
     const runAtMs = action.serverReceivedAtMs + session.roundSeconds * 1000 + 3000;
     aggregate.deadline = { kind: "round", gameId: session.id, questionIndex: session.currentQuestionIndex, phaseKey: `round:${session.currentRevealRound}`, runAtMs };
+    return this.directSessionOutcome(session, "phase-boundary", true);
+  }
+
+  private confirmRevealRegions(action: VNextPendingMutation): VNextMutationOutcome {
+    const aggregate = this.requireActive();
+    const session = aggregate.gameSession!;
+    this.assertPresenter(action.actorId);
+    if (session.gameMode === "TEAM_BATTLE" || this.getRevealState(session).mode !== "FREE_RECT") {
+      throw new TerminalMutationError("当前游戏没有开启自由框选。");
+    }
+    if (session.roundStartedAt) throw new TerminalMutationError("本轮已经开始。");
+    const raw = Array.isArray(action.payload.regions) ? action.payload.regions : [];
+    if (raw.length < 1) throw new TerminalMutationError("请先框选区域。");
+    if (raw.length > MAX_FREE_REVEAL_REGIONS_PER_ROUND) throw new TerminalMutationError("每轮最多 16 个区域。");
+    const normalized = raw.map(normalizeRevealRect);
+    if (normalized.some((rect) => rect == null)) throw new TerminalMutationError("区域无效，请重新选择。");
+    const additions = normalized as RevealRect[];
+    const state = this.getRevealState(session);
+    if (state.regions.length + additions.length > MAX_FREE_REVEAL_REGIONS_PER_ROUND * session.maxRevealRounds) {
+      throw new TerminalMutationError("本题区域数量已达到上限。");
+    }
+    if (!revealRectsAddVisibleArea(state.regions, additions)) throw new TerminalMutationError("请选择未揭露的区域。");
+    const committed = additions.map((rect, index) => ({ id: `${action.actionId}:${index}`, ...rect } satisfies RevealRegion));
+    state.regions = [...state.regions, ...committed];
+    state.fullyRevealed = revealRectsCoverImage(state.regions);
+    session.personalRevealState = state;
+    session.roundStartedAt = nowIso(action.serverReceivedAtMs);
+    session.serverNow = session.roundStartedAt;
+    aggregate.deadline = {
+      kind: "round",
+      gameId: session.id,
+      questionIndex: session.currentQuestionIndex,
+      phaseKey: `round:${session.currentRevealRound}`,
+      runAtMs: action.serverReceivedAtMs + session.roundSeconds * 1000 + 3000,
+    };
     return this.directSessionOutcome(session, "phase-boundary", true);
   }
 
@@ -1123,7 +1174,7 @@ export class RoomAuthorityVNext {
     this.recalculateScores();
     let sessionChanged = false;
     if (session.gameMode === "BUZZER_FIRST_CORRECT" && current.some((answer) => answer.status === "correct")) {
-      session.revealedBlocks = ALL_REVEALED_BLOCKS;
+      this.revealFully(session);
       session.roundStartedAt = null;
       aggregate.deadline = null;
       sessionChanged = true;
@@ -1158,14 +1209,14 @@ export class RoomAuthorityVNext {
     const hasCorrect = current.some((answer) => answer.status === "correct");
     const allCorrect = questionGuesserIds.length > 0 && currentEligiblePlayerIds.length === 0;
     if (allCorrect || (session.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrect)) {
-      session.revealedBlocks = ALL_REVEALED_BLOCKS;
+      this.revealFully(session);
     } else if (current.some((answer) => answer.status === "pending")) {
       return this.publicSessionOutcome(session);
     } else {
       const allUsedChance = currentEligiblePlayerIds.every((playerId) => current.some((answer) => answer.playerId === playerId) || aggregate.answers.some((answer) => answer.questionIndex === session.currentQuestionIndex && answer.revealRound === session.currentRevealRound && answer.playerId === playerId));
       if (!deadlineArrived && !allUsedChance) return this.publicSessionOutcome(session);
       if (session.currentRevealRound < session.maxRevealRounds) session.currentRevealRound += 1;
-      else session.revealedBlocks = ALL_REVEALED_BLOCKS;
+      else this.revealFully(session);
     }
     session.roundStartedAt = null;
     aggregate.deadline = null;
@@ -1202,7 +1253,7 @@ export class RoomAuthorityVNext {
     const allCorrect = eligible.size > 0 && [...eligible].every((id) => aggregate.questionResults.some((result) => result.questionIndex === session.currentQuestionIndex && result.playerId === id));
     session.roundStartedAt = null;
     aggregate.deadline = null;
-    if (allCorrect) session.revealedBlocks = ALL_REVEALED_BLOCKS;
+    if (allCorrect) this.revealFully(session);
     const data = { gameSession: clone(session), room: null, newlyScoredPlayerIds: newly };
     return { data, provisional: true, publicDeltas: [{ scope: "game", type: "round_snapshot", snapshot: this.getSnapshot() }], presenterDeltas: [], playerDeltas: [], forceCheckpoint: "phase-boundary", deadlineChanged: true };
   }
@@ -1438,7 +1489,7 @@ export class RoomAuthorityVNext {
       }
       state.teamScores[guessedBy] += 1;
       state.phase = "REVIEW";
-      session.revealedBlocks = ALL_REVEALED_BLOCKS;
+      this.revealFully(session);
       session.roundStartedAt = null;
       this.recalculateScores();
     } else {
@@ -1512,7 +1563,7 @@ export class RoomAuthorityVNext {
     const state = session.teamBattleState;
     if (!state) throw new TerminalMutationError("当前不是红蓝对抗模式。");
     Object.assign(state, { phase: "REVIEW", voteDeadlineAt: null, revealVotes: {}, guessVotes: {}, guessProposals: [], pendingGuess: null });
-    session.revealedBlocks = ALL_REVEALED_BLOCKS;
+    this.revealFully(session);
     session.roundStartedAt = null;
     aggregate.deadline = null;
     return this.publicSessionOutcome(session, "phase-boundary", true);
@@ -1524,7 +1575,7 @@ export class RoomAuthorityVNext {
     this.assertPresenter(action.actorId);
     const expected = getInteger(action.payload.expectedQuestionIndex);
     if (expected != null && expected !== session.currentQuestionIndex) throw new TerminalMutationError("题目已变化，请刷新后重试。");
-    if (!skipped && (session.roundStartedAt || session.revealedBlocks.length !== ALL_REVEALED_BLOCKS.length)) {
+    if (!skipped && (session.roundStartedAt || !this.isFullyRevealed(session))) {
       throw new TerminalMutationError("当前还没有进入完整图片复盘阶段，不能进入下一题。");
     }
     if (session.currentQuestionIndex + 1 >= aggregate.questions.length) return this.endGame(action, true);
@@ -1532,7 +1583,7 @@ export class RoomAuthorityVNext {
     aggregate.scoreBaseline = Object.fromEntries(aggregate.scores.map((score) => [score.playerId, { score: score.score, correctCount: score.correctCount }]));
     session.currentQuestionIndex += 1;
     session.currentRevealRound = 1;
-    session.revealedBlocks = [];
+    this.resetReveal(session);
     session.roundStartedAt = null;
     session.eligiblePlayerIds = this.eligiblePlayers(aggregate.players, session.presenterPlayerId);
     if (session.gameMode === "TEAM_BATTLE") {
@@ -1584,7 +1635,7 @@ export class RoomAuthorityVNext {
     const id = getString(action.payload.questionId);
     const labelText = getString(action.payload.labelText);
     if (!labelText) throw new TerminalMutationError("请先填写正确答案。");
-    if (session.roundStartedAt || session.revealedBlocks.length !== ALL_REVEALED_BLOCKS.length) throw new TerminalMutationError("当前还没有进入完整图片复盘阶段，不能填写正确答案。");
+    if (session.roundStartedAt || !this.isFullyRevealed(session)) throw new TerminalMutationError("当前还没有进入完整图片复盘阶段，不能填写正确答案。");
     const question = aggregate.questions[session.currentQuestionIndex];
     if (!question || question.id !== id) throw new TerminalMutationError("当前题目不存在，不能填写正确答案。");
     if (question.labelText?.trim()) throw new TerminalMutationError("该题已经有正确答案，不能重复填写。");
@@ -2188,7 +2239,7 @@ export class RoomAuthorityVNext {
               `).bind(JSON.stringify(legacyPlayers)));
           }
           if (game.gameSession) {
-            statements.push(this.d1.prepare("UPDATE game_sessions SET status=?,current_question_index=?,current_reveal_round=?,revealed_blocks=?,team_battle_state=?,round_started_at=?,ended_at=?,completed_normally_at=? WHERE id=?").bind(game.gameSession.status, game.gameSession.currentQuestionIndex, game.gameSession.currentRevealRound, JSON.stringify(game.gameSession.revealedBlocks), game.gameSession.teamBattleState == null ? null : JSON.stringify(game.gameSession.teamBattleState), game.gameSession.roundStartedAt ?? null, game.gameSession.endedAt ?? null, game.gameSession.completedNormallyAt ?? null, game.gameSession.id));
+            statements.push(this.d1.prepare("UPDATE game_sessions SET status=?,current_question_index=?,current_reveal_round=?,revealed_blocks=?,personal_reveal_state=?,team_battle_state=?,round_started_at=?,ended_at=?,completed_normally_at=? WHERE id=?").bind(game.gameSession.status, game.gameSession.currentQuestionIndex, game.gameSession.currentRevealRound, JSON.stringify(game.gameSession.revealedBlocks), JSON.stringify(normalizePersonalRevealState(game.gameSession.personalRevealState)), game.gameSession.teamBattleState == null ? null : JSON.stringify(game.gameSession.teamBattleState), game.gameSession.roundStartedAt ?? null, game.gameSession.endedAt ?? null, game.gameSession.completedNormallyAt ?? null, game.gameSession.id));
             const participants = game.projectionVersion == null ? game.participants ?? game.players.filter((player) => player.role === "PLAYER") : [];
             if (participants.length) statements.push(this.d1.prepare(`INSERT INTO game_participants(game_session_id,player_id,nickname,role,joined_at)
               SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.nickname'),json_extract(value,'$.role'),json_extract(value,'$.joinedAt') FROM json_each(?) WHERE true
@@ -2332,6 +2383,9 @@ export class RoomAuthorityVNext {
         .map((question) => question.id);
     }
     parsed.questionSetManifestVersion ??= null;
+    if (parsed.gameSession) {
+      parsed.gameSession.personalRevealState = normalizePersonalRevealState(parsed.gameSession.personalRevealState);
+    }
     return parsed;
   }
 
@@ -2695,6 +2749,7 @@ export class RoomAuthorityVNext {
     let data: unknown;
     switch (envelope.name) {
       case "confirmRevealBlocks":
+      case "confirmRevealRegions":
       case "submitTeamBattleRevealVote":
       case "submitTeamBattleGuessVote":
         data = clone(session);
@@ -2833,6 +2888,35 @@ export class RoomAuthorityVNext {
       currentGameId: aggregate.gameSession?.status === "GAME_RESULT" ? aggregate.gameId : null,
       createdAt: 0,
     };
+  }
+
+  private getRevealState(session: GameSession) {
+    const state = normalizePersonalRevealState(session.personalRevealState);
+    session.personalRevealState = state;
+    return state;
+  }
+
+  private isFullyRevealed(session: GameSession) {
+    const state = this.getRevealState(session);
+    return session.gameMode !== "TEAM_BATTLE" && state.mode === "FREE_RECT"
+      ? state.fullyRevealed
+      : session.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
+  }
+
+  private revealFully(session: GameSession) {
+    const state = this.getRevealState(session);
+    if (state.mode === "FREE_RECT" && session.gameMode !== "TEAM_BATTLE") {
+      state.fullyRevealed = true;
+      session.personalRevealState = state;
+    } else {
+      session.revealedBlocks = ALL_REVEALED_BLOCKS;
+    }
+  }
+
+  private resetReveal(session: GameSession) {
+    const mode = session.gameMode === "TEAM_BATTLE" ? "GRID" : this.getRevealState(session).mode;
+    session.revealedBlocks = [];
+    session.personalRevealState = createPersonalRevealState(mode);
   }
 
   private publicSessionOutcome(session: GameSession, forceCheckpoint?: CheckpointTrigger, deadlineChanged = false): VNextMutationOutcome {

@@ -80,7 +80,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0026") {
+function applyMigrations(db: DatabaseSync, through = "0027") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -205,6 +205,35 @@ test("D1 0026 adds rating-count directory indexes transactionally and query plan
     LIMIT 25`).all().map((row) => String(row.detail)).join("\n");
   assert.match(publicPlan, /question_sets_public_rating_count_idx/);
   assert.match(creationPlan, /question_sets_public_creation_rating_count_idx/);
+});
+
+test("D1 0027 adds personal free-reveal state with safe legacy defaults and constraints", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0026");
+  db.prepare("INSERT INTO rooms(id,room_code,host_player_id) VALUES(?,?,?)").run("legacy-room", "FREE27", "host");
+  db.prepare(`INSERT INTO question_sets(id,title,created_by_player_id,is_public,image_count)
+    VALUES(?,?,?,?,?)`).run("set-27", "Set", "host", 0, 1);
+  db.prepare(`INSERT INTO game_sessions(id,room_id,question_set_id,presenter_player_id,status,game_mode)
+    VALUES(?,?,?,?,?,?)`).run("game-27", "legacy-room", "set-27", "host", "PLAYING", "ROUND_REVEAL");
+  const migration = readFileSync(join(migrationsDirectory, "0027_personal_free_reveal.sql"), "utf8");
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const firstStatement = migration.split(";").map((statement) => statement.trim()).filter(Boolean)[0];
+    db.exec(`${firstStatement};`);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('rooms') WHERE name='lobby_personal_reveal_mode'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM pragma_table_info('game_sessions') WHERE name='personal_reveal_state'").get().count, 0);
+
+  db.exec(migration);
+  assert.equal(db.prepare("SELECT lobby_personal_reveal_mode mode FROM rooms WHERE id='legacy-room'").get().mode, "GRID");
+  assert.equal(db.prepare("SELECT personal_reveal_state state FROM game_sessions WHERE id='game-27'").get().state, null);
+  db.prepare("UPDATE rooms SET lobby_personal_reveal_mode='FREE_RECT' WHERE id='legacy-room'").run();
+  assert.equal(db.prepare("SELECT lobby_personal_reveal_mode mode FROM rooms WHERE id='legacy-room'").get().mode, "FREE_RECT");
+  assert.throws(() => db.prepare("UPDATE rooms SET lobby_personal_reveal_mode='INVALID' WHERE id='legacy-room'").run(), /CHECK constraint failed/);
 });
 
 test("D1 0018 adds aggregate room state transactionally without rewriting old rooms", () => {
@@ -372,6 +401,7 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
   await runWithGameDatabase(db, async () => {
     const room = await createRoom("host-defaults", "Host");
     assert.equal(room.teamRevealVoteSeconds, 12);
+    assert.equal(room.personalRevealMode, "GRID");
     assert.equal(room.teamGuessVoteSeconds, 35);
     assert.equal(room.teamPresenterBlockEnabled, false);
     assert.equal(room.spectatorQuestionPreviewEnabled, true);
@@ -380,8 +410,9 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
     assert.equal(room.spectatorCapacity, 50);
     assert.equal(room.teamAssignmentMode, "MANUAL");
 
-    const stored = db.sqlite.prepare("SELECT lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_spectator_question_preview_enabled, lobby_spectator_player_answers_enabled, lobby_player_capacity, lobby_spectator_capacity, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
+    const stored = db.sqlite.prepare("SELECT lobby_personal_reveal_mode, lobby_team_reveal_vote_seconds, lobby_team_guess_vote_seconds, lobby_team_presenter_block_enabled, lobby_spectator_question_preview_enabled, lobby_spectator_player_answers_enabled, lobby_player_capacity, lobby_spectator_capacity, lobby_team_assignment_mode, runtime_generation FROM rooms WHERE id=?")
       .get(room.id);
+    assert.equal(stored.lobby_personal_reveal_mode, "GRID");
     assert.equal(stored.lobby_team_reveal_vote_seconds, 12);
     assert.equal(stored.lobby_team_guess_vote_seconds, 35);
     assert.equal(stored.lobby_team_presenter_block_enabled, 0);
@@ -416,6 +447,7 @@ test("new rooms explicitly use the current TEAM_BATTLE defaults", async () => {
       roomId: room.id,
       hostPlayerId: "host-defaults",
       gameMode: "ROUND_REVEAL",
+      personalRevealMode: "GRID",
       spectatorQuestionPreviewEnabled: false,
       spectatorPlayerAnswersEnabled: false,
     });
@@ -921,6 +953,46 @@ test("community rating-count sorting is deterministic and composes with filterin
   });
 });
 
+test("personal reveal setting is saved in setup and frozen into a personal game session", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite, "0027");
+  db.sqlite.prepare(`INSERT INTO rooms(id,room_code,host_player_id,game_status,current_presenter_player_id,prepared_question_set_id)
+    VALUES(?,?,?,?,?,?)`).run("room-free", "FREE01", "host", "QUESTION_SETUP", "host", "set-free");
+  for (const [id, nickname, isHost] of [["host", "Host", 1], ["p1", "P1", 0]] as const) {
+    db.sqlite.prepare("INSERT INTO players(id,room_id,nickname,is_host,role) VALUES(?,?,?,?,?)")
+      .run(id, "room-free", nickname, isHost, "PLAYER");
+  }
+  upgradeRoomFixtureToAggregate(db.sqlite, "room-free");
+  db.sqlite.prepare("INSERT INTO question_sets(id,title,created_by_player_id,image_count) VALUES(?,?,?,?)")
+    .run("set-free", "Free Set", "host", 1);
+  db.sqlite.prepare("INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)")
+    .run("question-free", "set-free", "https://example.com/free.webp", 0);
+
+  await runWithGameDatabase(db, async () => {
+    const saved = await updateRoomGameSettings({
+      roomId: "room-free",
+      hostPlayerId: "host",
+      gameMode: "BUZZER_RANKED",
+      personalRevealMode: "FREE_RECT",
+    });
+    assert.equal(saved.personalRevealMode, "FREE_RECT");
+    const started = await startGameWithQuestionSet({
+      startRequestId: "free-reveal-start-01",
+      roomId: "room-free",
+      hostPlayerId: "host",
+      presenterPlayerId: "host",
+      questionSetId: "set-free",
+      gameMode: "BUZZER_RANKED",
+    });
+    assert.deepEqual(started.gameSession.personalRevealState, {
+      version: 1,
+      mode: "FREE_RECT",
+      regions: [],
+      fullyRevealed: false,
+    });
+  });
+});
+
 test("custom room TEAM_BATTLE vote durations flow into the initial game state", async () => {
   const db = new DatabaseAdapter();
   applyMigrations(db.sqlite);
@@ -941,11 +1013,13 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
       roomId: "room-team",
       hostPlayerId: "host",
       gameMode: "TEAM_BATTLE",
+      personalRevealMode: "FREE_RECT",
       teamRevealVoteSeconds: 23,
       teamGuessVoteSeconds: 61,
       teamPresenterBlockEnabled: true,
     });
     assert.equal(room.teamRevealVoteSeconds, 23);
+    assert.equal(room.personalRevealMode, "FREE_RECT");
     assert.equal(room.teamGuessVoteSeconds, 61);
     assert.equal(room.teamPresenterBlockEnabled, true);
 
@@ -968,6 +1042,7 @@ test("custom room TEAM_BATTLE vote durations flow into the initial game state", 
       gameMode: "TEAM_BATTLE",
     });
     assert.equal(started.gameSession.teamBattleState?.revealVoteSeconds, 23);
+    assert.equal(started.gameSession.personalRevealState?.mode, "GRID");
     assert.equal(started.gameSession.teamBattleState?.guessVoteSeconds, 61);
     assert.equal(started.gameSession.teamBattleState?.presenterBlockEnabled, false);
     assert.equal(started.gameSession.teamBattleState?.phase, "REVEAL_VOTE");

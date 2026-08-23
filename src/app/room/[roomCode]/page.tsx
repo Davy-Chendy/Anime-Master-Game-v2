@@ -40,6 +40,7 @@ import type {
   GameResultSnapshot,
   GameSession,
   LeaderboardEntry,
+  PersonalRevealMode,
   Player,
   PlayerRole,
   QuestionSet,
@@ -72,6 +73,7 @@ const gameResultSnapshotCache = new Map<string, GameResultSnapshot>();
 
 type GameSettings = {
   gameMode: GameMode;
+  personalRevealMode: PersonalRevealMode;
   maxRevealRounds: number;
   roundSeconds: number;
   roundScores: number[];
@@ -87,6 +89,7 @@ type GameSettings = {
 
 const defaultGameSettings: GameSettings = {
   gameMode: "ROUND_REVEAL",
+  personalRevealMode: "GRID",
   maxRevealRounds: 3,
   roundSeconds: 45,
   roundScores: [5, 3, 1],
@@ -169,6 +172,7 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
 
   return {
     gameMode: settings.gameMode ?? defaultGameSettings.gameMode,
+    personalRevealMode: settings.personalRevealMode === "FREE_RECT" ? "FREE_RECT" : "GRID",
     maxRevealRounds,
     roundSeconds: Math.max(1, Math.min(600, Math.floor(rawRoundSeconds))),
     roundScores: Array.from({ length: maxRevealRounds }, (_, index) => {
@@ -195,6 +199,7 @@ function normalizeGameSettings(settings: Partial<GameSettings>): GameSettings {
 function getRoomGameSettings(room: Room | null | undefined): GameSettings {
   return normalizeGameSettings({
     gameMode: room?.gameMode,
+    personalRevealMode: room?.personalRevealMode,
     maxRevealRounds: room?.maxRevealRounds,
     roundSeconds: room?.roundSeconds,
     roundScores: room?.roundScores,
@@ -212,6 +217,7 @@ function getRoomGameSettings(room: Room | null | undefined): GameSettings {
 function areGameSettingsEqual(left: GameSettings, right: GameSettings) {
   return (
     left.gameMode === right.gameMode &&
+    left.personalRevealMode === right.personalRevealMode &&
     left.maxRevealRounds === right.maxRevealRounds &&
     left.roundSeconds === right.roundSeconds &&
     left.roundScores.length === right.roundScores.length &&
@@ -1057,7 +1063,21 @@ function GameSettingsPanel({
         </div>
 
         {!isTeamBattleMode ? (
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <div className="mt-4 space-y-3">
+            <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+              <span>
+                <span className="block text-sm font-medium text-slate-900">自由框选</span>
+                <span className="mt-1 block text-xs text-[var(--muted)]">出题人每轮框选展示区域</span>
+              </span>
+              <input
+                checked={settings.personalRevealMode === "FREE_RECT"}
+                className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+                disabled={!canEdit}
+                type="checkbox"
+                onChange={(event) => onChange({ ...settings, personalRevealMode: event.target.checked ? "FREE_RECT" : "GRID" })}
+              />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="mb-2 block text-sm font-medium text-slate-900">最多轮数</span>
               <input
@@ -1084,6 +1104,7 @@ function GameSettingsPanel({
                 }
               />
             </label>
+            </div>
           </div>
         ) : null}
 
@@ -2697,6 +2718,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         roomId: room.id,
         hostPlayerId: playerId,
         gameMode: normalizedSettings.gameMode,
+        personalRevealMode: normalizedSettings.personalRevealMode,
         maxRevealRounds: normalizedSettings.maxRevealRounds,
         roundSeconds: normalizedSettings.roundSeconds,
         roundScores: normalizedSettings.roundScores,
@@ -2748,6 +2770,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         roomId,
         presenterPlayerId,
         questionSetId,
+        gameSettings.personalRevealMode,
       ]);
       if (!startGameAttemptRef.current) {
         startGameAttemptRef.current = getStoredStartGameAttempt(roomId);
@@ -2769,6 +2792,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           presenterPlayerId,
           questionSetId,
           gameMode: gameSettings.gameMode,
+          personalRevealMode: gameSettings.personalRevealMode,
           maxRevealRounds: gameSettings.maxRevealRounds,
           roundSeconds: gameSettings.roundSeconds,
           roundScores: gameSettings.roundScores,
