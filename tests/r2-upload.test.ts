@@ -184,6 +184,20 @@ function insertLegacyOrphanQuestionSets(
   return { keyToQuestionSetId, setIds };
 }
 
+function insertExpiredRooms(sqlite: DatabaseSync, count: number, updatedAt: string) {
+  const insertRoom = sqlite.prepare(
+    "INSERT INTO rooms(id,room_code,host_player_id,updated_at) VALUES(?,?,?,?)",
+  );
+  for (let index = 0; index < count; index += 1) {
+    insertRoom.run(
+      `batch-room-${index.toString().padStart(3, "0")}`,
+      `B${index.toString().padStart(5, "0")}`,
+      "host",
+      updatedAt,
+    );
+  }
+}
+
 test("10 MB final-image policy accepts the boundary and rejects one extra byte", () => {
   assert.equal(isR2ImageUploadTooLarge(R2_IMAGE_UPLOAD_MAX_BYTES), false);
   assert.equal(isR2ImageUploadTooLarge(R2_IMAGE_UPLOAD_MAX_BYTES + 1), true);
@@ -417,6 +431,107 @@ test("expired-room cleanup deletes more than 1000 associated images in bounded R
   assert.equal(summary.deferredR2KeyCount, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets").get().count, 0);
   assert.equal(setIds.length, 67);
+});
+
+test("expired-room cleanup drains multiple 50-room batches and reconciles their resources once", async () => {
+  const publicBaseUrl = "https://assets.example.com";
+  const { deletedKeys, env, sqlite } = createCleanupTestEnv({ publicBaseUrl });
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const expiredAt = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+  insertExpiredRooms(sqlite, 120, expiredAt);
+
+  const insertQuestionSet = sqlite.prepare(`INSERT INTO question_sets(
+    id,title,created_by_player_id,is_public,image_count,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?)`);
+  const insertQuestion = sqlite.prepare(
+    "INSERT INTO questions(id,question_set_id,image_url,order_index) VALUES(?,?,?,?)",
+  );
+  for (const [roomIndex, suffix] of [[0, "first"], [119, "last"]] as const) {
+    const questionSetId = `batch-set-${suffix}`;
+    const imageUrl = `${publicBaseUrl}/question-images/batch-${suffix}.webp`;
+    insertQuestionSet.run(questionSetId, `Batch ${suffix}`, "host", 0, 1, expiredAt, expiredAt);
+    insertQuestion.run(`batch-question-${suffix}`, questionSetId, imageUrl, 0);
+    sqlite.prepare("UPDATE rooms SET prepared_question_set_id=? WHERE id=?")
+      .run(questionSetId, `batch-room-${roomIndex.toString().padStart(3, "0")}`);
+  }
+
+  const summary = await cleanupExpiredRooms(env, now, {
+    batchDelayMs: 0,
+    clock: () => 0,
+    timeBudgetMs: 60_000,
+  });
+
+  assert.equal(summary.roomBatchCount, 3);
+  assert.equal(summary.selectedRoomCount, 120);
+  assert.equal(summary.deletedRoomCount, 120);
+  assert.equal(summary.stopReason, "completed");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM question_sets").get().count, 0);
+  assert.deepEqual(deletedKeys.sort(), [
+    "question-images/batch-first.webp",
+    "question-images/batch-last.webp",
+  ]);
+});
+
+test("expired-room cleanup stops at its deadline and leaves remaining batches for the next run", async () => {
+  const { env, sqlite } = createCleanupTestEnv();
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const expiredAt = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+  insertExpiredRooms(sqlite, 120, expiredAt);
+  let elapsedMs = 0;
+
+  const summary = await cleanupExpiredRooms(env, now, {
+    batchDelayMs: 100,
+    clock: () => elapsedMs,
+    sleep: async (delayMs) => { elapsedMs += delayMs; },
+    timeBudgetMs: 50,
+  });
+
+  assert.equal(summary.roomBatchCount, 1);
+  assert.equal(summary.selectedRoomCount, 50);
+  assert.equal(summary.deletedRoomCount, 50);
+  assert.equal(summary.stopReason, "deadline");
+  assert.equal(summary.elapsedMs, 100);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms").get().count, 70);
+
+  const resumedSummary = await cleanupExpiredRooms(env, now, {
+    batchDelayMs: 0,
+    clock: () => 0,
+    timeBudgetMs: 60_000,
+  });
+  assert.equal(resumedSummary.roomBatchCount, 2);
+  assert.equal(resumedSummary.deletedRoomCount, 70);
+  assert.equal(resumedSummary.stopReason, "completed");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms").get().count, 0);
+});
+
+test("expired-room cleanup stops when a selected batch makes no deletion progress", async () => {
+  const { env, sqlite } = createCleanupTestEnv();
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const expiredAt = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+  insertExpiredRooms(sqlite, 1, expiredAt);
+  const originalDb = env.DB;
+  env.DB = {
+    prepare(sql: string) {
+      if (!/^\s*delete from rooms\b/i.test(sql)) return originalDb.prepare(sql);
+      return {
+        bind() { return this; },
+        async all<T>() { return { results: [] as T[] }; },
+      };
+    },
+  } as D1Database;
+
+  const summary = await cleanupExpiredRooms(env, now, {
+    batchDelayMs: 0,
+    clock: () => 0,
+    timeBudgetMs: 60_000,
+  });
+
+  assert.equal(summary.roomBatchCount, 1);
+  assert.equal(summary.selectedRoomCount, 1);
+  assert.equal(summary.deletedRoomCount, 0);
+  assert.equal(summary.stopReason, "stalled");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM rooms").get().count, 1);
 });
 
 test("expired-room cleanup preserves every question set touched by a failed R2 batch", async () => {

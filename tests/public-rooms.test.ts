@@ -63,6 +63,7 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
     DB: {
       prepare(sql: string) {
         assert.match(sql, /room_visibility='PUBLIC'/);
+        assert.match(sql, /updated_at>=\?/);
         assert.match(sql, /game_status IN \('PLAYING','GAME_RESULT'\) OR COALESCE\(public_activity_at,updated_at\)>=\?/);
         assert.match(sql, /game_status='QUESTION_SETUP' AND prepared_question_source IS NOT NULL/);
         assert.match(sql, /ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC/);
@@ -71,7 +72,11 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
         return {
           bind(...values: unknown[]) {
             boundQueries.push(values);
-            return { all: async () => ({ results: pages[queryIndex++] ?? [] }) };
+            return {
+              all: async () => ({
+                results: (pages[queryIndex++] ?? []).filter((row) => row.updated_at >= String(values[1])),
+              }),
+            };
           },
         };
       },
@@ -158,8 +163,9 @@ test("public room directory filters every status by authoritative one-hour activ
   assert.equal(page.rooms[0].questionCount, 30);
   assert.equal(page.rooms.find((room) => room.id === "setup-ready")?.spectatorCount, 1);
   assert.equal(page.rooms[5].updatedAt, "2026-08-09T09:55:00Z");
-  assert.equal(boundQueries[0][1], "2026-08-09T09:00:00.000Z");
-  assert.equal(boundQueries[0].length, 2);
+  assert.equal(boundQueries[0][1], "2026-08-07T10:00:00.000Z");
+  assert.equal(boundQueries[0][2], "2026-08-09T09:00:00.000Z");
+  assert.equal(boundQueries[0].length, 3);
 });
 
 test("public room directory falls back safely when presence is unavailable or invalid", async () => {
@@ -209,7 +215,7 @@ test("public room directory returns every visible room in one response", async (
   assert.equal(page.nextCursor, null);
   assert.equal(fetchedTopics.length, 0);
   assert.equal(boundQueries.length, 1);
-  assert.equal(boundQueries[0].length, 2);
+  assert.equal(boundQueries[0].length, 3);
 });
 
 test("public room directory reaches fresh lobby rooms behind stale playing candidates", async () => {
@@ -259,6 +265,23 @@ test("public room directory returns an empty complete directory when every candi
   assert.equal(boundQueries.length, 1);
 });
 
+test("public room directory skips Room DO for game rows untouched in D1 for over forty-eight hours", async () => {
+  const d1StalePlaying = room("playing-d1-stale", "PLAYING", "2026-08-07T09:59:59Z");
+  const { env, fetchedTopics, boundQueries } = createEnv([[d1StalePlaying]], {
+    "room:playing-d1-stale": Response.json({
+      status: "PLAYING",
+      playerCount: 10,
+      updatedAt: "2026-08-09T09:59:00Z",
+    }),
+  });
+
+  const page = await listPublicRooms(env, NOW);
+
+  assert.deepEqual(page.rooms, []);
+  assert.deepEqual(fetchedTopics, []);
+  assert.equal(boundQueries[0][1], "2026-08-07T10:00:00.000Z");
+});
+
 test("public room directory caches a complete successful response for sixty seconds", async () => {
   const freshAt = new Date().toISOString();
   const { env, fetchedTopics, boundQueries } = createEnv([
@@ -298,7 +321,7 @@ test("public room directory caches a complete successful response for sixty seco
   assert.equal(matchedKeys.length, 2);
   assert.equal(writtenKeys.length, 1);
   assert.equal(matchedKeys[0], matchedKeys[1], "irrelevant query parameters and Origin must not fragment the shared cache");
-  assert.match(matchedKeys[0], /cacheVersion=3/);
+  assert.match(matchedKeys[0], /cacheVersion=4/);
   assert.match(matchedKeys[0], /runtimeGeneration=/);
   assert.equal(entries.get(writtenKeys[0])?.headers.get("cache-control"), "public, max-age=60");
 });

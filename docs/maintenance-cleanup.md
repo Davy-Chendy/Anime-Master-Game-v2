@@ -2,7 +2,9 @@
 
 本项目现在使用 Cloudflare D1。下面的 SQL 可用 `wrangler d1 execute` 执行。
 
-生产环境已经通过 Worker Cron Trigger 自动清理超过 48 小时未更新的房间。自动清理会先根据房间历史游戏和当前准备题库追溯未发布题库，只删除未发布题库独占引用的 R2 图片对象，再删除房间和已无引用的未发布题库记录。公开社区题库不会被清理。
+生产环境已经通过 Worker Cron Trigger 自动清理超过 48 小时未更新的房间。Cron 仍每天运行一次，但单次任务不再只处理 50 个房间：它按 `updated_at` 从旧到新每批选择 50 个，在 8 分钟房间批处理时间预算内串行清理，批间等待 1 秒，直到候选耗尽、时间截止或某批没有删除进展。任务随后统一追溯所有已删除房间关联的未发布题库和图片，只删除无引用的 R2 图片对象和题库记录；公开社区题库不会被清理。Cloudflare Cron 单次墙钟上限为 15 分钟，剩余时间留给资源收尾和全 bucket R2 对账。
+
+清理完成日志中的 `roomBatchCount`、`selectedRoomCount`、`deletedRoomCount`、`stopReason` 和 `elapsedMs` 用于判断积压是否收敛。`stopReason=completed` 表示本轮候选已经耗尽；`deadline` 表示剩余房间留待下一次 Cron；`stalled` 表示选中了候选但没有删除任何房间，任务会熔断而不是重复处理同一批。
 
 Room runtime generation 3 硬切后，历史房间的 `runtime_generation` 保持 `NULL`，访问会被逻辑拒绝但不会立即删除。拒绝路径不得更新 `updated_at`，这些房间仍由本流程在 48 小时后按原有 R2 追溯顺序自然清理。
 

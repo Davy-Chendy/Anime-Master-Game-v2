@@ -243,7 +243,9 @@ const BUSINESS_ALARM_MIN_SCHEDULE_DELAY_MS = 1000;
 const REMOTE_IMAGE_FETCH_MAX_BYTES = 20 * 1024 * 1024;
 const R2_IMAGE_ROUTE_PREFIX = "/api/r2-images/";
 const ROOM_CLEANUP_IDLE_MS = 48 * 60 * 60 * 1000;
-const ROOM_CLEANUP_MAX_ROOMS_PER_RUN = 50;
+const ROOM_CLEANUP_BATCH_SIZE = 50;
+const ROOM_CLEANUP_BATCH_DELAY_MS = 1000;
+const ROOM_CLEANUP_BATCH_TIME_BUDGET_MS = 8 * 60 * 1000;
 const ROOM_CLEANUP_MAX_ORPHAN_QUESTION_SETS_PER_RUN = 100;
 const ROOM_CLEANUP_SQL_CHUNK_SIZE = 50;
 const R2_ORPHAN_CLEANUP_MIN_AGE_MS = 72 * 60 * 60 * 1000;
@@ -2198,10 +2200,11 @@ type PublicRoomPage = {
 };
 
 const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 60 * 60 * 1000;
+const PUBLIC_ROOM_D1_CANDIDATE_WINDOW_MS = 48 * 60 * 60 * 1000;
 const PUBLIC_ROOM_PRESENCE_CONCURRENCY = 5;
 const PUBLIC_ROOM_PRESENCE_TIMEOUT_MS = 800;
 const PUBLIC_ROOM_DIRECTORY_CACHE_TTL_SECONDS = 60;
-const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 3;
+const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 4;
 
 type PublicRoomResponseCache = Pick<Cache, "match" | "put">;
 
@@ -2220,6 +2223,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 
 export async function listPublicRooms(env: Env, now = Date.now()): Promise<PublicRoomPage> {
   const cutoffIso = new Date(now - PUBLIC_ROOM_ACTIVITY_WINDOW_MS).toISOString();
+  const d1CandidateCutoffIso = new Date(now - PUBLIC_ROOM_D1_CANDIDATE_WINDOW_MS).toISOString();
   const result = await env.DB.prepare(`WITH ranked_rooms AS (
       SELECT
         id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,
@@ -2233,12 +2237,13 @@ export async function listPublicRooms(env: Env, now = Date.now()): Promise<Publi
         END AS status_rank
       FROM rooms
       WHERE room_visibility='PUBLIC' AND runtime_generation=?
+        AND updated_at>=?
         AND (game_status IN ('PLAYING','GAME_RESULT') OR COALESCE(public_activity_at,updated_at)>=?)
     )
     SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,activity_at
     FROM ranked_rooms
     ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC`)
-    .bind(CURRENT_ROOM_RUNTIME_GENERATION, cutoffIso)
+    .bind(CURRENT_ROOM_RUNTIME_GENERATION, d1CandidateCutoffIso, cutoffIso)
     .all<PublicRoomRow>();
   const candidates = result.results ?? [];
   const rooms: PublicRoomSummary[] = candidates
@@ -2385,7 +2390,7 @@ async function getExpiredRooms(env: Env, cutoffIso: string) {
      order by updated_at asc
      limit ?`,
     cutoffIso,
-    ROOM_CLEANUP_MAX_ROOMS_PER_RUN,
+    ROOM_CLEANUP_BATCH_SIZE,
   );
 }
 
@@ -2648,18 +2653,67 @@ async function deleteUnreferencedQuestionSets(env: Env, questionSetIds: string[]
   return deletedQuestionSetIds;
 }
 
-export async function cleanupExpiredRooms(env: Env, now = Date.now()) {
+type CleanupExpiredRoomsOptions = {
+  batchDelayMs?: number;
+  timeBudgetMs?: number;
+  clock?: () => number;
+  sleep?: (delayMs: number) => Promise<void>;
+};
+
+function sleep(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+}
+
+export async function cleanupExpiredRooms(env: Env, now = Date.now(), options: CleanupExpiredRoomsOptions = {}) {
   if (!env.IMAGE_BUCKET) {
     throw new Error("自动清理失败：缺少 R2 存储绑定。");
   }
 
+  const clock = options.clock ?? Date.now;
+  const wait = options.sleep ?? sleep;
+  const batchDelayMs = Math.max(0, options.batchDelayMs ?? ROOM_CLEANUP_BATCH_DELAY_MS);
+  const timeBudgetMs = Math.max(0, options.timeBudgetMs ?? ROOM_CLEANUP_BATCH_TIME_BUDGET_MS);
+  const startedAtMs = clock();
+  const deadlineMs = startedAtMs + timeBudgetMs;
   const cutoffIso = new Date(now - ROOM_CLEANUP_IDLE_MS).toISOString();
-  const expiredRooms = await getExpiredRooms(env, cutoffIso);
-  const expiredRoomIds = expiredRooms.map((room) => room.id);
-  const roomCandidateRows = await getUnpublishedQuestionSetImageRowsForRooms(env, expiredRoomIds);
-  const deletedRoomIds = await deleteExpiredRooms(env, expiredRoomIds, cutoffIso);
-  const deletedRoomIdSet = new Set(deletedRoomIds);
-  const rowsForDeletedRooms = roomCandidateRows.filter((row) => row.room_id && deletedRoomIdSet.has(row.room_id));
+  const rowsForDeletedRooms: CleanupQuestionSetImageRow[] = [];
+  let selectedRoomCount = 0;
+  let deletedRoomCount = 0;
+  let roomBatchCount = 0;
+  let stopReason: "completed" | "deadline" | "stalled" = "completed";
+
+  while (true) {
+    if (clock() >= deadlineMs) {
+      stopReason = "deadline";
+      break;
+    }
+
+    const expiredRooms = await getExpiredRooms(env, cutoffIso);
+    if (expiredRooms.length === 0) break;
+
+    roomBatchCount += 1;
+    selectedRoomCount += expiredRooms.length;
+    const expiredRoomIds = expiredRooms.map((room) => room.id);
+    const roomCandidateRows = await getUnpublishedQuestionSetImageRowsForRooms(env, expiredRoomIds);
+    const deletedRoomIds = await deleteExpiredRooms(env, expiredRoomIds, cutoffIso);
+    deletedRoomCount += deletedRoomIds.length;
+    const deletedRoomIdSet = new Set(deletedRoomIds);
+    rowsForDeletedRooms.push(
+      ...roomCandidateRows.filter((row) => row.room_id && deletedRoomIdSet.has(row.room_id)),
+    );
+
+    if (deletedRoomIds.length === 0) {
+      stopReason = "stalled";
+      break;
+    }
+    if (expiredRooms.length < ROOM_CLEANUP_BATCH_SIZE) break;
+    if (clock() >= deadlineMs) {
+      stopReason = "deadline";
+      break;
+    }
+    if (batchDelayMs > 0) await wait(batchDelayMs);
+  }
+
   const orphanQuestionSetIds = await getOldOrphanUnpublishedQuestionSetIds(env, cutoffIso);
   const orphanRows = await getQuestionSetImageRows(env, orphanQuestionSetIds);
   const candidateRows = [...rowsForDeletedRooms, ...orphanRows];
@@ -2728,8 +2782,11 @@ export async function cleanupExpiredRooms(env: Env, now = Date.now()) {
   const summary = {
     event: "expired_room_cleanup_completed",
     cutoffIso,
-    selectedRoomCount: expiredRooms.length,
-    deletedRoomCount: deletedRoomIds.length,
+    selectedRoomCount,
+    deletedRoomCount,
+    roomBatchCount,
+    stopReason,
+    elapsedMs: Math.max(0, clock() - startedAtMs),
     candidateQuestionSetCount: candidateQuestionSetIds.size,
     deletedQuestionSetCount: deletedQuestionSetIds.length,
     candidateR2KeyCount: candidateKeys.size,
@@ -2740,7 +2797,8 @@ export async function cleanupExpiredRooms(env: Env, now = Date.now()) {
     deferredR2KeyCount: deferredR2Keys.size,
   };
 
-  console.info(JSON.stringify(summary));
+  if (stopReason === "stalled") console.warn(JSON.stringify(summary));
+  else console.info(JSON.stringify(summary));
   return summary;
 }
 
