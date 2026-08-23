@@ -111,12 +111,39 @@ test("new aggregate archive restores leaderboard and sparse per-question scores"
   db.sqlite.prepare(`INSERT INTO game_result_archives(game_session_id,room_id,question_set_id,archive_version,completed_at,result_json)
     VALUES(?,?,?,?,?,?)`).run("game-1", "room-1", "set-1", 1, archive.completedAt, JSON.stringify(archive));
 
-  const result = await runWithGameDatabase(db, () => getArchivedGameResultSnapshot("game-1"));
+  const result = await runWithGameDatabase(db, () => getGameResultSnapshot("game-1"));
   assert.ok(result);
   assert.deepEqual(result.leaderboard, archive.leaderboard);
   assert.deepEqual(result.questionScores, archive.questionScores);
   assert.equal(result.leaderboard.some((entry) => entry.playerId === "host" || entry.playerId === "spectator"), false);
   assert.equal(JSON.stringify(archive).includes("answer one"), false);
+  assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 1);
+  assert.equal(db.sqlite.prepare("SELECT play_count FROM question_sets WHERE id='set-1'").get().play_count, 1);
+
+  await runWithGameDatabase(db, () => getGameResultSnapshot("game-1"));
+  assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 1);
+  assert.equal(db.sqlite.prepare("SELECT play_count FROM question_sets WHERE id='set-1'").get().play_count, 1);
+});
+
+test("aggregate archive with no answering participants does not repair a question-set play", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  seedCompletedGame(db.sqlite);
+  const archive = {
+    version: 1,
+    gameMode: "ROUND_REVEAL",
+    questionCount: 2,
+    completedAt: "2026-07-28T01:00:00.000Z",
+    leaderboard: [],
+    questionScores: [],
+  };
+  db.sqlite.prepare(`INSERT INTO game_result_archives(game_session_id,room_id,question_set_id,archive_version,completed_at,result_json)
+    VALUES(?,?,?,?,?,?)`).run("game-1", "room-1", "set-1", 1, archive.completedAt, JSON.stringify(archive));
+
+  const result = await runWithGameDatabase(db, () => getGameResultSnapshot("game-1"));
+  assert.deepEqual(result.leaderboard, []);
+  assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 0);
+  assert.equal(db.sqlite.prepare("SELECT play_count FROM question_sets WHERE id='set-1'").get().play_count, 0);
 });
 
 test("legacy normalized result remains readable when no aggregate archive exists", async () => {
@@ -135,6 +162,8 @@ test("legacy normalized result remains readable when no aggregate archive exists
   const result = await runWithGameDatabase(db, () => getGameResultSnapshot("game-1"));
   assert.deepEqual(result.leaderboard, [{ playerId: "p1", nickname: "Player 1", rank: 1, score: 3, correctCount: 1 }]);
   assert.deepEqual(result.questionScores, [{ playerId: "p1", questionIndex: 1, scoreAwarded: 3 }]);
+  assert.equal(db.sqlite.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 1);
+  assert.equal(db.sqlite.prepare("SELECT play_count FROM question_sets WHERE id='set-1'").get().play_count, 1);
 });
 
 test("corrupt or incompatible aggregate archive fails explicitly instead of returning an empty result", async () => {

@@ -1018,8 +1018,14 @@ export class RoomGameAuthority {
       }
       this.storage.sql.exec(`UPDATE rooms SET game_status='GAME_RESULT', updated_at=? WHERE current_game_id IN (SELECT id FROM game_sessions WHERE status='GAME_RESULT') AND game_status='PLAYING'`, new Date().toISOString());
       this.storage.sql.exec(`INSERT OR IGNORE INTO completed_question_set_plays(game_session_id,question_set_id,completed_at)
-        SELECT id,question_set_id,completed_normally_at FROM game_sessions
-        WHERE room_id=? AND status='GAME_RESULT' AND completed_normally_at IS NOT NULL`, roomId);
+        SELECT game.id,game.question_set_id,game.completed_normally_at FROM game_sessions AS game
+        WHERE game.room_id=? AND game.status='GAME_RESULT' AND game.completed_normally_at IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM game_participants AS participant
+            WHERE participant.game_session_id=game.id
+              AND participant.role='PLAYER'
+              AND participant.player_id<>game.presenter_player_id
+          )`, roomId);
       if (correctJudgeTarget?.game_mode === "BUZZER_FIRST_CORRECT") {
         this.storage.sql.exec(
           "UPDATE game_sessions SET revealed_blocks=?,round_started_at=NULL WHERE id=? AND status='PLAYING'",

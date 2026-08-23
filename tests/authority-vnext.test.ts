@@ -1434,6 +1434,48 @@ test("game completion broadcasts both final results and GAME_RESULT room state",
   }
 });
 
+test("completed games without answering participants do not increment question-set plays", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(0);
+  const host = socketFor(state, "host");
+  authority.handleMutation(socketFor(state, "viewer"), envelope("viewer", 1, "joinRoom", {
+    nickname: "Viewer",
+    role: "SPECTATOR",
+  }), Date.now());
+  enterReview(authority);
+
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now() + 1);
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM game_result_archives").get().count, 1);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 0);
+});
+
+test("a zero-score answering participant who leaves still increments question-set plays exactly once", async () => {
+  const { state, authority, d1 } = createSqliteProjectionAuthority(1);
+  const host = socketFor(state, "host");
+  const player = socketFor(state, "p0");
+  authority.handleMutation(player, envelope("p0", 1, "leaveRoom", { roomId: "r1", playerId: "p0" }), Date.now());
+  enterReview(authority);
+
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now() + 1);
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+  const outbox = state.storage.sql.db.prepare("SELECT payload_json FROM authority_vnext_projection_outbox WHERE id=1").get() as { payload_json: string };
+
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 1);
+
+  state.storage.sql.db.prepare("INSERT INTO authority_vnext_projection_outbox(id,payload_json,attempts,updated_at) VALUES(1,?,0,?)").run(outbox.payload_json, Date.now());
+  assert.equal(await authority.flushFinalProjection(), true);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) count FROM completed_question_set_plays").get().count, 1);
+});
+
 test("final result reconciles a newly published question set after authority recovery", async () => {
   const { state, authority } = createAuthority(1);
   enterReview(authority);

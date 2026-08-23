@@ -120,6 +120,13 @@ const communityRatingCountSortBudget = {
   ratingSubmissionsPerDayAt60GamesAtMost: players * 60,
   addedIndexMaintenancePathsPerDayAt60GamesAtMost: players * 60 * 2,
 };
+const questionSetPlayCountBudget = {
+  answeringParticipantDataWritesPerCompletedGame: 2,
+  noAnsweringParticipantDataWritesPerCompletedGame: 0,
+  vnextAdditionalReadsPerGame: 0,
+  legacyCompatibilityParticipantRowsReadAtMost: players,
+  noAnsweringParticipantDataWritesSavedPerDayAt60Games: 2 * 60,
+};
 
 assert.equal(answers, players * questions);
 assert.equal(judgements, players * questions);
@@ -140,6 +147,13 @@ if (players === 50 && questions === 30) {
     ratingSubmissionsPerGameAtMost: 50,
     ratingSubmissionsPerDayAt60GamesAtMost: 3_000,
     addedIndexMaintenancePathsPerDayAt60GamesAtMost: 6_000,
+  });
+  assert.deepEqual(questionSetPlayCountBudget, {
+    answeringParticipantDataWritesPerCompletedGame: 2,
+    noAnsweringParticipantDataWritesPerCompletedGame: 0,
+    vnextAdditionalReadsPerGame: 0,
+    legacyCompatibilityParticipantRowsReadAtMost: 50,
+    noAnsweringParticipantDataWritesSavedPerDayAt60Games: 120,
   });
   assert.deepEqual(teamBlockSelectionBudget, {
     defaultPerGameMutations: 0,
@@ -243,5 +257,9 @@ console.log(JSON.stringify({
   communityRatingCountSort: {
     ...communityRatingCountSortBudget,
     note: "Index-maintenance paths are a pre-deployment workload bound, not billed rowsWritten. D1 Analytics remains authoritative because an index key change can have platform-specific accounting.",
+  },
+  questionSetPlayCount: {
+    ...questionSetPlayCountBudget,
+    note: "A counted play inserts one completion row and updates one question-set row via the existing trigger. Index rows remain platform-metered and are excluded from these data-row counts.",
   },
 }, null, 2));

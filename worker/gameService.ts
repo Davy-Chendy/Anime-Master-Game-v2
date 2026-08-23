@@ -3928,20 +3928,21 @@ export async function getGameResultSnapshot(gameSessionId: string): Promise<Game
     throw new Error("加载结算快照失败：游戏不存在。");
   }
 
-  if (gameSession.status === "GAME_RESULT" && gameSession.completedNormallyAt) {
-    await recordCompletedQuestionSetPlay({
-      gameSessionId: gameSession.id,
-      questionSetId: gameSession.questionSetId,
-      completedAt: gameSession.completedNormallyAt,
-    });
-  }
-
   const [archive, questionSet] = await Promise.all([
     getGameResultArchive(gameSession.id),
     getQuestionSetById(gameSession.questionSetId),
   ]);
 
   if (archive) {
+    if (gameSession.status === "GAME_RESULT" && gameSession.completedNormallyAt) {
+      await recordCompletedQuestionSetPlay({
+        gameSessionId: gameSession.id,
+        questionSetId: gameSession.questionSetId,
+        presenterPlayerId: gameSession.presenterPlayerId,
+        completedAt: gameSession.completedNormallyAt,
+        hasAnsweringParticipant: archive.leaderboard.length > 0,
+      });
+    }
     return {
       gameSession,
       leaderboard: archive.leaderboard,
@@ -3954,6 +3955,16 @@ export async function getGameResultSnapshot(gameSessionId: string): Promise<Game
     getLeaderboardForGameSession(gameSession.id),
     getQuestionResultsForGameSession(gameSession.id),
   ]);
+
+  if (gameSession.status === "GAME_RESULT" && gameSession.completedNormallyAt) {
+    await recordCompletedQuestionSetPlay({
+      gameSessionId: gameSession.id,
+      questionSetId: gameSession.questionSetId,
+      presenterPlayerId: gameSession.presenterPlayerId,
+      completedAt: gameSession.completedNormallyAt,
+      hasAnsweringParticipant: leaderboard.length > 0,
+    });
+  }
 
   return {
     gameSession,
@@ -6437,6 +6448,7 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     await recordCompletedQuestionSetPlay({
       gameSessionId: endedGameSession.id,
       questionSetId: endedGameSession.question_set_id,
+      presenterPlayerId: endedGameSession.presenter_player_id,
       completedAt: endedGameSession.completed_normally_at,
     });
     return {
@@ -6471,6 +6483,7 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
     await recordCompletedQuestionSetPlay({
       gameSessionId: endedGameSession.id,
       questionSetId: endedGameSession.question_set_id,
+      presenterPlayerId: endedGameSession.presenter_player_id,
       completedAt: endedGameSession.completed_normally_at,
     });
     return {
@@ -6492,10 +6505,33 @@ async function finishRoomAfterGameSessionEnded(endedGameSession: DbGameSession, 
 async function recordCompletedQuestionSetPlay(params: {
   gameSessionId: string;
   questionSetId: string;
+  presenterPlayerId: string;
   completedAt?: string | null;
+  hasAnsweringParticipant?: boolean;
 }) {
   if (!params.completedAt) {
     throw new Error("题库尚未正常完成，不能记录开局次数。");
+  }
+
+  let hasAnsweringParticipant = params.hasAnsweringParticipant;
+  if (hasAnsweringParticipant == null) {
+    const { data: participants, error: participantsError } = await d1
+      .from("game_participants")
+      .select("player_id,role")
+      .eq("game_session_id", params.gameSessionId)
+      .returns<Array<Pick<DbGameParticipant, "player_id" | "role">>>();
+
+    if (participantsError) {
+      throw new Error(participantsError.message);
+    }
+
+    hasAnsweringParticipant = (participants ?? []).some(
+      (participant) => participant.role === "PLAYER" && participant.player_id !== params.presenterPlayerId,
+    );
+  }
+
+  if (!hasAnsweringParticipant) {
+    return;
   }
 
   const { error } = await d1.from("completed_question_set_plays").insert(

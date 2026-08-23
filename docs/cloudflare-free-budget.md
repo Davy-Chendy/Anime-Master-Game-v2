@@ -126,6 +126,12 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 该排序不改变游戏中 D1 零写入、最终投影、DO SQLite、Alarm、WebSocket 或单局权威 checkpoint 模型。`scripts/authority-write-budget.mjs` 单独输出评分提交与新增索引维护路径，不把它们混入 `d1FinalProjection`。
 
+## 无答题者流程的题库开局计数预算（2026-08-23）
+
+题库开局次数继续复用 Room DO 已有的权威结算聚合与 D1 最终投影，不新增 HTTP/RPC、WebSocket 消息、广播、Alarm、checkpoint 或客户端补拉。vNext 直接根据同一结算归档中已有的非出题参赛者排行榜决定是否写入 `completed_question_set_plays`，不新增 D1/DO SQLite 读取；旧兼容结算路径最多读取本局 `game_participants` 的玩家 ID 与角色，当前 runtime generation 的正常主路径不会产生该读取。
+
+存在至少一名答题参赛者的正常完成局保持原模型：幂等插入 1 条 `completed_question_set_plays`，随后由既有 D1 trigger 更新 1 条 `question_sets` 及其相关索引。只有出题人，或只有出题人与观战者的正常完成局不再执行这两次数据行写入，因此每天 60 局基线不增加任何用量；若 60 局全部为无答题者流程，最多减少 60 条完成记录插入与 60 条题集更新。索引维护的实际 rowsWritten 仍以 D1 Analytics 为准，`scripts/authority-write-budget.mjs` 的多人极端单局模型不变。
+
 ## 公开房间目录预算（2026-08-11）
 
 公开房间页只在首次进入、玩家点击“刷新房间”或显式点击“加载更多”时读取，不轮询。Worker 按 runtime generation、目录缓存版本和游标构造规范化缓存键，使用 Cloudflare Cache API 在当前数据中心共享完整成功响应 60 秒；无关 query 参数和请求 Origin 不拆分数据缓存，CORS 头在命中后按当前请求追加。客户端响应保持 `no-store`，因此刷新仍会到达 Worker，但不会绕过服务端共享缓存。错误响应不缓存，空成功页正常缓存。Cache API 不跨数据中心复制，也不保证同一冷 key 的并发 miss 严格合并；实现不得用模块级可变 Promise 保存跨请求 I/O。

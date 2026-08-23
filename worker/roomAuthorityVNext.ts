@@ -2193,7 +2193,10 @@ export class RoomAuthorityVNext {
             if (participants.length) statements.push(this.d1.prepare(`INSERT INTO game_participants(game_session_id,player_id,nickname,role,joined_at)
               SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.nickname'),json_extract(value,'$.role'),json_extract(value,'$.joinedAt') FROM json_each(?) WHERE true
               ON CONFLICT(game_session_id,player_id) DO UPDATE SET nickname=excluded.nickname,role=excluded.role`).bind(game.gameSession.id, JSON.stringify(participants.map((player) => ({ ...player, role: "PLAYER", joinedAt: typeof player.joinedAt === "number" ? nowIso(player.joinedAt) : player.joinedAt })))));
-            if (game.gameSession.completedNormallyAt) statements.push(this.d1.prepare("INSERT OR IGNORE INTO completed_question_set_plays(game_session_id,question_set_id,completed_at) VALUES(?,?,?)").bind(game.gameSession.id, game.gameSession.questionSetId, game.gameSession.completedNormallyAt));
+            const hasAnsweringParticipant = game.projectionVersion == null
+              ? participants.some((player) => player.role === "PLAYER" && player.id !== game.gameSession?.presenterPlayerId)
+              : (game.archive?.leaderboard.length ?? 0) > 0;
+            if (game.gameSession.completedNormallyAt && hasAnsweringParticipant) statements.push(this.d1.prepare("INSERT OR IGNORE INTO completed_question_set_plays(game_session_id,question_set_id,completed_at) VALUES(?,?,?)").bind(game.gameSession.id, game.gameSession.questionSetId, game.gameSession.completedNormallyAt));
           }
           if (game.projectionVersion == null && game.scores.length) statements.push(this.d1.prepare(`INSERT INTO player_scores(id,game_session_id,player_id,score,correct_count)
             SELECT json_extract(value,'$.id'),json_extract(value,'$.gameSessionId'),json_extract(value,'$.playerId'),json_extract(value,'$.score'),json_extract(value,'$.correctCount') FROM json_each(?) WHERE true
