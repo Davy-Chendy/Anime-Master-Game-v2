@@ -3188,6 +3188,14 @@ export function ImageRevealGame({
     : areAllGuessersCorrect || currentRound >= maxRevealRounds
       ? "公布答案"
       : "进入下一轮";
+  const revealSelectionTitle = isFreeRevealMode ? "选择要打开的区域" : "选择要打开的格子";
+  const revealSelectionDetail = isFreeRevealMode
+    ? draftRevealRegions.length > 0
+      ? `已选 ${draftRevealRegions.length} 个区域`
+      : "在图片上按住并拖动，框出区域"
+    : selectedBlocks.length > 0
+      ? `已选 ${selectedBlocks.length} 格`
+      : "点击图片中的格子进行选择";
   let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人打开图片";
@@ -3205,7 +3213,7 @@ export function ImageRevealGame({
       spectatorTaskDetail = "等待切换下一题";
     } else if (!hasRoundStarted) {
       spectatorTaskTitle = "等待揭图";
-      spectatorTaskDetail = isFreeRevealMode ? "出题人正在框选区域" : "出题人正在选格";
+      spectatorTaskDetail = isFreeRevealMode ? "出题人正在选择区域" : "出题人正在选格";
     } else if (!isRoundClosedForPlayerActions) {
       spectatorTaskTitle = isBuzzerMode ? "抢答中" : "作答中";
       spectatorTaskDetail = `${standardSubmittedCount}/${standardTotalCount} ${isBuzzerMode ? "已抢答" : "已提交"}`;
@@ -3230,8 +3238,8 @@ export function ImageRevealGame({
           standardTaskTitle = "判定抢答";
           standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
         } else if (!hasRoundStarted) {
-          standardTaskTitle = isFreeRevealMode ? "框选区域" : "选择要打开的格子";
-          standardTaskDetail = isFreeRevealMode ? "拖动画框" : selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+          standardTaskTitle = revealSelectionTitle;
+          standardTaskDetail = revealSelectionDetail;
         } else if (hasPendingJudgement) {
           standardTaskTitle = "等待判定";
           standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认抢答顺序" : `${pendingJudgementCount} 人待判定`;
@@ -3252,8 +3260,8 @@ export function ImageRevealGame({
         standardTaskTitle = standardSettleActionText;
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       } else if (!hasRoundStarted) {
-        standardTaskTitle = isFreeRevealMode ? "框选区域" : "选择要打开的格子";
-        standardTaskDetail = isFreeRevealMode ? "拖动画框" : selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+        standardTaskTitle = revealSelectionTitle;
+        standardTaskDetail = revealSelectionDetail;
       } else {
         standardTaskTitle = "等待作答";
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -3268,7 +3276,7 @@ export function ImageRevealGame({
       standardTaskDetail = "等待下一题";
     } else if (!hasRoundStarted) {
       standardTaskTitle = "等待揭图";
-      standardTaskDetail = isFreeRevealMode ? "出题人正在框选区域" : "出题人正在选格";
+      standardTaskDetail = isFreeRevealMode ? "出题人正在选择区域" : "出题人正在选格";
     } else if (isBuzzerMode) {
       if (myHasForfeited) {
         standardTaskTone = "border-slate-200 bg-white";
@@ -5152,7 +5160,9 @@ export function ImageRevealGame({
                   {isConfirmingReveal
                     ? "打开中…"
                     : isFreeRevealMode
-                      ? "打开区域"
+                      ? draftRevealRegions.length > 0
+                        ? `打开 ${draftRevealRegions.length} 个区域`
+                        : "打开所选区域"
                       : selectedBlocks.length > 0
                         ? `打开 ${selectedBlocks.length} 格`
                         : "打开所选格子"}

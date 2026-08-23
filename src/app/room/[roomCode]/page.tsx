@@ -1029,45 +1029,12 @@ function GameSettingsPanel({
         <summary className="cursor-pointer text-sm font-semibold text-slate-900">高级设置</summary>
         {copy.settingsNote ? <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{copy.settingsNote}</p> : null}
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">玩家人数上限</span>
-            <input
-              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              disabled={!canEdit}
-              min={1}
-              max={50}
-              type="number"
-              value={settings.playerCapacity}
-              onChange={(event) => onChange({
-                ...settings,
-                playerCapacity: Math.max(1, Math.min(50, Number(event.target.value) || 1)),
-              })}
-            />
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">观战人数上限</span>
-            <input
-              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              disabled={!canEdit}
-              min={0}
-              max={50}
-              type="number"
-              value={settings.spectatorCapacity}
-              onChange={(event) => onChange({
-                ...settings,
-                spectatorCapacity: Math.max(0, Math.min(50, Number(event.target.value) || 0)),
-              })}
-            />
-          </label>
-        </div>
-
         {!isTeamBattleMode ? (
           <div className="mt-4 space-y-3">
             <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
               <span>
-                <span className="block text-sm font-medium text-slate-900">自由框选</span>
-                <span className="mt-1 block text-xs text-[var(--muted)]">出题人每轮框选展示区域</span>
+                <span className="block text-sm font-medium text-slate-900">手动框选出题</span>
+                <span className="mt-1 block text-xs text-[var(--muted)]">不受格子限制，可自由框选要展示的区域</span>
               </span>
               <input
                 checked={settings.personalRevealMode === "FREE_RECT"}
@@ -1245,6 +1212,39 @@ function GameSettingsPanel({
               />
             </label>
           ) : null}
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium text-slate-900">玩家人数上限</span>
+            <input
+              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+              disabled={!canEdit}
+              min={1}
+              max={50}
+              type="number"
+              value={settings.playerCapacity}
+              onChange={(event) => onChange({
+                ...settings,
+                playerCapacity: Math.max(1, Math.min(50, Number(event.target.value) || 1)),
+              })}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium text-slate-900">观战人数上限</span>
+            <input
+              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+              disabled={!canEdit}
+              min={0}
+              max={50}
+              type="number"
+              value={settings.spectatorCapacity}
+              onChange={(event) => onChange({
+                ...settings,
+                spectatorCapacity: Math.max(0, Math.min(50, Number(event.target.value) || 0)),
+              })}
+            />
+          </label>
         </div>
       </details>
     </div>

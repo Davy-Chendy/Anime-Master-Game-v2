@@ -23,15 +23,15 @@ type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 
 const VIEWBOX_SIZE = 1000;
 const MIN_RECT_SIZE = 0.008;
-const HANDLES: Array<{ name: ResizeHandle; x: number; y: number; cursor: string }> = [
-  { name: "nw", x: 0, y: 0, cursor: "nwse-resize" },
-  { name: "n", x: 0.5, y: 0, cursor: "ns-resize" },
-  { name: "ne", x: 1, y: 0, cursor: "nesw-resize" },
-  { name: "e", x: 1, y: 0.5, cursor: "ew-resize" },
-  { name: "se", x: 1, y: 1, cursor: "nwse-resize" },
-  { name: "s", x: 0.5, y: 1, cursor: "ns-resize" },
-  { name: "sw", x: 0, y: 1, cursor: "nesw-resize" },
-  { name: "w", x: 0, y: 0.5, cursor: "ew-resize" },
+const HANDLES: Array<{ name: ResizeHandle; x: number; y: number; cursor: CSSProperties["cursor"]; label: string }> = [
+  { name: "nw", x: 0, y: 0, cursor: "nwse-resize", label: "调整左上角" },
+  { name: "n", x: 0.5, y: 0, cursor: "ns-resize", label: "调整上边缘" },
+  { name: "ne", x: 1, y: 0, cursor: "nesw-resize", label: "调整右上角" },
+  { name: "e", x: 1, y: 0.5, cursor: "ew-resize", label: "调整右边缘" },
+  { name: "se", x: 1, y: 1, cursor: "nwse-resize", label: "调整右下角" },
+  { name: "s", x: 0.5, y: 1, cursor: "ns-resize", label: "调整下边缘" },
+  { name: "sw", x: 0, y: 1, cursor: "nesw-resize", label: "调整左下角" },
+  { name: "w", x: 0, y: 0.5, cursor: "ew-resize", label: "调整左边缘" },
 ];
 
 export function FreeRevealMask({ regions, opacity }: { regions: readonly RevealRect[]; opacity?: number }) {
@@ -55,7 +55,7 @@ export function FreeRevealMask({ regions, opacity }: { regions: readonly RevealR
       </defs>
       <rect
         fill="black"
-        fillOpacity={opacity ?? "var(--free-reveal-mask-opacity, 0.3)"}
+        fillOpacity={opacity ?? "var(--free-reveal-mask-opacity, 0.4)"}
         height={VIEWBOX_SIZE}
         mask={`url(#${maskId})`}
         width={VIEWBOX_SIZE}
@@ -114,8 +114,9 @@ export function FreeRevealEditor({
   }, [onDraftRegionsChange, selectedIndex]);
 
   const visibleRegions = useMemo(() => [...committedRegions, ...draftRegions], [committedRegions, draftRegions]);
+  const selectedRegion = selectedIndex == null ? null : draftRegions[selectedIndex] ?? null;
 
-  function point(event: ReactPointerEvent<SVGSVGElement>) {
+  function point(event: { clientX: number; clientY: number }) {
     const bounds = svgRef.current?.getBoundingClientRect();
     if (!bounds) return { x: 0, y: 0 };
     return {
@@ -142,16 +143,16 @@ export function FreeRevealEditor({
   function beginMove(event: ReactPointerEvent<SVGRectElement>, index: number) {
     if (disabled || event.button !== 0) return;
     event.stopPropagation();
-    const start = point(event as unknown as ReactPointerEvent<SVGSVGElement>);
+    const start = point(event);
     operationRef.current = { type: "move", pointerId: event.pointerId, startX: start.x, startY: start.y, index, original: draftRegions[index] };
     setSelectedIndex(index);
     svgRef.current?.setPointerCapture(event.pointerId);
   }
 
-  function beginResize(event: ReactPointerEvent<SVGRectElement>, index: number, handle: ResizeHandle) {
+  function beginResize(event: ReactPointerEvent<HTMLElement>, index: number, handle: ResizeHandle) {
     if (disabled || event.button !== 0) return;
     event.stopPropagation();
-    const start = point(event as unknown as ReactPointerEvent<SVGSVGElement>);
+    const start = point(event);
     operationRef.current = { type: "resize", pointerId: event.pointerId, startX: start.x, startY: start.y, index, original: draftRegions[index], handle };
     svgRef.current?.setPointerCapture(event.pointerId);
   }
@@ -197,7 +198,7 @@ export function FreeRevealEditor({
   }
 
   return (
-    <div className="absolute inset-0" style={{ "--free-reveal-mask-opacity": 0.3 } as CSSProperties}>
+    <div className="absolute inset-0" style={{ "--free-reveal-mask-opacity": 0.4 } as CSSProperties}>
       <FreeRevealMask regions={visibleRegions} />
       <svg
         aria-label="自由框选区域"
@@ -242,30 +243,31 @@ export function FreeRevealEditor({
                 height={region.height * VIEWBOX_SIZE}
                 onPointerDown={(event) => beginMove(event, index)}
               />
-              {selected && !disabled
-                ? HANDLES.map((handle) => (
-                    <rect
-                      fill="#fff"
-                      key={handle.name}
-                      stroke="#e11d48"
-                      strokeWidth="2"
-                      style={{ cursor: handle.cursor }}
-                      vectorEffect="non-scaling-stroke"
-                      x={(region.x + region.width * handle.x) * VIEWBOX_SIZE - 7}
-                      y={(region.y + region.height * handle.y) * VIEWBOX_SIZE - 7}
-                      width="14"
-                      height="14"
-                      onPointerDown={(event) => beginResize(event, index, handle.name)}
-                    />
-                  ))
-                : null}
             </g>
           );
         })}
       </svg>
+      {!disabled && selectedIndex != null && selectedRegion
+        ? HANDLES.map((handle) => (
+            <button
+              aria-label={handle.label}
+              className="absolute z-20 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 touch-none items-center justify-center rounded-full bg-transparent p-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+              key={handle.name}
+              style={{
+                cursor: handle.cursor,
+                left: `${(selectedRegion.x + selectedRegion.width * handle.x) * 100}%`,
+                top: `${(selectedRegion.y + selectedRegion.height * handle.y) * 100}%`,
+              }}
+              type="button"
+              onPointerDown={(event) => beginResize(event, selectedIndex, handle.name)}
+            >
+              <span className="block h-3 w-3 rounded-full border-2 border-rose-600 bg-white shadow-sm" />
+            </button>
+          ))
+        : null}
       {!disabled && selectedIndex != null ? (
         <button
-          className="absolute right-3 top-3 z-10 rounded-md border border-white/70 bg-slate-950/75 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          className="absolute right-3 top-3 z-30 rounded-md border border-white/70 bg-slate-950/75 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
           type="button"
           onClick={deleteSelected}
         >
