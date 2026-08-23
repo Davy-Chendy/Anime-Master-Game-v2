@@ -105,6 +105,7 @@ const MUTATION_NAMES = new Set([
   "submitAnswer",
   "submitForfeitAnswer",
   "autoForfeitExpiredRound",
+  "endRoundEarly",
   "cancelForfeitAnswer",
   "submitBuzzerAnswer",
   "judgeBuzzerAnswer",

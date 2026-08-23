@@ -396,6 +396,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     roundSeconds: gameSession.round_seconds ?? DEFAULT_ROUND_SECONDS,
     roundScores,
     roundStartedAt: gameSession.round_started_at,
+    roundEndedEarlyAt: null,
     serverNow: new Date().toISOString(),
     teamBattleState,
     createdAt: gameSession.created_at,
@@ -4810,6 +4811,15 @@ export async function autoForfeitExpiredRound(params: {
   await forfeitMissingRoundActions(currentGameSession, currentSession);
 
   return { gameSession: currentSession };
+}
+
+export async function endRoundEarly(_params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+} & ServerTimedActionParams): Promise<{ gameSession: GameSession }> {
+  throw new Error("当前进行中的旧版本游戏不支持提前结束本轮，请在下一局使用。");
 }
 
 export async function submitAnswer(params: {

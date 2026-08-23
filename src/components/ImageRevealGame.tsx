@@ -14,6 +14,7 @@ import {
   completeTeamBattleBlockSelection,
   confirmRevealBlocks,
   confirmRevealRegions,
+  endRoundEarly,
   finalizeTeamBattleVote,
   getGameBootstrapSnapshot,
   getQuestionSetById,
@@ -1358,6 +1359,7 @@ export function ImageRevealGame({
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
+  const [isEndingRoundEarly, setIsEndingRoundEarly] = useState(false);
   const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
   const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingTeamBattleTurn, setIsAdvancingTeamBattleTurn] = useState(false);
@@ -2401,8 +2403,9 @@ export function ImageRevealGame({
   const teamBattleState = gameSession?.teamBattleState ?? null;
   const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
-  const isRoundActive = hasRoundStarted && remainingSeconds > 0;
-  const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
+  const isRoundEndedEarly = Boolean(gameSession?.roundEndedEarlyAt);
+  const isRoundActive = hasRoundStarted && remainingSeconds > 0 && !isRoundEndedEarly;
+  const isRoundEnded = hasRoundStarted && (remainingSeconds === 0 || isRoundEndedEarly);
   const displayRound = currentRound;
   const displayScore =
     gameSession?.roundScores[displayRound - 1] ?? Math.max(1, maxRevealRounds - displayRound + 1);
@@ -2862,6 +2865,16 @@ export function ImageRevealGame({
   }
 
   const areAllGuessersCorrect = eligibleGuesserIds.length > 0 && eligibleGuesserIds.every((guesserId) => correctPlayerSet.has(guesserId));
+  const canEndRoundEarly =
+    isPresenter &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    isRoundActive &&
+    activeGuesserIds.length > 0 &&
+    !allActiveGuessersUsedRoundChance &&
+    !hasFirstCorrectAnswer &&
+    !areAllGuessersCorrect &&
+    Boolean(gameSession);
   const isRoundCompleteForDisplay =
     hasRoundStarted &&
     (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect);
@@ -4060,6 +4073,27 @@ export function ImageRevealGame({
     }
   }
 
+  async function handleEndRoundEarly() {
+    if (!gameSession || !canEndRoundEarly) return;
+    const unansweredCount = Math.max(0, standardTotalCount - standardSubmittedCount);
+    if (!window.confirm(`还有 ${unansweredCount} 名玩家未作答。提前结束后，他们将自动放弃本轮，是否继续？`)) return;
+
+    setIsEndingRoundEarly(true);
+    try {
+      const ended = await endRoundEarly({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+        expectedQuestionIndex: gameSession.currentQuestionIndex,
+        expectedRevealRound: gameSession.currentRevealRound,
+      });
+      applyRoundSnapshotFromResult(ended) || applyGameSession(ended.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提前结束本轮失败");
+    } finally {
+      setIsEndingRoundEarly(false);
+    }
+  }
+
   async function performSkipQuestion() {
     if (!gameSession) {
       return;
@@ -5192,8 +5226,15 @@ export function ImageRevealGame({
                   按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 查看玩家视角
                 </p>
               ) : null}
-              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
-                {isSettlingBuzzerRound ? "处理中…" : standardSettleActionText}
+              <Button
+                type="button"
+                variant={canEndRoundEarly ? "secondary" : undefined}
+                onClick={canEndRoundEarly ? handleEndRoundEarly : handleSettleBuzzerRound}
+                disabled={canEndRoundEarly ? isEndingRoundEarly : !canSettleBuzzerRound || isSettlingBuzzerRound}
+              >
+                {canEndRoundEarly
+                  ? isEndingRoundEarly ? "结束中…" : "提前结束本轮"
+                  : isSettlingBuzzerRound ? "处理中…" : standardSettleActionText}
               </Button>
               <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
                 {isSkippingQuestion ? "跳过中…" : "跳过本题"}
@@ -5413,6 +5454,12 @@ export function ImageRevealGame({
           </>
         )}
       </div>
+
+      {!isTeamBattleMode && gameSession?.roundEndedEarlyAt && hasRoundStarted ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-center text-sm font-semibold text-amber-800" role="status">
+          出题人已提前结束本轮，未作答玩家已自动放弃
+        </p>
+      ) : null}
 
       <div className={playingGridClass}>
         {scorePanel}

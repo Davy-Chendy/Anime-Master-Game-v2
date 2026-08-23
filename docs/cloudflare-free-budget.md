@@ -140,6 +140,14 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 以 50 人 × 30 题、每题 3 轮估算，自由框选与旧格子玩法同为 90 次出题人揭图 mutation、90 次阶段广播、90 次回合 Alarm 和约 90 行 phase-boundary checkpoint；不会新增 D1 热路径读写。每天 60 局相同玩法共 5,400 条入站 WebSocket 消息，按 20:1 折算约 270 个 DO 请求（0.27% 日额度），这些请求原本也存在于格子揭露基线中，属于 payload 形态变化而非新增请求。最终投影仍更新既有 `game_sessions` 行，只多写同一语句中的一个 JSON 列；大厅开关复用既有房间设置行更新。`0027_personal_free_reveal.sql` 不新增索引，因此运行时不增加索引维护路径；migration 仅为既有房间和游戏会话各增加一个有界列，部署时应避开 D1 写入紧张窗口。
 
+## 出题人提前结束个人轮次预算（2026-08-23）
+
+每次确认只由出题人通过已有 Room DO WebSocket 发送 1 条 `endRoundEarly` mutation。Room DO 在同一次串行事件中校验出题人、题号、轮次和权威 deadline，批量在内存 aggregate 中补齐所有未行动玩家的自动放弃，强制写入 1 行 active-game phase-boundary checkpoint，清除原 deadline，并把游戏会话状态和有界行动进度各广播一次。50 人在线时仍只有 1 条入站消息和 1 次聚合写入，最多产生两类 payload 各 50 次出站投递；不会产生 50 条 RPC、逐玩家 SQL、snapshot 补拉或 D1/R2/Images 操作。
+
+该 checkpoint、未行动放弃广播和 Alarm 清理替代本轮原本会发生的自然 deadline 关闭，不叠加新的轮次边界写入或 Alarm 执行；提前结束不设置新 Alarm，成功后取消尚未触发的原 Alarm。相对自然等待路径，唯一新增计量是出题人的入站 WebSocket mutation。按默认每题 3 轮且 30 题都提前结束的保守上限，每局新增 90 条入站消息，60 局每天新增 5,400 条，按 20:1 折算约 270 个 DO 请求，占每日 100,000 次额度的 0.27%。按设置允许的极端每题 10 轮计算，每局最多 300 条、每天 18,000 条，折算约 900 个 DO 请求，占 0.9%；对应自然 Alarm 执行最多减少同样的 300 次/局和 18,000 次/天。DO SQLite changed rows、D1 读写、最终投影语句和索引维护量与自然截止基线相同，因此无需修改 `scripts/authority-write-budget.mjs`。
+
+断线重连通过 active-game JSON 中的可选 `roundEndedEarlyAt` 和已有自动放弃恢复，不查询 D1，也不重新发送结束 mutation。Outbox 重放由 actionId/clientSeq 和持久化 committed seq 幂等返回；重复、旧轮、全员已行动以及与 Alarm 竞争失败的请求不重复写状态或广播。字段位于既有 JSON aggregate，不新增 DO SQLite/D1 表、列、索引或 migration；永久 schema 错误的重试模型不变。
+
 ## 公开房间目录预算（2026-08-23）
 
 公开房间页只在首次进入或玩家点击“刷新房间”时读取，不轮询、不分页。Worker 按 runtime generation 和目录缓存版本构造规范化缓存键，使用 Cloudflare Cache API 在当前数据中心共享完整成功响应 60 秒；旧 `cursor`、无关 query 参数和请求 Origin 都不拆分数据缓存，CORS 头在命中后按当前请求追加。客户端响应保持 `no-store`，因此刷新仍会到达 Worker，但不会绕过服务端共享缓存。错误响应不缓存，空成功页正常缓存。Cache API 不跨数据中心复制，也不保证同一冷 key 的并发 miss 严格合并；实现不得用模块级可变 Promise 保存跨请求 I/O。

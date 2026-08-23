@@ -289,6 +289,7 @@ const SERVER_RECEIVED_AT_ACTION_NAMES = new Set([
   "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote",
   "autoForfeitExpiredRound",
+  "endRoundEarly",
   "settleBuzzerRound",
 ]);
 
@@ -313,6 +314,7 @@ const MUTATION_REGISTRY = {
   submitAnswer: { deadline: "none" },
   submitForfeitAnswer: { deadline: "none" },
   autoForfeitExpiredRound: { deadline: "authoritative-post-state" },
+  endRoundEarly: { deadline: "authoritative-post-state" },
   cancelForfeitAnswer: { deadline: "none" },
   submitBuzzerAnswer: { deadline: "none" },
   judgeBuzzerAnswer: { deadline: "authoritative-post-state" },
@@ -400,6 +402,7 @@ const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "confirmRevealBlocks",
   "confirmRevealRegions",
   "autoForfeitExpiredRound",
+  "endRoundEarly",
   "settleBuzzerRound",
   "completeTeamBattleBlockSelection",
   "finalizeTeamBattleVote",
@@ -437,7 +440,7 @@ const ROOM_AUTHORITY_GAME_NAMES = new Set<string>([
   "getAnswersForQuestion", "getAnswersForQuestionRound", "getAnswerForPlayerRound", "getBuzzerAnswersForQuestion",
   "getBuzzerAnswersForQuestionRound", "getBuzzerAnswerForPlayerRound", "getQuestionsByQuestionSetId",
   "confirmRevealBlocks", "confirmRevealRegions", "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "submitBuzzerAnswer",
-  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "completeTeamBattleBlockSelection", "submitTeamBattleRevealVote",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "autoForfeitExpiredRound", "endRoundEarly", "completeTeamBattleBlockSelection", "submitTeamBattleRevealVote",
   "submitTeamBattleGuessVote", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "updateQuestionLabel", "skipCurrentQuestion",
   "endCurrentGameEarly", "returnRoomToLobby",
@@ -490,12 +493,12 @@ const AUTHORITY_PROJECTION_BOUNDARY_NAMES = new Set<string>([
 ]);
 const AUTHORITY_HANDOFF_NAMES = new Set(["returnRoomToLobby", "cancelCurrentRound", "dissolveRoom"]);
 const AUTHORITY_JOURNALED_NAMES = new Set([
-  "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound",
+  "submitAnswer", "submitForfeitAnswer", "cancelForfeitAnswer", "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "endRoundEarly",
   "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer", "gradeAnswersAndAdvance",
   "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", "joinRoom", "leaveRoom", "kickPlayerFromRoom", "updatePlayerRole", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 const AUTHORITY_PERSIST_RESULT_NAMES = new Set([
-  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
+  "judgeBuzzerAnswer", "setAnswerJudgements", "markPendingRoundAnswersWrong", "settleBuzzerRound", "endRoundEarly", "completeTeamBattleBlockSelection", "finalizeTeamBattleVote", "judgeTeamBattleGuess", "advanceTeamBattleTurn", "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance", "advanceReviewedQuestion", "skipCurrentQuestion", "endCurrentGameEarly", ...AUTHORITY_HANDOFF_NAMES,
 ]);
 
