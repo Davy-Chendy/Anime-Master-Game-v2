@@ -11,5 +11,5 @@
     "strictNullChecks": false,
     "incremental": false
   },
-  "include": ["worker/**/*.ts", "src/types/**/*.ts", "src/lib/id.ts"]
+  "include": ["worker/**/*.ts", "src/types/**/*.ts", "src/lib/id.ts", "src/lib/freeRevealGeometry.ts"]
 }

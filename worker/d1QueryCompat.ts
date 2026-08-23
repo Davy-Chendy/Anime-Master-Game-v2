@@ -19,7 +19,7 @@ type OrderBy = {
 };
 
 const D1_MAX_BOUND_PARAMETERS_PER_QUERY = 100;
-const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores", "team_battle_state", "lobby_round_scores"]);
+const JSON_COLUMNS = new Set(["revealed_blocks", "personal_reveal_state", "round_scores", "team_battle_state", "lobby_round_scores"]);
 const BOOLEAN_COLUMNS = new Set(["is_host", "is_public"]);
 const UPDATED_AT_TABLES = new Set(["rooms", "question_sets", "question_set_ratings"]);
 const CREATED_AT_TABLES = new Set([

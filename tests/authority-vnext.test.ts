@@ -113,7 +113,7 @@ class SqliteProjectionD1 {
       CREATE INDEX players_room_role_idx ON players(room_id,role);
       CREATE TABLE questions(id TEXT PRIMARY KEY,label_text TEXT,label_source TEXT,label_source_answer_id TEXT,label_updated_by_player_id TEXT,label_updated_at TEXT);
       CREATE TABLE question_sets(id TEXT PRIMARY KEY,manifest_version INTEGER,manifest_revision INTEGER NOT NULL DEFAULT 0,manifest_json TEXT);
-      CREATE TABLE game_sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,current_question_index INTEGER NOT NULL,current_reveal_round INTEGER NOT NULL,revealed_blocks TEXT NOT NULL,team_battle_state TEXT,round_started_at TEXT,ended_at TEXT,completed_normally_at TEXT);
+      CREATE TABLE game_sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,current_question_index INTEGER NOT NULL,current_reveal_round INTEGER NOT NULL,revealed_blocks TEXT NOT NULL,personal_reveal_state TEXT,team_battle_state TEXT,round_started_at TEXT,ended_at TEXT,completed_normally_at TEXT);
       CREATE TABLE completed_question_set_plays(game_session_id TEXT PRIMARY KEY,question_set_id TEXT NOT NULL,completed_at TEXT NOT NULL);
       CREATE TABLE game_result_archives(game_session_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,question_set_id TEXT NOT NULL,archive_version INTEGER NOT NULL,completed_at TEXT NOT NULL,result_json TEXT NOT NULL);
       CREATE TABLE player_write_audit(kind TEXT NOT NULL,player_id TEXT NOT NULL);
@@ -169,7 +169,7 @@ function createSqliteProjectionAuthority(playerCount: number, questionCount = 1)
     );
   }
   for (const question of aggregate.questions) d1.db.prepare("INSERT INTO questions(id) VALUES(?)").run(question.id);
-  d1.db.prepare("INSERT INTO game_sessions VALUES(?,?,?,?,?,?,?,?,?)").run("g1", "PLAYING", 0, 1, "[]", null, null, null, null);
+  d1.db.prepare("INSERT INTO game_sessions VALUES(?,?,?,?,?,?,?,?,?,?)").run("g1", "PLAYING", 0, 1, "[]", null, null, null, null, null);
   d1.db.exec("DELETE FROM player_write_audit");
   return { ...created, d1 };
 }
@@ -1050,6 +1050,97 @@ test("confirm reveal requires a newly revealed block", () => {
   assert.match(result.error ?? "", /尚未打开/);
 });
 
+test("free reveal commits normalized regions once per round and preserves locked history", async () => {
+  const { state, authority } = createAuthority(2, fakeD1, 2);
+  const host = socketFor(state, "host");
+  const session = authority.getAggregate()!.gameSession!;
+  session.personalRevealState = { version: 1, mode: "FREE_RECT", regions: [], fullyRevealed: false };
+  const now = Date.now();
+  const firstAction = envelope("host", 1, "confirmRevealRegions", {
+    presenterPlayerId: "host",
+    regions: [{ x: 0.1, y: 0.2, width: 0.25, height: 0.3 }],
+  });
+  const opened = authority.handleMutation(host, firstAction, now);
+  assert.equal(opened.terminal, undefined);
+  assert.equal(session.personalRevealState?.regions.length, 1);
+  assert.equal(session.personalRevealState?.regions[0]?.id, `${firstAction.actionId}:0`);
+  assert.equal(session.roundStartedAt, new Date(now).toISOString());
+  assert.ok(authority.getDeadline());
+
+  const duplicate = authority.handleMutation(host, firstAction, now + 1);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(session.personalRevealState?.regions.length, 1);
+
+  session.roundStartedAt = null;
+  session.currentRevealRound = 2;
+  const redundant = authority.handleMutation(host, envelope("host", 2, "confirmRevealRegions", {
+    presenterPlayerId: "host",
+    regions: [{ x: 0.12, y: 0.22, width: 0.1, height: 0.1 }],
+  }), now + 2);
+  assert.equal(redundant.terminal, true);
+  assert.match(redundant.error ?? "", /未揭露/);
+  assert.equal(session.personalRevealState?.regions.length, 1);
+
+  const tooMany = authority.handleMutation(host, envelope("host", 3, "confirmRevealRegions", {
+    presenterPlayerId: "host",
+    regions: Array.from({ length: 17 }, (_, index) => ({ x: index / 100, y: 0.7, width: 0.005, height: 0.05 })),
+  }), now + 3);
+  assert.equal(tooMany.terminal, true);
+  assert.match(tooMany.error ?? "", /最多 16/);
+
+  const stale = authority.handleMutation(host, {
+    ...envelope("host", 4, "confirmRevealRegions", { presenterPlayerId: "host", regions: [{ x: 0.8, y: 0.8, width: 0.1, height: 0.1 }] }),
+    questionIndex: 1,
+  }, now + 4);
+  assert.equal(stale.terminal, true);
+  assert.match(stale.error ?? "", /题目已切换/);
+
+  await authority.forceCheckpoint(opened.forceCheckpoint ?? "phase-boundary");
+  state.sockets.length = 0;
+  const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+  await restored.restoreFromStorage();
+  assert.deepEqual(restored.getAggregate()?.gameSession?.personalRevealState?.regions, session.personalRevealState?.regions);
+});
+
+test("all personal modes can use free reveal and full review resets it for the next question", () => {
+  for (const gameMode of ["ROUND_REVEAL", "BUZZER_FIRST_CORRECT", "BUZZER_RANKED"] as const) {
+    const { state, authority } = createAuthority(1, fakeD1, 2);
+    const host = socketFor(state, "host");
+    const session = authority.getAggregate()!.gameSession!;
+    session.gameMode = gameMode;
+    session.personalRevealState = { version: 1, mode: "FREE_RECT", regions: [], fullyRevealed: false };
+    const opened = authority.handleMutation(host, envelope("host", 1, "confirmRevealRegions", {
+      presenterPlayerId: "host",
+      regions: [{ x: 0, y: 0, width: 1, height: 1 }],
+    }), Date.now());
+    assert.equal(opened.terminal, undefined);
+    assert.equal(session.personalRevealState.fullyRevealed, true);
+    session.roundStartedAt = null;
+    const advanced = authority.handleMutation(host, envelope("host", 2, "advanceReviewedQuestion", {
+      presenterPlayerId: "host",
+      expectedQuestionIndex: 0,
+    }), Date.now() + 1);
+    assert.equal(advanced.terminal, undefined);
+    assert.equal(session.currentQuestionIndex, 1);
+    assert.deepEqual(session.personalRevealState, { version: 1, mode: "FREE_RECT", regions: [], fullyRevealed: false });
+    assert.deepEqual(session.revealedBlocks, []);
+  }
+});
+
+test("team battle rejects free-region commits even if a malformed snapshot contains the mode", () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  const session = authority.getAggregate()!.gameSession!;
+  session.gameMode = "TEAM_BATTLE";
+  session.personalRevealState = { version: 1, mode: "FREE_RECT", regions: [], fullyRevealed: false };
+  const rejected = authority.handleMutation(host, envelope("host", 1, "confirmRevealRegions", {
+    presenterPlayerId: "host",
+    regions: [{ x: 0, y: 0, width: 0.2, height: 0.2 }],
+  }), Date.now());
+  assert.equal(rejected.terminal, true);
+  assert.match(rejected.error ?? "", /没有开启自由框选/);
+});
+
 test("direct GameSession mutations preserve their public RPC response contract", () => {
   const { state, authority } = createAuthority(2);
   const host = socketFor(state, "host");
@@ -1432,6 +1523,59 @@ test("game completion broadcasts both final results and GAME_RESULT room state",
     assert.equal(roomDelta.room.status, "GAME_RESULT");
     assert.equal(roomDelta.room.currentGameId, "g1");
   }
+});
+
+test("a new-action retry after game completion is idempotent and commits its sequence", async () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  enterReview(authority);
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }, "finish-game"), Date.now());
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+  const archiveWrites = state.storage.sql.archiveWrites;
+
+  const retried = authority.handleMutation(host, envelope("host", 2, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }, "retry-finished-game"), Date.now() + 1);
+  const retriedData = retried.data as { gameSession?: GameSession; room?: Room | null };
+  assert.equal(retried.error, undefined);
+  assert.equal(retried.forceCheckpoint, "replay");
+  assert.equal(retriedData.gameSession?.status, "GAME_RESULT");
+  assert.equal(retriedData.room?.status, "GAME_RESULT");
+  assert.equal(state.storage.sql.archiveWrites, archiveWrites);
+
+  await authority.forceCheckpoint(retried.forceCheckpoint!);
+  assert.equal(authority.getAggregate()?.committedSeqByActor.host, 2);
+  assert.equal(state.storage.sql.archiveWrites, archiveWrites);
+});
+
+test("an inactive-game terminal rejection does not leave a clientSeq gap", async () => {
+  const { state, authority } = createAuthority(1);
+  const host = socketFor(state, "host");
+  enterReview(authority);
+  const ended = authority.handleMutation(host, envelope("host", 1, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), Date.now());
+  await authority.forceCheckpoint(ended.forceCheckpoint ?? "game-end", true);
+
+  const rejected = authority.handleMutation(host, envelope("host", 2, "confirmRevealBlocks", {
+    presenterPlayerId: "host",
+    selectedBlocks: [0],
+  }), Date.now() + 1);
+  assert.equal(rejected.terminal, true);
+  assert.match(rejected.error ?? "", /游戏未处于活动状态/);
+  assert.equal(authority.getAggregate()?.seenSeqByActor.host, 2);
+
+  const next = authority.handleMutation(host, envelope("host", 3, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }, "retry-after-rejection"), Date.now() + 2);
+  assert.equal(next.error, undefined);
+  assert.equal(next.forceCheckpoint, "replay");
 });
 
 test("completed games without answering participants do not increment question-set plays", async () => {

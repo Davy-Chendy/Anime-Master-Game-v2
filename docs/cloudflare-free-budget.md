@@ -132,6 +132,14 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 存在至少一名答题参赛者的正常完成局保持原模型：幂等插入 1 条 `completed_question_set_plays`，随后由既有 D1 trigger 更新 1 条 `question_sets` 及其相关索引。只有出题人，或只有出题人与观战者的正常完成局不再执行这两次数据行写入，因此每天 60 局基线不增加任何用量；若 60 局全部为无答题者流程，最多减少 60 条完成记录插入与 60 条题集更新。索引维护的实际 rowsWritten 仍以 D1 Analytics 为准，`scripts/authority-write-budget.mjs` 的多人极端单局模型不变。
 
+## 个人模式自由框选预算（2026-08-23）
+
+自由框选只替换个人模式每轮的揭图意图。拖动、移动、缩放和删除均保留在出题人本地；点击“打开区域”时才通过已有 Room DO WebSocket 发送 1 条 `confirmRevealRegions` mutation。Room DO 一次校验并追加本轮最多 16 个归一化矩形，设置与格子揭露相同的回合 deadline，执行 1 次 phase-boundary checkpoint，并广播同一份游戏会话增量。普通玩家不确认、不补拉、不轮询，因此 50 人在线不会把一次框选提交放大成 50 个入站请求。
+
+每题区域状态上限为 `16 × maxRevealRounds`，当前设置上限下最多 160 个矩形。坐标量化为四位小数，正常 action ID 下序列化状态约为十余 KiB，仍随既有 active-game JSON、阶段广播和重连 snapshot 传输；测试要求单题矩形状态不超过 32KiB，并继续受 active-game 与 Attachment 既有硬预算约束。草稿不进入 WebSocket Attachment，也不触发 checkpoint。重复 actionId/clientSeq、旧题号和完全落在历史揭露范围内的提交由 Room DO 幂等拒绝，不追加状态或建立额外 Alarm。
+
+以 50 人 × 30 题、每题 3 轮估算，自由框选与旧格子玩法同为 90 次出题人揭图 mutation、90 次阶段广播、90 次回合 Alarm 和约 90 行 phase-boundary checkpoint；不会新增 D1 热路径读写。每天 60 局相同玩法共 5,400 条入站 WebSocket 消息，按 20:1 折算约 270 个 DO 请求（0.27% 日额度），这些请求原本也存在于格子揭露基线中，属于 payload 形态变化而非新增请求。最终投影仍更新既有 `game_sessions` 行，只多写同一语句中的一个 JSON 列；大厅开关复用既有房间设置行更新。`0027_personal_free_reveal.sql` 不新增索引，因此运行时不增加索引维护路径；migration 仅为既有房间和游戏会话各增加一个有界列，部署时应避开 D1 写入紧张窗口。
+
 ## 公开房间目录预算（2026-08-23）
 
 公开房间页只在首次进入或玩家点击“刷新房间”时读取，不轮询、不分页。Worker 按 runtime generation 和目录缓存版本构造规范化缓存键，使用 Cloudflare Cache API 在当前数据中心共享完整成功响应 60 秒；旧 `cursor`、无关 query 参数和请求 Origin 都不拆分数据缓存，CORS 头在命中后按当前请求追加。客户端响应保持 `no-store`，因此刷新仍会到达 Worker，但不会绕过服务端共享缓存。错误响应不缓存，空成功页正常缓存。Cache API 不跨数据中心复制，也不保证同一冷 key 的并发 miss 严格合并；实现不得用模块级可变 Promise 保存跨请求 I/O。

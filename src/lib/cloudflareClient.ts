@@ -101,6 +101,7 @@ const MUTATION_NAMES = new Set([
   "selectTeamForPlayer",
   "startGameWithQuestionSet",
   "confirmRevealBlocks",
+  "confirmRevealRegions",
   "submitAnswer",
   "submitForfeitAnswer",
   "autoForfeitExpiredRound",

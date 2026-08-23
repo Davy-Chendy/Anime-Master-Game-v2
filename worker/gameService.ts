@@ -2,8 +2,17 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createRoomCode } from "../src/lib/id";
 import { CURRENT_ROOM_RUNTIME_GENERATION } from "../src/lib/roomRuntime";
 import {
+  createPersonalRevealState,
+  normalizePersonalRevealMode,
+  normalizePersonalRevealState,
+  normalizeRevealRect,
+  revealRectsAddVisibleArea,
+  revealRectsCoverImage,
+} from "../src/lib/freeRevealGeometry";
+import {
   DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
   DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
+  MAX_FREE_REVEAL_REGIONS_PER_ROUND,
   MAX_TEAM_BATTLE_GUESS_LENGTH,
   MAX_ROOM_NOTICE_LENGTH,
   TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS,
@@ -43,6 +52,9 @@ import type {
   Player,
   PlayerRole,
   PlayerScore,
+  PersonalRevealMode,
+  RevealRect,
+  RevealRegion,
   Question,
   QuestionResult,
   QuestionSet,
@@ -279,6 +291,7 @@ function toRoom(room: DbRoom, players: DbPlayer[] = getRoomStatePlayers(room)): 
     spectatorCapacity: normalizeSpectatorCapacity(room.lobby_spectator_capacity),
     preparedQuestionSource: room.prepared_question_source ?? null,
     gameMode: room.lobby_game_mode ?? "ROUND_REVEAL",
+    personalRevealMode: normalizePersonalRevealMode(room.lobby_personal_reveal_mode),
     maxRevealRounds,
     roundSeconds: normalizeRoundSeconds(room.lobby_round_seconds),
     roundScores: normalizeRoundScores(room.lobby_round_scores, maxRevealRounds),
@@ -378,6 +391,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     currentQuestionIndex: gameSession.current_question_index,
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks,
+    personalRevealState: normalizePersonalRevealState(gameSession.personal_reveal_state),
     maxRevealRounds: gameSession.max_reveal_rounds ?? 3,
     roundSeconds: gameSession.round_seconds ?? DEFAULT_ROUND_SECONDS,
     roundScores,
@@ -1885,6 +1899,7 @@ export async function createRoom(playerId: string, nickname: string, options: Cr
         lobby_team_reveal_vote_seconds: DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS,
         lobby_team_guess_vote_seconds: DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS,
         lobby_team_presenter_block_enabled: 0,
+        lobby_personal_reveal_mode: "GRID",
         lobby_spectator_question_preview_enabled: 1,
         lobby_spectator_player_answers_enabled: 1,
         lobby_player_capacity: MAX_PLAYERS_PER_ROOM,
@@ -2875,6 +2890,7 @@ export async function updateRoomGameSettings(params: {
   roomId: string;
   hostPlayerId: string;
   gameMode: GameMode;
+  personalRevealMode?: PersonalRevealMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
@@ -2939,12 +2955,14 @@ export async function updateRoomGameSettings(params: {
   if (playerCapacity < playerCount) {
     throw new Error(`当前已有 ${playerCount} 名玩家，玩家人数上限不能低于 ${playerCount}。`);
   }
+  const personalRevealMode = normalizePersonalRevealMode(params.personalRevealMode ?? currentRoom.lobby_personal_reveal_mode);
   if (spectatorCapacity < spectatorCount) {
     throw new Error(`当前已有 ${spectatorCount} 名观战者，观战人数上限不能低于 ${spectatorCount}。`);
   }
   const teamAssignmentMode = normalizeTeamAssignmentMode(params.teamAssignmentMode ?? currentRoom.lobby_team_assignment_mode);
   const roomUpdates: Partial<DbRoom> = {
     lobby_game_mode: params.gameMode,
+    lobby_personal_reveal_mode: personalRevealMode,
     lobby_max_reveal_rounds: maxRevealRounds,
     lobby_round_seconds: roundSeconds,
     lobby_round_scores: roundScores,
@@ -3044,6 +3062,7 @@ export async function startGameWithQuestionSet(params: {
   presenterPlayerId: string;
   questionSetId: string;
   gameMode?: GameMode;
+  personalRevealMode?: PersonalRevealMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
@@ -3160,6 +3179,9 @@ export async function startGameWithQuestionSet(params: {
     room.lobby_team_presenter_block_enabled === 1 || room.lobby_team_presenter_block_enabled === true
   );
   const gameMode = isGameMode(params.gameMode) ? params.gameMode : room.lobby_game_mode ?? "ROUND_REVEAL";
+  const personalRevealMode = gameMode === "TEAM_BATTLE"
+    ? "GRID"
+    : normalizePersonalRevealMode(params.personalRevealMode ?? room.lobby_personal_reveal_mode);
   const players = roomPlayers;
   const activeGamePlayers = players.filter(isGamePlayer);
   const presenter = activeGamePlayers.find((player) => player.id === params.presenterPlayerId);
@@ -3205,6 +3227,7 @@ export async function startGameWithQuestionSet(params: {
     current_question_index: 0,
     current_reveal_round: 1,
     revealed_blocks: [],
+    personal_reveal_state: createPersonalRevealState(personalRevealMode),
     max_reveal_rounds: maxRevealRounds,
     round_seconds: roundSeconds,
     round_scores: roundScores,
@@ -3543,6 +3566,10 @@ export async function confirmRevealBlocks(params: {
     throw new Error("打开方块失败：当前游戏不存在，或你不是出题人。");
   }
 
+  if ((currentGameSession.game_mode ?? "ROUND_REVEAL") !== "TEAM_BATTLE" && normalizePersonalRevealState(currentGameSession.personal_reveal_state).mode === "FREE_RECT") {
+    throw new Error("当前游戏已开启自由框选。");
+  }
+
   const roundStartedAt = currentGameSession.round_started_at;
   if (roundStartedAt) {
     throw new Error("本轮尚未结算，请先判定答案或点击进入下一轮。");
@@ -3556,7 +3583,7 @@ export async function confirmRevealBlocks(params: {
   });
 
   if (allGuessersCorrect) {
-    return revealQuestionForReview(currentGameSession.id);
+    return revealQuestionForReview(currentGameSession);
   }
 
   const revealedBlocks = toGameSession(currentGameSession).revealedBlocks;
@@ -3591,6 +3618,63 @@ export async function confirmRevealBlocks(params: {
     throw new Error("打开方块失败：游戏状态已变化，请刷新后重试。");
   }
 
+  return toGameSession(updatedGameSession);
+}
+
+export async function confirmRevealRegions(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  regions: RevealRect[];
+}) {
+  assertD1Env();
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+  if (currentError) throw new Error(currentError.message);
+  if (!currentGameSession) throw new Error("打开区域失败：当前游戏不存在，或你不是出题人。");
+  if (currentGameSession.round_started_at) throw new Error("本轮尚未结算，请先判定答案或点击进入下一轮。");
+
+  const currentState = normalizePersonalRevealState(currentGameSession.personal_reveal_state);
+  if ((currentGameSession.game_mode ?? "ROUND_REVEAL") === "TEAM_BATTLE" || currentState.mode !== "FREE_RECT") {
+    throw new Error("当前游戏没有开启自由框选。");
+  }
+  const allGuessersCorrect = await areAllGuessersCorrectForQuestion({
+    roomId: currentGameSession.room_id,
+    gameSessionId: currentGameSession.id,
+    questionIndex: currentGameSession.current_question_index,
+    presenterPlayerId: currentGameSession.presenter_player_id,
+  });
+  if (allGuessersCorrect) return revealQuestionForReview(currentGameSession);
+  if (!Array.isArray(params.regions) || params.regions.length < 1) throw new Error("请先框选区域。");
+  if (params.regions.length > MAX_FREE_REVEAL_REGIONS_PER_ROUND) throw new Error("每轮最多 16 个区域。");
+  const normalized = params.regions.map(normalizeRevealRect);
+  if (normalized.some((region) => region == null)) throw new Error("区域无效，请重新选择。");
+  const additions = normalized as RevealRect[];
+  if (currentState.regions.length + additions.length > MAX_FREE_REVEAL_REGIONS_PER_ROUND * currentGameSession.max_reveal_rounds) {
+    throw new Error("本题区域数量已达到上限。");
+  }
+  if (!revealRectsAddVisibleArea(currentState.regions, additions)) throw new Error("请选择未揭露的区域。");
+
+  const committed = additions.map((region, index) => ({
+    id: `legacy:${crypto.randomUUID()}:${index}`,
+    ...region,
+  } satisfies RevealRegion));
+  const nextRegions = [...currentState.regions, ...committed];
+  const nextState = { ...currentState, regions: nextRegions, fullyRevealed: revealRectsCoverImage(nextRegions) };
+  const { data: updatedGameSession, error } = await d1
+    .from("game_sessions")
+    .update({ personal_reveal_state: nextState, round_started_at: new Date().toISOString() })
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .select()
+    .maybeSingle<DbGameSession>();
+  if (error) throw new Error(error.message);
+  if (!updatedGameSession) throw new Error("打开区域失败：游戏状态已变化，请刷新后重试。");
   return toGameSession(updatedGameSession);
 }
 
@@ -4569,14 +4653,21 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
   });
 }
 
-async function revealQuestionForReview(gameSessionId: string) {
+async function revealQuestionForReview(currentGameSession: DbGameSession) {
+  const currentRevealState = normalizePersonalRevealState(currentGameSession.personal_reveal_state);
+  const personalRevealState = currentRevealState.mode === "FREE_RECT"
+    ? { ...currentRevealState, fullyRevealed: true }
+    : currentRevealState;
   const { data: reviewedGameSession, error } = await d1
     .from("game_sessions")
     .update({
-      revealed_blocks: ALL_REVEALED_BLOCKS,
+      revealed_blocks: currentRevealState.mode === "FREE_RECT"
+        ? toGameSession(currentGameSession).revealedBlocks
+        : ALL_REVEALED_BLOCKS,
+      personal_reveal_state: personalRevealState,
       round_started_at: null,
     })
-    .eq("id", gameSessionId)
+    .eq("id", currentGameSession.id)
     .select()
     .single<DbGameSession>();
 
@@ -4663,7 +4754,7 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession, receiv
     roundActionState.guesserIds.every((guesserId) => roundActionState.correctSet.has(guesserId));
 
   if (allPlayersCorrect || (currentSession.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrectAnswer)) {
-    return revealQuestionForReview(currentGameSession.id);
+    return revealQuestionForReview(currentGameSession);
   }
 
   if (roundActionState.hasPendingAnswers) {
@@ -4674,7 +4765,7 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession, receiv
 
   if (roundEnded || canSettleBecauseAllChancesUsed) {
     if (currentRound >= currentSession.maxRevealRounds) {
-      return revealQuestionForReview(currentGameSession.id);
+      return revealQuestionForReview(currentGameSession);
     }
 
     return settleRevealRoundForNextSelection(currentGameSession);
@@ -5378,7 +5469,7 @@ export async function setAnswerJudgements(params: {
   const hasFirstCorrect =
     currentSession.gameMode === "BUZZER_FIRST_CORRECT" &&
     questionResults.some((result) => result.scoredRound === currentGameSession.current_reveal_round);
-  const gameSession = hasFirstCorrect ? await revealQuestionForReview(currentGameSession.id) : currentSession;
+  const gameSession = hasFirstCorrect ? await revealQuestionForReview(currentGameSession) : currentSession;
 
   return { gameSession, judgedAnswers, scores, questionResults };
 }
@@ -5571,7 +5662,7 @@ export async function judgeBuzzerAnswer(params: {
 
   const nextGameSession =
     params.isCorrect && currentSession.gameMode === "BUZZER_FIRST_CORRECT"
-      ? await revealQuestionForReview(currentGameSession.id)
+      ? await revealQuestionForReview(currentGameSession)
       : currentSession;
   const scoringDelta = params.isCorrect
     ? await Promise.all([
@@ -6331,7 +6422,7 @@ export async function gradeAnswersAndAdvance(params: {
   const allPlayersCorrect = eligiblePlayerIds.length > 0 && eligiblePlayerIds.every((guesserId) => correctSet.has(guesserId));
 
   if (allPlayersCorrect) {
-    const reviewedGameSession = await revealQuestionForReview(currentGameSession.id);
+    const reviewedGameSession = await revealQuestionForReview(currentGameSession);
 
     return {
       gameSession: reviewedGameSession,
@@ -6645,8 +6736,13 @@ export async function advanceReviewedQuestion(params: {
   }
 
   const currentSession = toGameSession(currentGameSession);
+  const currentPersonalRevealState = normalizePersonalRevealState(currentSession.personalRevealState);
   const isReviewingQuestion =
-    !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
+    !currentSession.roundStartedAt && (
+      currentSession.gameMode !== "TEAM_BATTLE" && currentPersonalRevealState.mode === "FREE_RECT"
+        ? currentPersonalRevealState.fullyRevealed
+        : currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length
+    );
 
   if (!isReviewingQuestion) {
     throw new Error("当前还没有进入完整图片复盘阶段，不能进入下一题。");
@@ -6681,6 +6777,7 @@ export async function advanceReviewedQuestion(params: {
       current_question_index: nextQuestionIndex,
       current_reveal_round: 1,
       revealed_blocks: [],
+      personal_reveal_state: createPersonalRevealState(currentSession.gameMode === "TEAM_BATTLE" ? "GRID" : currentPersonalRevealState.mode),
       team_battle_state: nextTeamBattleState,
       round_started_at: null,
     })
@@ -6772,8 +6869,13 @@ export async function updateQuestionLabel(params: {
   }
 
   const currentSession = toGameSession(currentGameSession);
+  const currentPersonalRevealState = normalizePersonalRevealState(currentSession.personalRevealState);
   const isReviewingQuestion =
-    !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
+    !currentSession.roundStartedAt && (
+      currentSession.gameMode !== "TEAM_BATTLE" && currentPersonalRevealState.mode === "FREE_RECT"
+        ? currentPersonalRevealState.fullyRevealed
+        : currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length
+    );
 
   if (!isReviewingQuestion) {
     throw new Error("当前还没有进入完整图片复盘阶段，不能填写正确答案。");
@@ -6987,6 +7089,7 @@ export async function skipCurrentQuestion(params: {
       current_question_index: nextQuestionIndex,
       current_reveal_round: 1,
       revealed_blocks: [],
+      personal_reveal_state: createPersonalRevealState(currentSession.gameMode === "TEAM_BATTLE" ? "GRID" : currentPersonalRevealState.mode),
       team_battle_state: nextTeamBattleState,
       round_started_at: null,
     })

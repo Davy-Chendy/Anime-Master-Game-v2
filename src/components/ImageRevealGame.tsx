@@ -4,13 +4,16 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { CSSProperties, ReactNode, SVGProps } from "react";
 import { createPortal, unstable_batchedUpdates } from "react-dom";
 import { Button } from "@/components/Button";
+import { FreeRevealEditor, FreeRevealMask } from "@/components/FreeRevealEditor";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic, updateGameSessionRealtimeQuestion } from "@/lib/cloudflareClient";
+import { normalizePersonalRevealState } from "@/lib/freeRevealGeometry";
 import {
   advanceTeamBattleTurn,
   advanceReviewedQuestion,
   cancelForfeitAnswer,
   completeTeamBattleBlockSelection,
   confirmRevealBlocks,
+  confirmRevealRegions,
   finalizeTeamBattleVote,
   getGameBootstrapSnapshot,
   getQuestionSetById,
@@ -31,6 +34,7 @@ import {
 } from "@/lib/cloudflareRooms";
 import { getTeamBattleViewerAccess } from "@/lib/teamBattleView";
 import { GAME_MODE_LABELS } from "@/lib/gameModeLabels";
+import { MAX_FREE_REVEAL_REGIONS_PER_ROUND } from "@/types/game";
 import type {
   Answer,
   BuzzerAnswer,
@@ -47,6 +51,7 @@ import type {
   QuestionSetCreationMethod,
   QuestionResult,
   RealtimeDelta,
+  RevealRect,
   RoundSnapshot,
   Room,
   TeamBattleGuessVote,
@@ -231,6 +236,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
           ),
         ).sort((a, b) => a - b)
       : [],
+    personalRevealState: normalizePersonalRevealState(gameSession.personal_reveal_state),
     maxRevealRounds: gameSession.max_reveal_rounds ?? 3,
     roundSeconds: gameSession.round_seconds ?? DEFAULT_ROUND_SECONDS,
     roundScores,
@@ -1293,6 +1299,26 @@ function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageE
   }
 }
 
+function drawRevealedRegionsOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, regions: readonly RevealRect[], fullyRevealed: boolean) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  if (fullyRevealed) {
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return;
+  }
+  for (const region of regions) {
+    const sourceX = region.x * image.naturalWidth;
+    const sourceY = region.y * image.naturalHeight;
+    const sourceWidth = region.width * image.naturalWidth;
+    const sourceHeight = region.height * image.naturalHeight;
+    context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, sourceX, sourceY, sourceWidth, sourceHeight);
+  }
+}
+
 export function ImageRevealGame({
   room,
   playerId,
@@ -1306,6 +1332,7 @@ export function ImageRevealGame({
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
+  const [draftRevealRegions, setDraftRevealRegions] = useState<RevealRect[]>([]);
   const [teamSelectedBlocks, setTeamSelectedBlocks] = useState<number[]>([]);
   const [teamDisabledBlockDraft, setTeamDisabledBlockDraft] = useState<number[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
@@ -1873,6 +1900,7 @@ export function ImageRevealGame({
         applyRoundSnapshot(delta.snapshot);
         setImageLoadFailed(false);
         setSelectedBlocks([]);
+        setDraftRevealRegions([]);
         return;
       }
 
@@ -1880,6 +1908,7 @@ export function ImageRevealGame({
         applyGameSessionDelta(delta.gameSession);
         setImageLoadFailed(false);
         setSelectedBlocks([]);
+        setDraftRevealRegions([]);
         return;
       }
 
@@ -2202,6 +2231,10 @@ export function ImageRevealGame({
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
+    setDraftRevealRegions([]);
+  }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound, gameSession?.roundStartedAt]);
+
+  useEffect(() => {
     const updateRoundClock = () => {
       const estimatedServerNowMs = getEstimatedServerNowMs();
       setRemainingSeconds(
@@ -2226,6 +2259,12 @@ export function ImageRevealGame({
   const reviewedQuestion = reviewedQuestionIndex == null ? null : questions[reviewedQuestionIndex] ?? null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
   const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
+  const personalRevealState = normalizePersonalRevealState(gameSession?.personalRevealState);
+  const isFreeRevealMode = gameSession?.gameMode !== "TEAM_BATTLE" && personalRevealState.mode === "FREE_RECT";
+  const committedRevealRegions = personalRevealState.regions;
+  const committedRevealRegionsKey = committedRevealRegions
+    .map((region) => `${region.id}:${region.x}:${region.y}:${region.width}:${region.height}`)
+    .join("|");
   const revealGrid = getRevealGridConfig(isPortraitImage);
   const gridColumns = revealGrid.columns;
   const gridRows = revealGrid.rows;
@@ -2244,6 +2283,10 @@ export function ImageRevealGame({
   const previewRevealedBlockSet = useMemo(
     () => new Set([...(gameSession?.revealedBlocks ?? []), ...selectedBlocks]),
     [gameSession?.revealedBlocks, selectedBlocks],
+  );
+  const previewRevealRegions = useMemo(
+    () => [...committedRevealRegions, ...draftRevealRegions],
+    [committedRevealRegions, draftRevealRegions],
   );
 
   useEffect(() => {
@@ -2283,7 +2326,11 @@ export function ImageRevealGame({
       cachedImage.imageUrl === currentQuestion.imageUrl &&
       cachedImage.image.complete
     ) {
-      drawRevealedBlocksOnCanvas(canvas, cachedImage.image, gameSession?.revealedBlocks ?? []);
+      if (isFreeRevealMode) {
+        drawRevealedRegionsOnCanvas(canvas, cachedImage.image, committedRevealRegions, personalRevealState.fullyRevealed);
+      } else {
+        drawRevealedBlocksOnCanvas(canvas, cachedImage.image, gameSession?.revealedBlocks ?? []);
+      }
       return;
     }
 
@@ -2301,7 +2348,11 @@ export function ImageRevealGame({
 
       setImageLoadFailed(false);
       playerLoadedImageRef.current = { questionId: currentQuestion.id, imageUrl: currentQuestion.imageUrl, image };
-      drawRevealedBlocksOnCanvas(canvas, image, gameSession?.revealedBlocks ?? []);
+      if (isFreeRevealMode) {
+        drawRevealedRegionsOnCanvas(canvas, image, committedRevealRegions, personalRevealState.fullyRevealed);
+      } else {
+        drawRevealedBlocksOnCanvas(canvas, image, gameSession?.revealedBlocks ?? []);
+      }
     };
     image.onerror = () => {
       if (isCanceled) {
@@ -2332,7 +2383,10 @@ export function ImageRevealGame({
     };
   }, [
     currentQuestion,
+    committedRevealRegionsKey,
     gameSession?.revealedBlocks,
+    isFreeRevealMode,
+    personalRevealState.fullyRevealed,
     isPresenter,
     playerImageCanvas,
     playerImageRetryAttempt,
@@ -2354,7 +2408,7 @@ export function ImageRevealGame({
     gameSession?.roundScores[displayRound - 1] ?? Math.max(1, maxRevealRounds - displayRound + 1);
   const isQuestionReviewing = isTeamBattleMode
     ? teamBattleState?.phase === "REVIEW"
-    : !hasRoundStarted && visibleRevealedBlockCount === visibleBlockCount;
+    : !hasRoundStarted && (isFreeRevealMode ? personalRevealState.fullyRevealed : visibleRevealedBlockCount === visibleBlockCount);
   const canSpectatorPreviewQuestion = !isSpectator || room.spectatorQuestionPreviewEnabled !== false || isQuestionReviewing;
   const canSpectatorViewPlayerAnswers = !isSpectator || room.spectatorPlayerAnswersEnabled !== false || isQuestionReviewing;
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
@@ -2815,7 +2869,7 @@ export function ImageRevealGame({
   const canConfirmReveal =
     isPresenter &&
     !isTeamBattleMode &&
-    selectedBlocks.length > 0 &&
+    (isFreeRevealMode ? draftRevealRegions.length > 0 : selectedBlocks.length > 0) &&
     !isConfirmingReveal &&
     !isQuestionReviewing &&
     !areAllGuessersCorrect &&
@@ -2911,7 +2965,7 @@ export function ImageRevealGame({
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
   const canPreviewPresenterPlayerView = isPresenter && !isTeamBattleMode && Boolean(currentQuestion) && !imageLoadFailed;
-  const canPreviewSelectedBlocks = canPreviewPresenterPlayerView && selectedBlocks.length > 0;
+  const canPreviewSelectedBlocks = canPreviewPresenterPlayerView && (isFreeRevealMode ? draftRevealRegions.length > 0 : selectedBlocks.length > 0);
   const canPreviewTeamBattleOriginal =
     isPresenter &&
     isTeamBattleMode &&
@@ -3134,6 +3188,14 @@ export function ImageRevealGame({
     : areAllGuessersCorrect || currentRound >= maxRevealRounds
       ? "公布答案"
       : "进入下一轮";
+  const revealSelectionTitle = isFreeRevealMode ? "选择要打开的区域" : "选择要打开的格子";
+  const revealSelectionDetail = isFreeRevealMode
+    ? draftRevealRegions.length > 0
+      ? `已选 ${draftRevealRegions.length} 个区域`
+      : "在图片上按住并拖动，框出区域"
+    : selectedBlocks.length > 0
+      ? `已选 ${selectedBlocks.length} 格`
+      : "点击图片中的格子进行选择";
   let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人打开图片";
@@ -3151,7 +3213,7 @@ export function ImageRevealGame({
       spectatorTaskDetail = "等待切换下一题";
     } else if (!hasRoundStarted) {
       spectatorTaskTitle = "等待揭图";
-      spectatorTaskDetail = "出题人正在选格";
+      spectatorTaskDetail = isFreeRevealMode ? "出题人正在选择区域" : "出题人正在选格";
     } else if (!isRoundClosedForPlayerActions) {
       spectatorTaskTitle = isBuzzerMode ? "抢答中" : "作答中";
       spectatorTaskDetail = `${standardSubmittedCount}/${standardTotalCount} ${isBuzzerMode ? "已抢答" : "已提交"}`;
@@ -3176,8 +3238,8 @@ export function ImageRevealGame({
           standardTaskTitle = "判定抢答";
           standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
         } else if (!hasRoundStarted) {
-          standardTaskTitle = "选择要打开的格子";
-          standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+          standardTaskTitle = revealSelectionTitle;
+          standardTaskDetail = revealSelectionDetail;
         } else if (hasPendingJudgement) {
           standardTaskTitle = "等待判定";
           standardTaskDetail = isWaitingForBuzzerQueueStability ? "正在确认抢答顺序" : `${pendingJudgementCount} 人待判定`;
@@ -3198,8 +3260,8 @@ export function ImageRevealGame({
         standardTaskTitle = standardSettleActionText;
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       } else if (!hasRoundStarted) {
-        standardTaskTitle = "选择要打开的格子";
-        standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+        standardTaskTitle = revealSelectionTitle;
+        standardTaskDetail = revealSelectionDetail;
       } else {
         standardTaskTitle = "等待作答";
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -3214,7 +3276,7 @@ export function ImageRevealGame({
       standardTaskDetail = "等待下一题";
     } else if (!hasRoundStarted) {
       standardTaskTitle = "等待揭图";
-      standardTaskDetail = "出题人正在选格";
+      standardTaskDetail = isFreeRevealMode ? "出题人正在选择区域" : "出题人正在选格";
     } else if (isBuzzerMode) {
       if (myHasForfeited) {
         standardTaskTone = "border-slate-200 bg-white";
@@ -3546,12 +3608,22 @@ export function ImageRevealGame({
   }
 
   async function handleConfirmReveal() {
-    if (!gameSession || selectedBlocks.length === 0) {
+    if (!gameSession || (isFreeRevealMode ? draftRevealRegions.length === 0 : selectedBlocks.length === 0)) {
       return;
     }
 
     setIsConfirmingReveal(true);
     try {
+      if (isFreeRevealMode) {
+        const updatedGameSession = await confirmRevealRegions({
+          gameSessionId: gameSession.id,
+          presenterPlayerId: playerId,
+          regions: draftRevealRegions,
+        });
+        applyRoundSnapshotFromResult(updatedGameSession) || applyGameSessionDelta(updatedGameSession);
+        setDraftRevealRegions([]);
+        return;
+      }
       const nextVisibleRevealedBlockCount = countVisibleRevealedBlocks(
         new Set([...gameSession.revealedBlocks, ...selectedBlocks]),
         visibleBlockCount,
@@ -3569,7 +3641,7 @@ export function ImageRevealGame({
       applyRoundSnapshotFromResult(updatedGameSession) || applyGameSessionDelta(updatedGameSession);
       setSelectedBlocks([]);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "打开格子失败");
+      onError(error instanceof Error ? error.message : "打开区域失败");
     } finally {
       setIsConfirmingReveal(false);
     }
@@ -4002,6 +4074,7 @@ export function ImageRevealGame({
     applyRoundSnapshotFromResult(skipped) || applyGameSession(skipped.gameSession);
     setImageLoadFailed(false);
     setSelectedBlocks([]);
+    setDraftRevealRegions([]);
 
     if (skipped.room) {
       onRoomUpdatedRef.current?.(skipped.room);
@@ -4071,6 +4144,7 @@ export function ImageRevealGame({
     applyRoundSnapshotFromResult(advanced) || applyGameSession(advanced.gameSession);
     setImageLoadFailed(false);
     setSelectedBlocks([]);
+    setDraftRevealRegions([]);
 
     if (advanced.room) {
       onRoomUpdatedRef.current?.(advanced.room);
@@ -4505,7 +4579,7 @@ export function ImageRevealGame({
           </div>
         ) : null}
 
-        {!isPresenter && !isTeamBattleMode && !imageLoadFailed ? (
+        {!isPresenter && !isTeamBattleMode && !isFreeRevealMode && !imageLoadFailed ? (
           <div
             className="absolute inset-0 grid"
             style={{
@@ -4519,7 +4593,7 @@ export function ImageRevealGame({
           </div>
         ) : null}
 
-        {isPresenter && !isTeamBattleMode && !imageLoadFailed ? (
+        {isPresenter && !isTeamBattleMode && !isFreeRevealMode && !imageLoadFailed ? (
           <div
             className="absolute inset-0 grid"
             style={{
@@ -4549,6 +4623,17 @@ export function ImageRevealGame({
               );
             })}
           </div>
+        ) : null}
+
+        {isPresenter && isFreeRevealMode && !isQuestionReviewing && !imageLoadFailed ? (
+          <FreeRevealEditor
+            committedRegions={committedRevealRegions}
+            disabled={Boolean(gameSession.roundStartedAt) || isQuestionReviewing}
+            draftRegions={draftRevealRegions}
+            maxRegions={MAX_FREE_REVEAL_REGIONS_PER_ROUND}
+            onDraftRegionsChange={setDraftRevealRegions}
+            onLimitReached={() => onError("每轮最多 16 个区域")}
+          />
         ) : null}
       </div>
       {shouldShowQuestionLabel ? (
@@ -4650,9 +4735,24 @@ export function ImageRevealGame({
               <p className="mt-1 text-sm text-[var(--muted)]">
                 {isPresenter ? "确认后进入下一步" : "等待出题人进入下一步"}
               </p>
-          <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-            <p className="font-semibold text-slate-950">正确答案</p>
-            <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "未填写"}</p>
+          <div
+            className={[
+              "mt-3 rounded-md p-3 text-sm",
+              currentQuestionLabel ? "border-2 border-emerald-300 bg-emerald-50" : "border border-[var(--line)] bg-white",
+            ].join(" ")}
+          >
+            <p className={currentQuestionLabel ? "font-semibold text-emerald-800" : "font-semibold text-slate-950"}>
+              正确答案
+            </p>
+            <p
+              className={
+                currentQuestionLabel
+                  ? "mt-1 break-words text-xl font-bold leading-snug text-slate-950"
+                  : "mt-1 text-[var(--muted)]"
+              }
+            >
+              {currentQuestionLabel || "未填写"}
+            </p>
           </div>
           {isTeamBattleMode && teamBattleState?.correctGuess ? (
             <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm">
@@ -5011,9 +5111,11 @@ export function ImageRevealGame({
           <section className="border-t border-[var(--line)] pt-4">
             <div className="mb-3 flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-950">操作</p>
-              <span className="text-xs font-semibold text-[var(--muted)]">
-                已打开 {visibleRevealedBlockCount}/{visibleBlockCount}
-              </span>
+              {!isFreeRevealMode ? (
+                <span className="text-xs font-semibold text-[var(--muted)]">
+                  已打开 {visibleRevealedBlockCount}/{visibleBlockCount}
+                </span>
+              ) : null}
             </div>
 
             {hasRoundStarted ? (
@@ -5070,7 +5172,15 @@ export function ImageRevealGame({
                 </Button>
               ) : (
                 <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
-                  {isConfirmingReveal ? "打开中…" : selectedBlocks.length > 0 ? `打开 ${selectedBlocks.length} 格` : "打开所选格子"}
+                  {isConfirmingReveal
+                    ? "打开中…"
+                    : isFreeRevealMode
+                      ? draftRevealRegions.length > 0
+                        ? `打开 ${draftRevealRegions.length} 个区域`
+                        : "打开所选区域"
+                      : selectedBlocks.length > 0
+                        ? `打开 ${selectedBlocks.length} 格`
+                        : "打开所选格子"}
                 </Button>
               )}
               {canPreviewSelectedBlocks ? (
@@ -5443,19 +5553,25 @@ export function ImageRevealGame({
                   关闭
                 </button>
                 <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
-                {canPreviewPresenterPlayerView ? (
-                  <div
-                    className="absolute inset-0 grid"
-                    style={{
-                      gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-                      gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
-                    }}
-                  >
-                    {Array.from({ length: visibleBlockCount }, (_, blockIndex) => (
-                      <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
-                    ))}
-                  </div>
-                ) : null}
+                {canPreviewPresenterPlayerView
+                  ? isFreeRevealMode
+                    ? !personalRevealState.fullyRevealed
+                      ? <FreeRevealMask opacity={1} regions={previewRevealRegions} />
+                      : null
+                    : (
+                        <div
+                          className="absolute inset-0 grid"
+                          style={{
+                            gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                            gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+                          }}
+                        >
+                          {Array.from({ length: visibleBlockCount }, (_, blockIndex) => (
+                            <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
+                          ))}
+                        </div>
+                      )
+                  : null}
               </div>
             </div>,
             document.body,

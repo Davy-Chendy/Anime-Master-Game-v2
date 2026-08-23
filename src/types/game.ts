@@ -13,6 +13,7 @@ export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
 export type RoomVisibility = "PRIVATE" | "PUBLIC";
 export type RoomQuestionSource = "COMMUNITY" | "CREATION_TOOL" | "MANUAL";
 export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED" | "TEAM_BATTLE";
+export type PersonalRevealMode = "GRID" | "FREE_RECT";
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 export type TeamBattleTeam = "red" | "blue";
 export type TeamAssignmentMode = "AUTO" | "MANUAL";
@@ -22,6 +23,25 @@ export const DEFAULT_TEAM_BATTLE_REVEAL_VOTE_SECONDS = 12;
 export const DEFAULT_TEAM_BATTLE_GUESS_VOTE_SECONDS = 35;
 export const TEAM_BATTLE_ALL_SUBMITTED_GRACE_SECONDS = 5;
 export const MAX_TEAM_BATTLE_GUESS_LENGTH = 80;
+export const MAX_FREE_REVEAL_REGIONS_PER_ROUND = 16;
+
+export type RevealRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type RevealRegion = RevealRect & {
+  id: string;
+};
+
+export type PersonalRevealState = {
+  version: 1;
+  mode: PersonalRevealMode;
+  regions: RevealRegion[];
+  fullyRevealed: boolean;
+};
 
 export type TeamBattleGuessVote = {
   type: "skip" | "guess";
@@ -93,6 +113,7 @@ export type Room = {
   spectatorCapacity?: number;
   preparedQuestionSource?: RoomQuestionSource | null;
   gameMode?: GameMode;
+  personalRevealMode?: PersonalRevealMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
@@ -125,6 +146,7 @@ export type DbRoom = {
   prepared_question_source?: RoomQuestionSource | null;
   public_activity_at?: string | null;
   lobby_game_mode?: GameMode | null;
+  lobby_personal_reveal_mode?: PersonalRevealMode | null;
   lobby_max_reveal_rounds?: number | null;
   lobby_round_seconds?: number | null;
   lobby_round_scores?: unknown;
@@ -261,6 +283,7 @@ export type GameSession = {
   currentQuestionIndex: number;
   currentRevealRound: number;
   revealedBlocks: number[];
+  personalRevealState?: PersonalRevealState;
   maxRevealRounds: number;
   roundSeconds: number;
   roundScores: number[];
@@ -490,6 +513,7 @@ export type DbGameSession = {
   current_question_index: number;
   current_reveal_round: number;
   revealed_blocks: unknown;
+  personal_reveal_state?: unknown;
   max_reveal_rounds?: number;
   round_seconds?: number;
   round_scores?: unknown;
