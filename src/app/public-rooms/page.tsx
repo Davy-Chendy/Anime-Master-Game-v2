@@ -80,11 +80,9 @@ export default function PublicRoomsPage() {
   const router = useRouter();
   const [rooms, setRooms] = useState<PublicRoomSummary[]>([]);
   const [currentRoomCode, setCurrentRoomCode] = useState<string>();
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<PublicRoomSortKey>("status");
   const [sortDirection, setSortDirection] = useState<PublicRoomSortDirection>("asc");
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const sortedRooms = useMemo(
     () => sortPublicRooms(rooms, sortKey, sortDirection),
@@ -97,32 +95,12 @@ export default function PublicRoomsPage() {
     try {
       const page = await getPublicRooms();
       setRooms(page.rooms);
-      setNextCursor(page.nextCursor);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "读取公开房间失败。");
     } finally {
       setIsLoading(false);
     }
   }, []);
-
-  async function loadMoreRooms() {
-    if (!nextCursor || isLoadingMore) return;
-    setIsLoadingMore(true);
-    setError("");
-    try {
-      const page = await getPublicRooms(nextCursor);
-      setRooms((currentRooms) => {
-        const mergedRooms = new Map(currentRooms.map((room) => [room.id, room]));
-        for (const room of page.rooms) mergedRooms.set(room.id, room);
-        return [...mergedRooms.values()];
-      });
-      setNextCursor(page.nextCursor);
-    } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "读取更多房间失败。");
-    } finally {
-      setIsLoadingMore(false);
-    }
-  }
 
   useEffect(() => {
     const session = getLocalSession();
@@ -166,15 +144,15 @@ export default function PublicRoomsPage() {
           <button className="text-sm font-semibold text-[var(--primary)] hover:underline" onClick={() => router.push("/")} type="button">← 返回首页</button>
           <h1 className="mt-3 text-3xl font-bold text-slate-950 sm:text-4xl">公开房间</h1>
           <p aria-live="polite" className="mt-2 text-sm text-[var(--muted)]">
-            {isLoading ? "正在读取房间" : `${nextCursor ? "已显示" : "共"} ${rooms.length} 个房间 · 仅显示近 1 小时有效活跃的房间 · 数据最多约有 1 分钟延迟`}
+            {isLoading ? "正在读取房间" : `共 ${rooms.length} 个房间 · 仅显示近 1 小时有效活跃的房间 · 数据最多约有 1 分钟延迟`}
           </p>
         </div>
-        <Button className="shadow-none" disabled={isLoading || isLoadingMore} onClick={() => void loadRooms()} type="button" variant="secondary">{isLoading ? "读取中…" : "刷新房间"}</Button>
+        <Button className="shadow-none" disabled={isLoading} onClick={() => void loadRooms()} type="button" variant="secondary">{isLoading ? "读取中…" : "刷新房间"}</Button>
       </header>
 
       {error ? <p className="mt-5 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
 
-      <div aria-busy={isLoading || isLoadingMore} className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div aria-busy={isLoading} className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full min-w-[900px] border-collapse">
           <thead className="border-b border-slate-200 bg-slate-50/80">
             <tr>
@@ -196,7 +174,7 @@ export default function PublicRoomsPage() {
               <tr>
                 <td className="px-6 py-12 text-center" colSpan={7}>
                   <p className="text-lg font-bold text-slate-900">暂无公开房间</p>
-                  <p className="mt-2 text-sm text-[var(--muted)]">{nextCursor ? "可以继续加载更多房间。" : "稍后刷新，或返回首页创建房间。"}</p>
+                  <p className="mt-2 text-sm text-[var(--muted)]">稍后刷新，或返回首页创建房间。</p>
                 </td>
               </tr>
             ) : sortedRooms.map((room) => {
@@ -245,13 +223,6 @@ export default function PublicRoomsPage() {
           </tbody>
         </table>
       </div>
-      {nextCursor ? (
-        <div className="mt-4 flex justify-center">
-          <Button disabled={isLoading || isLoadingMore} onClick={() => void loadMoreRooms()} type="button" variant="secondary">
-            {isLoadingMore ? "加载中…" : "加载更多"}
-          </Button>
-        </div>
-      ) : null}
     </AppShell>
   );
 }

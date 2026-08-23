@@ -66,6 +66,7 @@ function createEnv(pages: Row[][], presence: Record<string, Response | Error>) {
         assert.match(sql, /game_status IN \('PLAYING','GAME_RESULT'\) OR COALESCE\(public_activity_at,updated_at\)>=\?/);
         assert.match(sql, /game_status='QUESTION_SETUP' AND prepared_question_source IS NOT NULL/);
         assert.match(sql, /ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC/);
+        assert.doesNotMatch(sql, /LIMIT\s+\?/i);
         assert.doesNotMatch(sql, /SELECT\s+\*/i);
         return {
           bind(...values: unknown[]) {
@@ -143,7 +144,7 @@ test("public room directory filters every status by authoritative one-hour activ
     }),
   });
 
-  const page = await listPublicRooms(env, null, NOW);
+  const page = await listPublicRooms(env, NOW);
   assert.deepEqual(page.rooms.map(({ id }) => id), ["playing", "setup-ready", "setup-preparing", "lobby-fresh", "lobby-boundary", "result"]);
   assert.equal(page.nextCursor, null);
   assert.deepEqual(fetchedTopics.sort(), ["room:playing", "room:result"]);
@@ -158,7 +159,7 @@ test("public room directory filters every status by authoritative one-hour activ
   assert.equal(page.rooms.find((room) => room.id === "setup-ready")?.spectatorCount, 1);
   assert.equal(page.rooms[5].updatedAt, "2026-08-09T09:55:00Z");
   assert.equal(boundQueries[0][1], "2026-08-09T09:00:00.000Z");
-  assert.equal(boundQueries[0].at(-1), 21);
+  assert.equal(boundQueries[0].length, 2);
 });
 
 test("public room directory falls back safely when presence is unavailable or invalid", async () => {
@@ -179,7 +180,7 @@ test("public room directory falls back safely when presence is unavailable or in
     "room:playing-error-stale": new Error("temporary failure"),
   });
 
-  const page = await listPublicRooms(env, null, NOW);
+  const page = await listPublicRooms(env, NOW);
   assert.deepEqual(page.rooms.map(({ id }) => id), ["playing-error-fresh", "playing-invalid-fresh"]);
   assert.equal(page.rooms[0].updatedAt, "2026-08-09T09:45:00Z");
   assert.equal(page.rooms[0].playerCount, 3);
@@ -193,70 +194,69 @@ test("public room directory falls back safely when presence is unavailable or in
   assert.equal(page.rooms[1].questionCount, null);
 });
 
-test("public room directory uses an opaque cursor to load additional bounded pages", async () => {
-  const firstQuery = Array.from({ length: 21 }, (_, index) => room(
+test("public room directory returns every visible room in one response", async () => {
+  const rows = Array.from({ length: 25 }, (_, index) => room(
     `lobby-${String(index).padStart(2, "0")}`,
     "LOBBY",
     new Date(Date.UTC(2026, 7, 9, 9, 59 - index)).toISOString(),
   ));
-  const secondQuery = Array.from({ length: 5 }, (_, index) => room(
-    `lobby-${String(index + 20).padStart(2, "0")}`,
-    "LOBBY",
-    new Date(Date.UTC(2026, 7, 9, 9, 39 - index)).toISOString(),
-  ));
-  const { env, fetchedTopics, boundQueries } = createEnv([firstQuery, secondQuery], {});
+  const { env, fetchedTopics, boundQueries } = createEnv([rows], {});
 
-  const firstPage = await listPublicRooms(env, null, NOW);
-  assert.equal(firstPage.rooms.length, 20);
-  assert.ok(firstPage.nextCursor);
-  assert.equal(firstPage.rooms[0].id, "lobby-00");
-  assert.equal(firstPage.rooms[19].id, "lobby-19");
-
-  const secondPage = await listPublicRooms(env, firstPage.nextCursor, NOW);
-  assert.deepEqual(secondPage.rooms.map(({ id }) => id), ["lobby-20", "lobby-21", "lobby-22", "lobby-23", "lobby-24"]);
-  assert.equal(secondPage.nextCursor, null);
+  const page = await listPublicRooms(env, NOW);
+  assert.equal(page.rooms.length, 25);
+  assert.equal(page.rooms[0].id, "lobby-00");
+  assert.equal(page.rooms[24].id, "lobby-24");
+  assert.equal(page.nextCursor, null);
   assert.equal(fetchedTopics.length, 0);
-  assert.equal(boundQueries.length, 2);
-  assert.equal(boundQueries[1][2], statusRank("LOBBY", null));
-  assert.equal(boundQueries[1].at(-1), 21);
+  assert.equal(boundQueries.length, 1);
+  assert.equal(boundQueries[0].length, 2);
 });
 
-test("public room directory omits the next cursor when authoritative filtering leaves the page underfilled", async () => {
+test("public room directory reaches fresh lobby rooms behind stale playing candidates", async () => {
+  const stalePlayingRooms = Array.from({ length: 20 }, (_, index) => room(
+    `playing-stale-${String(index).padStart(2, "0")}`,
+    "PLAYING",
+    new Date(Date.UTC(2026, 7, 9, 8, 59 - index)).toISOString(),
+  ));
+  const freshLobbyRooms = Array.from({ length: 5 }, (_, index) => room(
+    `lobby-fresh-${String(index).padStart(2, "0")}`,
+    "LOBBY",
+    new Date(Date.UTC(2026, 7, 9, 9, 59 - index)).toISOString(),
+  ));
   const rows = [
-    room("playing-stale", "PLAYING", "2026-08-09T09:59:00Z", 3),
-    ...Array.from({ length: 20 }, (_, index) => room(
-      `lobby-filtered-${String(index).padStart(2, "0")}`,
-      "LOBBY",
-      new Date(Date.UTC(2026, 7, 9, 9, 58 - index)).toISOString(),
-    )),
+    ...stalePlayingRooms,
+    ...freshLobbyRooms,
   ];
-  const { env, fetchedTopics } = createEnv([rows], {
+  const presence = Object.fromEntries(stalePlayingRooms.map((candidate) => [
+    `room:${candidate.id}`,
+    Response.json({ status: "PLAYING", playerCount: 1, updatedAt: candidate.activity_at }),
+  ]));
+  const { env, fetchedTopics, boundQueries } = createEnv([rows], presence);
+
+  const page = await listPublicRooms(env, NOW);
+
+  assert.deepEqual(page.rooms.map(({ id }) => id), freshLobbyRooms.map(({ id }) => id));
+  assert.equal(page.nextCursor, null);
+  assert.equal(fetchedTopics.length, 20);
+  assert.equal(boundQueries.length, 1);
+});
+
+test("public room directory returns an empty complete directory when every candidate is stale", async () => {
+  const rows = [room("playing-stale", "PLAYING", "2026-08-09T08:59:59Z")];
+  const { env, fetchedTopics, boundQueries } = createEnv([rows], {
     "room:playing-stale": Response.json({
       status: "PLAYING",
-      playerCount: 3,
+      playerCount: 1,
       updatedAt: "2026-08-09T08:59:59Z",
     }),
   });
 
-  const page = await listPublicRooms(env, null, NOW);
+  const page = await listPublicRooms(env, NOW);
 
-  assert.equal(page.rooms.length, 19);
+  assert.deepEqual(page.rooms, []);
   assert.equal(page.nextCursor, null);
   assert.deepEqual(fetchedTopics, ["room:playing-stale"]);
-});
-
-test("public room directory rejects malformed cursors without querying storage", async () => {
-  const { env, boundQueries } = createEnv([[]], {});
-  await assert.rejects(() => listPublicRooms(env, "not-a-cursor", NOW), /公开房间游标无效/);
-  const previousOrderingCursor = Buffer.from(JSON.stringify({
-    version: 2,
-    statusRank: 0,
-    updatedAt: "2026-08-09T09:00:00.000Z",
-    createdAt: "2026-08-09T08:00:00.000Z",
-    id: "old-ordering",
-  })).toString("base64url");
-  await assert.rejects(() => listPublicRooms(env, previousOrderingCursor, NOW), /公开房间游标无效/);
-  assert.equal(boundQueries.length, 0);
+  assert.equal(boundQueries.length, 1);
 });
 
 test("public room directory caches a complete successful response for sixty seconds", async () => {
@@ -298,41 +298,37 @@ test("public room directory caches a complete successful response for sixty seco
   assert.equal(matchedKeys.length, 2);
   assert.equal(writtenKeys.length, 1);
   assert.equal(matchedKeys[0], matchedKeys[1], "irrelevant query parameters and Origin must not fragment the shared cache");
-  assert.match(matchedKeys[0], /cacheVersion=2/);
+  assert.match(matchedKeys[0], /cacheVersion=3/);
   assert.match(matchedKeys[0], /runtimeGeneration=/);
   assert.equal(entries.get(writtenKeys[0])?.headers.get("cache-control"), "public, max-age=60");
 });
 
-test("public room directory isolates each cursor in the shared cache", async () => {
+test("public room directory normalizes legacy cursors to the shared complete-directory cache", async () => {
   const baseTime = Date.now();
-  const firstQuery = Array.from({ length: 21 }, (_, index) => room(
+  const rows = Array.from({ length: 25 }, (_, index) => room(
     `cache-page-${String(index).padStart(2, "0")}`,
     "LOBBY",
     new Date(baseTime - index * 1_000).toISOString(),
   ));
-  const secondQuery = [room("cache-page-20", "LOBBY", new Date(baseTime - 20_000).toISOString())];
-  const { env, boundQueries } = createEnv([firstQuery, secondQuery], {});
+  const { env, boundQueries } = createEnv([rows], {});
   const { cache, writtenKeys } = createResponseCache();
 
   const firstResponse = await getPublicRoomsResponse(new Request("https://api.example.com/api/public-rooms"), env, cache);
   const firstPage = await firstResponse.json() as { rooms: Array<{ id: string }>; nextCursor: string | null };
-  assert.ok(firstPage.nextCursor);
   const secondResponse = await getPublicRoomsResponse(
-    new Request(`https://api.example.com/api/public-rooms?cursor=${encodeURIComponent(firstPage.nextCursor)}`),
+    new Request("https://api.example.com/api/public-rooms?cursor=legacy-cursor"),
     env,
     cache,
   );
   const secondPage = await secondResponse.json() as { rooms: Array<{ id: string }>; nextCursor: string | null };
-  const repeatedFirstResponse = await getPublicRoomsResponse(new Request("https://api.example.com/api/public-rooms"), env, cache);
 
   assert.equal(firstResponse.headers.get("x-public-room-cache"), "MISS");
-  assert.equal(secondResponse.headers.get("x-public-room-cache"), "MISS");
-  assert.equal(repeatedFirstResponse.headers.get("x-public-room-cache"), "HIT");
+  assert.equal(secondResponse.headers.get("x-public-room-cache"), "HIT");
   assert.equal(firstPage.rooms[0].id, "cache-page-00");
-  assert.deepEqual(secondPage.rooms.map(({ id }) => id), ["cache-page-20"]);
-  assert.equal(boundQueries.length, 2);
-  assert.equal(writtenKeys.length, 2);
-  assert.notEqual(writtenKeys[0], writtenKeys[1]);
+  assert.equal(firstPage.rooms.length, 25);
+  assert.deepEqual(secondPage, firstPage);
+  assert.equal(boundQueries.length, 1);
+  assert.equal(writtenKeys.length, 1);
 });
 
 test("public room directory does not cache failures", async () => {

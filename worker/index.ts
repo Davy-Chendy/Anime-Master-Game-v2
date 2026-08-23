@@ -2190,15 +2190,6 @@ type PublicRoomRow = {
   prepared_question_source: RoomQuestionSource | null;
   created_at: string;
   activity_at: string;
-  status_rank: number;
-};
-
-type PublicRoomCursor = {
-  version: 3;
-  statusRank: number;
-  updatedAt: string;
-  createdAt: string;
-  id: string;
 };
 
 type PublicRoomPage = {
@@ -2206,57 +2197,13 @@ type PublicRoomPage = {
   nextCursor: string | null;
 };
 
-const PUBLIC_ROOM_PAGE_SIZE = 20;
-const PUBLIC_ROOM_QUERY_LIMIT = PUBLIC_ROOM_PAGE_SIZE + 1;
 const PUBLIC_ROOM_ACTIVITY_WINDOW_MS = 60 * 60 * 1000;
 const PUBLIC_ROOM_PRESENCE_CONCURRENCY = 5;
 const PUBLIC_ROOM_PRESENCE_TIMEOUT_MS = 800;
 const PUBLIC_ROOM_DIRECTORY_CACHE_TTL_SECONDS = 60;
-const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 2;
+const PUBLIC_ROOM_DIRECTORY_CACHE_VERSION = 3;
 
 type PublicRoomResponseCache = Pick<Cache, "match" | "put">;
-
-function encodePublicRoomCursor(room: PublicRoomRow) {
-  return btoa(JSON.stringify({
-    version: 3,
-    statusRank: room.status_rank,
-    updatedAt: room.activity_at,
-    createdAt: room.created_at,
-    id: room.id,
-  } satisfies PublicRoomCursor)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function decodePublicRoomCursor(value: string | null | undefined): PublicRoomCursor | null {
-  if (!value) return null;
-  if (value.length > 1024) throw new Error("公开房间游标无效。");
-  try {
-    const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-    const parsed = JSON.parse(atob(base64)) as Partial<PublicRoomCursor>;
-    if (
-      parsed.version !== 3 ||
-      !Number.isInteger(parsed.statusRank) ||
-      Number(parsed.statusRank) < 0 ||
-      Number(parsed.statusRank) > 4 ||
-      typeof parsed.updatedAt !== "string" ||
-      !Number.isFinite(Date.parse(parsed.updatedAt)) ||
-      typeof parsed.createdAt !== "string" ||
-      !Number.isFinite(Date.parse(parsed.createdAt)) ||
-      typeof parsed.id !== "string" ||
-      !parsed.id
-    ) {
-      throw new Error("invalid cursor payload");
-    }
-    return {
-      version: 3,
-      statusRank: Number(parsed.statusRank),
-      updatedAt: parsed.updatedAt,
-      createdAt: parsed.createdAt,
-      id: parsed.id,
-    };
-  } catch {
-    throw new Error("公开房间游标无效。");
-  }
-}
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
   const results = new Array<R>(items.length);
@@ -2271,24 +2218,8 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
   return results;
 }
 
-export async function listPublicRooms(env: Env, cursorValue?: string | null, now = Date.now()): Promise<PublicRoomPage> {
-  const cursor = decodePublicRoomCursor(cursorValue);
+export async function listPublicRooms(env: Env, now = Date.now()): Promise<PublicRoomPage> {
   const cutoffIso = new Date(now - PUBLIC_ROOM_ACTIVITY_WINDOW_MS).toISOString();
-  const cursorClause = cursor ? `WHERE
-      status_rank > ? OR
-      (status_rank = ? AND activity_at < ?) OR
-      (status_rank = ? AND activity_at = ? AND created_at < ?) OR
-      (status_rank = ? AND activity_at = ? AND created_at = ? AND id < ?)` : "";
-  const bindings: Array<string | number> = [CURRENT_ROOM_RUNTIME_GENERATION, cutoffIso];
-  if (cursor) {
-    bindings.push(
-      cursor.statusRank,
-      cursor.statusRank, cursor.updatedAt,
-      cursor.statusRank, cursor.updatedAt, cursor.createdAt,
-      cursor.statusRank, cursor.updatedAt, cursor.createdAt, cursor.id,
-    );
-  }
-  bindings.push(PUBLIC_ROOM_QUERY_LIMIT);
   const result = await env.DB.prepare(`WITH ranked_rooms AS (
       SELECT
         id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,
@@ -2304,16 +2235,13 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
       WHERE room_visibility='PUBLIC' AND runtime_generation=?
         AND (game_status IN ('PLAYING','GAME_RESULT') OR COALESCE(public_activity_at,updated_at)>=?)
     )
-    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,activity_at,status_rank
+    SELECT id,room_code,room_name,game_status,lobby_game_mode,member_count,spectator_count,lobby_player_capacity,lobby_spectator_capacity,prepared_question_source,created_at,activity_at
     FROM ranked_rooms
-    ${cursorClause}
-    ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC
-    LIMIT ?`)
-    .bind(...bindings)
+    ORDER BY status_rank ASC, activity_at DESC, created_at DESC, id DESC`)
+    .bind(CURRENT_ROOM_RUNTIME_GENERATION, cutoffIso)
     .all<PublicRoomRow>();
   const candidates = result.results ?? [];
-  const pageCandidates = candidates.slice(0, PUBLIC_ROOM_PAGE_SIZE);
-  const rooms: PublicRoomSummary[] = pageCandidates
+  const rooms: PublicRoomSummary[] = candidates
     .map((room) => ({
       id: room.id,
       code: room.room_code,
@@ -2395,19 +2323,16 @@ export async function listPublicRooms(env: Env, cursorValue?: string | null, now
   });
   return {
     rooms: visibleRooms,
-    nextCursor: visibleRooms.length === PUBLIC_ROOM_PAGE_SIZE && candidates.length > PUBLIC_ROOM_PAGE_SIZE
-      ? encodePublicRoomCursor(pageCandidates[pageCandidates.length - 1])
-      : null,
+    nextCursor: null,
   };
 }
 
-function getPublicRoomDirectoryCacheKey(request: Request, cursorValue?: string | null) {
+function getPublicRoomDirectoryCacheKey(request: Request) {
   const cacheUrl = new URL(request.url);
   cacheUrl.pathname = "/api/public-rooms";
   cacheUrl.search = "";
   cacheUrl.searchParams.set("cacheVersion", String(PUBLIC_ROOM_DIRECTORY_CACHE_VERSION));
   cacheUrl.searchParams.set("runtimeGeneration", String(CURRENT_ROOM_RUNTIME_GENERATION));
-  if (cursorValue) cacheUrl.searchParams.set("cursor", cursorValue);
   return new Request(cacheUrl.toString(), { method: "GET" });
 }
 
@@ -2427,8 +2352,7 @@ export async function getPublicRoomsResponse(
   env: Env,
   cache: PublicRoomResponseCache,
 ): Promise<Response> {
-  const cursorValue = new URL(request.url).searchParams.get("cursor");
-  const cacheKey = getPublicRoomDirectoryCacheKey(request, cursorValue);
+  const cacheKey = getPublicRoomDirectoryCacheKey(request);
   try {
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) return publicRoomDirectoryClientResponse(cachedResponse, request, env, "HIT");
@@ -2436,7 +2360,7 @@ export async function getPublicRoomsResponse(
     logAuxiliaryFailure("public_room_directory_cache_read_failed", error);
   }
 
-  const page = await listPublicRooms(env, cursorValue);
+  const page = await listPublicRooms(env);
   const body = JSON.stringify(page);
   const cacheResponse = new Response(body, {
     headers: {
