@@ -148,6 +148,14 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 断线重连通过 active-game JSON 中的可选 `roundEndedEarlyAt` 和已有自动放弃恢复，不查询 D1，也不重新发送结束 mutation。Outbox 重放由 actionId/clientSeq 和持久化 committed seq 幂等返回；重复、旧轮、全员已行动以及与 Alarm 竞争失败的请求不重复写状态或广播。字段位于既有 JSON aggregate，不新增 DO SQLite/D1 表、列、索引或 migration；永久 schema 错误的重试模型不变。
 
+## 积分榜断线提示预算（2026-08-23）
+
+断线提示复用每名成员已有的 Room DO WebSocket，不增加心跳、客户端消息、HTTP 轮询、snapshot 补拉或 Alarm。Room DO 只在同一房间某玩家最后一条连接关闭、或已标记玩家的第一条连接恢复时改变状态；关闭同玩家的中间标签页不写入、不广播。候选断线时间保存在版本化 DO KV 中，不写 D1、不进入游戏 aggregate/checkpoint，也不改变任何游戏 mutation 或结算预算。
+
+同一短时窗口内的关闭或恢复事件合并约 150ms：Room DO 扫描一次现有 Attachment、写入或删除一次有界 KV，并广播一个 `changes[]` 小 delta。50 人集中断线最坏为 1 次 KV 写入、1 次广播和最多 50 次出站投递；50 人集中重连同样为 1 次 KV 删除、1 次广播和最多 50 次出站投递。若事件间隔超过合并窗口，最坏退化为每名玩家每次“最后关闭/首次恢复”各 1 次 KV 更新和 1 次小广播，但仍没有新增入站 WebSocket 消息或 Worker/DO 请求计费当量。新连接只通过同一 WebSocket 接收当前候选快照，不发起额外读取请求；DO 从休眠恢复时，同批连接共享一次 KV 加载。
+
+客户端在收到服务端权威断线时间后本地等待 60 秒再显示 `[断线]`，因此宽限期本身不产生服务端定时器或请求。按 50 人 × 30 题计算，成本与题数无关；每天 60 局即使每局 49 名答题玩家各发生一次断线和恢复，也最多产生 5,880 次未合并的 DO KV 状态更新和 5,880 次小广播，集中发生时会显著低于该上限。出站消息不折算 DO 请求，WebSocket 建连本身仍按既有重连预算计量。本功能不改变 D1、游戏 checkpoint、Alarm、R2/Images 或最终投影模型，因此无需修改 `scripts/authority-write-budget.mjs`。
+
 ## 公开房间目录预算（2026-08-23）
 
 公开房间页只在首次进入或玩家点击“刷新房间”时读取，不轮询、不分页。Worker 按 runtime generation 和目录缓存版本构造规范化缓存键，使用 Cloudflare Cache API 在当前数据中心共享完整成功响应 60 秒；旧 `cursor`、无关 query 参数和请求 Origin 都不拆分数据缓存，CORS 头在命中后按当前请求追加。客户端响应保持 `no-store`，因此刷新仍会到达 Worker，但不会绕过服务端共享缓存。错误响应不缓存，空成功页正常缓存。Cache API 不跨数据中心复制，也不保证同一冷 key 的并发 miss 严格合并；实现不得用模块级可变 Promise 保存跨请求 I/O。

@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { FreeRevealEditor, FreeRevealMask } from "@/components/FreeRevealEditor";
 import { bindGameSessionRealtimeTopic, ensureRealtimeTopic, subscribeRealtimeTopic, updateGameSessionRealtimeQuestion } from "@/lib/cloudflareClient";
 import { normalizePersonalRevealState } from "@/lib/freeRevealGeometry";
+import { applyConnectionPresenceChanges, CONNECTION_DISCONNECTED_GRACE_MS, isConnectionDisconnected } from "@/lib/connectionPresence";
 import {
   advanceTeamBattleTurn,
   advanceReviewedQuestion,
@@ -455,6 +456,7 @@ type ResultPublishNextAction = "advanceReviewedQuestion" | "skipQuestion";
 type StandardScoreRowProps = {
   playerId: string;
   nickname: string;
+  isDisconnected: boolean;
   rank: number;
   score: number;
   correctCount: number;
@@ -736,6 +738,7 @@ function getLegacyBroadcastGameSession(result: unknown) {
 const StandardScoreRow = memo(function StandardScoreRow({
   playerId,
   nickname,
+  isDisconnected,
   rank,
   score,
   correctCount,
@@ -762,8 +765,8 @@ const StandardScoreRow = memo(function StandardScoreRow({
       }}
     >
       <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 font-semibold text-slate-950">
-          #{rank} {nickname}
+        <div className="min-w-0 truncate font-semibold text-slate-950" title={isDisconnected ? `[断线] ${nickname}` : nickname}>
+          #{rank} {isDisconnected ? <span className="text-slate-500">[断线] </span> : null}{nickname}
         </div>
         <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
       </div>
@@ -893,6 +896,7 @@ function getCompactScoreStatus({
 const CompactScoreRow = memo(function CompactScoreRow({
   playerId,
   nickname,
+  isDisconnected,
   rank,
   score,
   alreadyCorrect,
@@ -922,8 +926,8 @@ const CompactScoreRow = memo(function CompactScoreRow({
       }}
     >
       <span className="text-right text-xs font-semibold tabular-nums text-slate-500">{rank}</span>
-      <span className={`min-w-0 truncate font-semibold leading-none text-slate-950 ${getCompactNameClass(nickname)}`} title={nickname}>
-        {nickname}
+      <span className={`min-w-0 truncate font-semibold leading-none text-slate-950 ${getCompactNameClass(nickname)}`} title={isDisconnected ? `[断线] ${nickname}` : nickname}>
+        {isDisconnected ? <span className="text-slate-500">[断线] </span> : null}{nickname}
       </span>
       <span
         aria-label={status.label}
@@ -1350,6 +1354,8 @@ export function ImageRevealGame({
   const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [resultPublishCreationMethod, setResultPublishCreationMethod] = useState<QuestionSetCreationMethod>("player_manual");
   const [scores, setScores] = useState<PlayerScore[]>([]);
+  const [connectionPresenceByPlayerId, setConnectionPresenceByPlayerId] = useState<Record<string, number>>({});
+  const [connectionPresenceClockMs, setConnectionPresenceClockMs] = useState(() => Date.now());
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
   const [hasRoundDeadlineGraceExpired, setHasRoundDeadlineGraceExpired] = useState(false);
@@ -1886,6 +1892,12 @@ export function ImageRevealGame({
 
   const applyRealtimeDelta = useCallback(
     (delta: RealtimeDelta) => {
+      if (delta.scope === "room" && delta.type === "connection_presence_changed") {
+        setConnectionPresenceByPlayerId((current) => applyConnectionPresenceChanges(current, delta.changes, delta.replace));
+        setConnectionPresenceClockMs(Date.now());
+        return;
+      }
+
       if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
         onRoomUpdatedRef.current?.(delta.room);
         return;
@@ -2086,6 +2098,26 @@ export function ImageRevealGame({
     },
     [applyRoundSnapshot, isPresenter, playerId, room.currentGameId, room.id, showAnswerBubble],
   );
+
+  useEffect(() => {
+    const now = Date.now();
+    let nextBoundary = Number.POSITIVE_INFINITY;
+    for (const disconnectedAt of Object.values(connectionPresenceByPlayerId)) {
+      const boundary = disconnectedAt + CONNECTION_DISCONNECTED_GRACE_MS;
+      if (boundary > now && boundary < nextBoundary) nextBoundary = boundary;
+    }
+    if (!Number.isFinite(nextBoundary)) return;
+    const timer = window.setTimeout(
+      () => setConnectionPresenceClockMs(Date.now()),
+      Math.max(1, nextBoundary - now + 20),
+    );
+    return () => window.clearTimeout(timer);
+  }, [connectionPresenceByPlayerId, connectionPresenceClockMs]);
+
+  useEffect(() => {
+    setConnectionPresenceByPlayerId({});
+    setConnectionPresenceClockMs(Date.now());
+  }, [room.id]);
 
   useEffect(() => {
     if (!room.id || !room.currentGameId) {
@@ -4327,6 +4359,11 @@ export function ImageRevealGame({
     !isTeamBattleMode && ((isSpectator && canSpectatorViewPlayerAnswers) || (!isPresenter && isCurrentPlayerCorrect));
   const showPlayerAnswersInScoreboard =
     canViewPlayerAnswers && isAnswerViewEnabled && !isScoreboardCompact;
+  const disconnectedPlayerIds = new Set(
+    Object.entries(connectionPresenceByPlayerId)
+      .filter(([, disconnectedAt]) => isConnectionDisconnected(disconnectedAt, connectionPresenceClockMs))
+      .map(([disconnectedPlayerId]) => disconnectedPlayerId),
+  );
 
   const scorePanel = (
     <div
@@ -4413,7 +4450,13 @@ export function ImageRevealGame({
                         key={member.id}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 truncate font-semibold text-slate-950">{member.nickname}</span>
+                          <span
+                            className="min-w-0 truncate font-semibold text-slate-950"
+                            title={disconnectedPlayerIds.has(member.id) ? `[断线] ${member.nickname}` : member.nickname}
+                          >
+                            {disconnectedPlayerIds.has(member.id) ? <span className="text-slate-500">[断线] </span> : null}
+                            {member.nickname}
+                          </span>
                           {member.hasActed ? (
                             <span
                               aria-label={`${member.nickname}已行动`}
@@ -4468,6 +4511,7 @@ export function ImageRevealGame({
                   isBuzzerMode={isBuzzerMode}
                   isLeadingPendingBuzzerAnswer={isLeadingPendingBuzzerAnswer}
                   key={player.id}
+                  isDisconnected={disconnectedPlayerIds.has(player.id)}
                   nickname={player.nickname}
                   onRowRef={registerScoreRow}
                   playerId={player.id}
