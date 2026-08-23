@@ -118,6 +118,14 @@ Generation 4 不再为新房间写 `players` 表。玩家名单以版本化、�
 
 `0017_question_set_manifest.sql` 会把六个社区目录索引重建为仅覆盖公开题集的 partial index，并新增私有清理与房间引用索引。远程 migration 前必须只读统计公开/私有题集和房间数量，避开日额度紧张窗口；索引重建属于一次性写入，不得混入稳定业务日预算。回滚版本若不理解 manifest-only 行将无法读取新题集，因此部署顺序必须先让 reader/cleanup/projection 全部兼容，再让新写入路径生效。
 
+## 社区题库评分人数排序预算（2026-08-23）
+
+“评分人数最多”复用社区题库已有的单次 RPC 和 D1 分页查询，不增加 HTTP 请求、并行 count 查询、客户端轮询或 Room DO 调用。无搜索词时，公开题库查询使用以 `rating_count` 开头的 partial index；按出题方式筛选时使用以 `creation_method,rating_count` 开头的 partial index。搜索仍沿用已有 `INSTR` 过滤，其读取规模不因本排序新增请求而扩大。
+
+`0026_community_rating_count_sort.sql` 新增两个 partial index，只覆盖公开题库。migration 部署时会为现有公开题库一次性建立索引，必须避开 D1 日写入额度紧张窗口，并在部署前只读统计公开题库数量。运行时每次评分都会更新公开题集的 `rating_avg`/`rating_count`，因此会额外触及两个索引；按每局最多50名玩家各提交一次评分、每天60局估算，最多3,000次评分提交，对应最多6,000条新增索引维护路径。这里的“维护路径”不是 Cloudflare 计费行数，索引键删除与插入的实际 rowsWritten 必须以上线后的 D1 Analytics 为准。
+
+该排序不改变游戏中 D1 零写入、最终投影、DO SQLite、Alarm、WebSocket 或单局权威 checkpoint 模型。`scripts/authority-write-budget.mjs` 单独输出评分提交与新增索引维护路径，不把它们混入 `d1FinalProjection`。
+
 ## 公开房间目录预算（2026-08-11）
 
 公开房间页只在首次进入、玩家点击“刷新房间”或显式点击“加载更多”时读取，不轮询。Worker 按 runtime generation、目录缓存版本和游标构造规范化缓存键，使用 Cloudflare Cache API 在当前数据中心共享完整成功响应 60 秒；无关 query 参数和请求 Origin 不拆分数据缓存，CORS 头在命中后按当前请求追加。客户端响应保持 `no-store`，因此刷新仍会到达 Worker，但不会绕过服务端共享缓存。错误响应不缓存，空成功页正常缓存。Cache API 不跨数据中心复制，也不保证同一冷 key 的并发 miss 严格合并；实现不得用模块级可变 Promise 保存跨请求 I/O。

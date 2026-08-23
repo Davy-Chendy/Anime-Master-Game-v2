@@ -80,7 +80,7 @@ function migrationFiles() {
   return readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
 }
 
-function applyMigrations(db: DatabaseSync, through = "0025") {
+function applyMigrations(db: DatabaseSync, through = "0026") {
   for (const name of migrationFiles()) {
     if (name.slice(0, 4) > through) break;
     db.exec(readFileSync(join(migrationsDirectory, name), "utf8"));
@@ -172,6 +172,39 @@ test("D1 0017 adds manifest storage and targeted partial indexes without rewriti
   assert.match(cleanupPlan, /question_sets_private_cleanup_idx/);
   assert.match(cleanupPlan, /game_sessions_question_set_id_idx/);
   assert.match(cleanupPlan, /rooms_prepared_question_set_id_idx/);
+});
+
+test("D1 0026 adds rating-count directory indexes transactionally and query plans use them", () => {
+  const db = new DatabaseSync(":memory:");
+  applyMigrations(db, "0025");
+  const migration = readFileSync(join(migrationsDirectory, "0026_community_rating_count_sort.sql"), "utf8");
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const firstStatement = migration.split(";").map((statement) => statement.trim()).filter(Boolean)[0];
+    db.exec(`${firstStatement};`);
+    throw new Error("injected migration failure");
+  } catch {
+    db.exec("ROLLBACK");
+  }
+  assert.equal(
+    db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='index' AND name LIKE 'question_sets_public%rating_count_idx'").get().count,
+    0,
+  );
+
+  db.exec(migration);
+  const publicPlan = db.prepare(`EXPLAIN QUERY PLAN
+    SELECT id FROM question_sets
+    WHERE is_public=1
+    ORDER BY rating_count DESC,rating_avg DESC,created_at DESC,id DESC
+    LIMIT 25`).all().map((row) => String(row.detail)).join("\n");
+  const creationPlan = db.prepare(`EXPLAIN QUERY PLAN
+    SELECT id FROM question_sets
+    WHERE is_public=1 AND creation_method='player_manual'
+    ORDER BY rating_count DESC,rating_avg DESC,created_at DESC,id DESC
+    LIMIT 25`).all().map((row) => String(row.detail)).join("\n");
+  assert.match(publicPlan, /question_sets_public_rating_count_idx/);
+  assert.match(creationPlan, /question_sets_public_creation_rating_count_idx/);
 });
 
 test("D1 0018 adds aggregate room state transactionally without rewriting old rooms", () => {
@@ -845,6 +878,46 @@ test("new question sets default by creation path, publishing can confirm the met
     assert.deepEqual(communityDetail?.questions?.map((question) => question.imageUrl), ["https://example.com/manual.webp"]);
     assert.equal(manualPage.total, 1);
     assert.equal(assistedPage.total, 1);
+  });
+});
+
+test("community rating-count sorting is deterministic and composes with filtering and pagination", async () => {
+  const db = new DatabaseAdapter();
+  applyMigrations(db.sqlite);
+  const insert = db.sqlite.prepare(`INSERT INTO question_sets(
+    id,title,created_by_player_id,is_public,creation_method,rating_avg,rating_count,play_count,created_at
+  ) VALUES(?,?,?,?,?,?,?,?,?)`);
+  for (const row of [
+    ["ratings-z", "Ratings Z", "host", 1, "player_manual", 4, 10, 1, "2026-05-01T00:00:00.000Z"],
+    ["ratings-a", "Ratings A", "host", 1, "creation_tool_assisted", 4, 10, 1, "2026-05-01T00:00:00.000Z"],
+    ["ratings-older", "Ratings Older", "host", 1, "player_manual", 4, 10, 1, "2026-04-01T00:00:00.000Z"],
+    ["ratings-lower-score", "Ratings Lower Score", "host", 1, "player_manual", 2, 10, 1, "2026-03-01T00:00:00.000Z"],
+    ["ratings-fewer", "Ratings Fewer", "host", 1, "player_manual", 5, 9, 1, "2026-06-01T00:00:00.000Z"],
+    ["ratings-private", "Ratings Private", "host", 0, "player_manual", 5, 99, 1, "2026-07-01T00:00:00.000Z"],
+  ] as const) {
+    insert.run(...row);
+  }
+
+  await runWithGameDatabase(db, async () => {
+    const firstPage = await getCommunityQuestionSets({ sort: "ratingCount", limit: 2 });
+    const secondPage = await getCommunityQuestionSets({ sort: "ratingCount", limit: 2, offset: firstPage.nextOffset });
+    const thirdPage = await getCommunityQuestionSets({ sort: "ratingCount", limit: 2, offset: secondPage.nextOffset });
+    const manualPage = await getCommunityQuestionSets({ sort: "ratingCount", creationMethod: "player_manual" });
+    const fallbackPage = await getCommunityQuestionSets({ sort: "unsupported" as never, limit: 1 });
+
+    assert.deepEqual(firstPage.items.map((item) => item.id), ["ratings-z", "ratings-a"]);
+    assert.deepEqual(secondPage.items.map((item) => item.id), ["ratings-older", "ratings-lower-score"]);
+    assert.deepEqual(thirdPage.items.map((item) => item.id), ["ratings-fewer"]);
+    assert.equal(firstPage.total, 5);
+    assert.equal(firstPage.hasMore, true);
+    assert.equal(thirdPage.hasMore, false);
+    assert.deepEqual(manualPage.items.map((item) => item.id), [
+      "ratings-z",
+      "ratings-older",
+      "ratings-lower-score",
+      "ratings-fewer",
+    ]);
+    assert.deepEqual(fallbackPage.items.map((item) => item.id), ["ratings-fewer"]);
   });
 });
 

@@ -2631,7 +2631,7 @@ const COMMUNITY_QUESTION_SET_SUMMARY_COLUMNS = [
 ].join(",");
 
 function normalizeCommunityQuestionSetSort(value: unknown): CommunityQuestionSetSort {
-  return value === "rating" || value === "plays" ? value : "latest";
+  return value === "rating" || value === "ratingCount" || value === "plays" ? value : "latest";
 }
 
 function normalizeQuestionSetCreationMethod(value: unknown): QuestionSetCreationMethod | null {
@@ -2681,6 +2681,11 @@ export async function getCommunityQuestionSets(params: {
     query = query
       .order("rating_avg", { ascending: false })
       .order("rating_count", { ascending: false })
+      .order("created_at", { ascending: false });
+  } else if (sort === "ratingCount") {
+    query = query
+      .order("rating_count", { ascending: false })
+      .order("rating_avg", { ascending: false })
       .order("created_at", { ascending: false });
   } else if (sort === "plays") {
     query = query.order("play_count", { ascending: false }).order("created_at", { ascending: false });

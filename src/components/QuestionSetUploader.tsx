@@ -1137,6 +1137,7 @@ export function QuestionSetUploader({
                 >
                   <option value="latest">最新</option>
                   <option value="rating">评分最高</option>
+                  <option value="ratingCount">评分人数最多</option>
                   <option value="plays">开局最多</option>
                 </select>
                 <Button

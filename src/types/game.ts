@@ -175,7 +175,7 @@ export type QuestionSetSource = "uploaded" | "community";
 
 export type QuestionSetCreationMethod = "player_manual" | "creation_tool_assisted";
 
-export type CommunityQuestionSetSort = "latest" | "rating" | "plays";
+export type CommunityQuestionSetSort = "latest" | "rating" | "ratingCount" | "plays";
 
 export type CommunityQuestionSetSummary = {
   id: string;

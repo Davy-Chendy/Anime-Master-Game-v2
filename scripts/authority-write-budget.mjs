@@ -114,6 +114,12 @@ const productionPlayerRoomBaseline = {
 };
 const aggregatePlayerWriteTarget = { lower: 150, upper: 220 };
 const postManifestDailyWriteTarget = { lower: 1330, upper: 1600 };
+const communityRatingCountSortBudget = {
+  addedPartialIndexes: 2,
+  ratingSubmissionsPerGameAtMost: players,
+  ratingSubmissionsPerDayAt60GamesAtMost: players * 60,
+  addedIndexMaintenancePathsPerDayAt60GamesAtMost: players * 60 * 2,
+};
 
 assert.equal(answers, players * questions);
 assert.equal(judgements, players * questions);
@@ -129,6 +135,12 @@ if (players === 50 && questions === 30) {
   assert.ok(d1EstimatedRows.upper <= 500, `D1 final projection target missed: ${d1EstimatedRows.upper}`);
   assert.ok(manifestSavingsAt60Games >= 8_900, `manifest daily write saving target missed: ${manifestSavingsAt60Games}`);
   assert.ok(aggregatePlayerWriteTarget.upper < productionPlayerRoomBaseline.playerWrites / 4);
+  assert.deepEqual(communityRatingCountSortBudget, {
+    addedPartialIndexes: 2,
+    ratingSubmissionsPerGameAtMost: 50,
+    ratingSubmissionsPerDayAt60GamesAtMost: 3_000,
+    addedIndexMaintenancePathsPerDayAt60GamesAtMost: 6_000,
+  });
   assert.deepEqual(teamBlockSelectionBudget, {
     defaultPerGameMutations: 0,
     defaultPerGameCheckpointRows: 0,
@@ -227,5 +239,9 @@ console.log(JSON.stringify({
     labelProjectionRowsSavedAtMost,
     estimatedRowsSavedAt60Games: manifestSavingsAt60Games,
     note: "The normalized estimate uses measured production coefficients (146/16 + 796/204 per question); the four-row manifest estimate must be replaced with post-deployment Analytics.",
+  },
+  communityRatingCountSort: {
+    ...communityRatingCountSortBudget,
+    note: "Index-maintenance paths are a pre-deployment workload bound, not billed rowsWritten. D1 Analytics remains authoritative because an index key change can have platform-specific accounting.",
   },
 }, null, 2));
