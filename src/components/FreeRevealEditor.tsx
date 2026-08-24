@@ -217,7 +217,7 @@ export function FreeRevealEditor({
             className="pointer-events-none"
             fill="none"
             key={region.id}
-            stroke="rgba(255,255,255,0.82)"
+            stroke="none"
             strokeDasharray="8 6"
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
