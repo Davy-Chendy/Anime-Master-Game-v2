@@ -4085,8 +4085,11 @@ export function ImageRevealGame({
     }
   }
 
-  async function handleSettleBuzzerRound() {
+  async function handleSettleBuzzerRound(revealAnswer = false) {
     if (!gameSession) {
+      return;
+    }
+    if (revealAnswer && !window.confirm("确认提前公布答案吗？本题将直接结束，尚未答对的玩家不再获得本题分数。")) {
       return;
     }
 
@@ -4096,10 +4099,13 @@ export function ImageRevealGame({
       const settled = await settleBuzzerRound({
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
+        expectedQuestionIndex: gameSession.currentQuestionIndex,
+        expectedRevealRound: gameSession.currentRevealRound,
+        revealAnswer,
       });
       applyRoundSnapshotFromResult(settled) || applyGameSession(settled.gameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "结算本轮失败");
+      onError(error instanceof Error ? error.message : revealAnswer ? "公布答案失败" : "结算本轮失败");
     } finally {
       setIsSettlingBuzzerRound(false);
     }
@@ -5273,14 +5279,19 @@ export function ImageRevealGame({
               <Button
                 type="button"
                 variant={canEndRoundEarly ? "secondary" : undefined}
-                onClick={canEndRoundEarly ? handleEndRoundEarly : handleSettleBuzzerRound}
-                disabled={canEndRoundEarly ? isEndingRoundEarly : !canSettleBuzzerRound || isSettlingBuzzerRound}
+                onClick={canEndRoundEarly ? handleEndRoundEarly : () => handleSettleBuzzerRound()}
+                disabled={canEndRoundEarly ? isEndingRoundEarly : !canSettleBuzzerRound || isSettlingBuzzerRound || isSkippingQuestion}
               >
                 {canEndRoundEarly
                   ? isEndingRoundEarly ? "结束中…" : "提前结束本轮"
                   : isSettlingBuzzerRound ? "处理中…" : standardSettleActionText}
               </Button>
-              <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
+              {canSettleBuzzerRound && standardSettleActionText === "进入下一轮" ? (
+                <Button type="button" variant="secondary" onClick={() => handleSettleBuzzerRound(true)} disabled={isSettlingBuzzerRound || isSkippingQuestion}>
+                  {isSettlingBuzzerRound ? "公布中…" : "提前公布答案"}
+                </Button>
+              ) : null}
+              <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion || isSettlingBuzzerRound}>
                 {isSkippingQuestion ? "跳过中…" : "跳过本题"}
               </Button>
             </div>
@@ -5502,6 +5513,12 @@ export function ImageRevealGame({
       {!isTeamBattleMode && gameSession?.roundEndedEarlyAt && hasRoundStarted ? (
         <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-center text-sm font-semibold text-amber-800" role="status">
           出题人已提前结束本轮，未作答玩家已自动放弃
+        </p>
+      ) : null}
+
+      {!isTeamBattleMode && gameSession?.answerRevealedEarlyAt && isQuestionReviewing ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-center text-sm font-semibold text-amber-800" role="status">
+          出题人已提前公布答案，本题不再进入下一轮
         </p>
       ) : null}
 

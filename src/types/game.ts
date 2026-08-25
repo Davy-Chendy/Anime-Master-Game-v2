@@ -290,6 +290,7 @@ export type GameSession = {
   eligiblePlayerIds?: string[];
   roundStartedAt?: string | null;
   roundEndedEarlyAt?: string | null;
+  answerRevealedEarlyAt?: string | null;
   serverNow?: string;
   teamBattleState?: TeamBattleState | null;
   createdAt: string;

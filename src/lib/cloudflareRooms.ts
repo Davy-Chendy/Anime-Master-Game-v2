@@ -388,7 +388,13 @@ export const markPendingRoundAnswersWrong = (params: {
   expectedRevealRound: number;
 }) => rpc<AnswerJudgementResult>("markPendingRoundAnswersWrong", params);
 
-export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+export const settleBuzzerRound = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  expectedQuestionIndex: number;
+  expectedRevealRound: number;
+  revealAnswer?: boolean;
+}) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
 
 export const completeTeamBattleBlockSelection = (params: {

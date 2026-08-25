@@ -612,6 +612,7 @@ export class RoomAuthorityVNext {
       personalRevealState: normalizePersonalRevealState(bootstrap.gameSession.personalRevealState),
       eligiblePlayerIds: bootstrap.gameSession.eligiblePlayerIds ?? this.eligiblePlayers(players, bootstrap.gameSession.presenterPlayerId),
       roundEndedEarlyAt: null,
+      answerRevealedEarlyAt: null,
     };
     const normalizedTeam = normalizeTeamSessionDeadline(gameSession, Date.now());
     const aggregate: VNextAggregate = {
@@ -971,6 +972,7 @@ export class RoomAuthorityVNext {
     session.revealedBlocks = nextBlocks.length >= 45 ? ALL_REVEALED_BLOCKS : nextBlocks;
     session.roundStartedAt = nowIso(action.serverReceivedAtMs);
     session.roundEndedEarlyAt = null;
+    session.answerRevealedEarlyAt = null;
     session.serverNow = session.roundStartedAt;
     const runAtMs = action.serverReceivedAtMs + session.roundSeconds * 1000 + 3000;
     aggregate.deadline = { kind: "round", gameId: session.id, questionIndex: session.currentQuestionIndex, phaseKey: `round:${session.currentRevealRound}`, runAtMs };
@@ -1002,6 +1004,7 @@ export class RoomAuthorityVNext {
     session.personalRevealState = state;
     session.roundStartedAt = nowIso(action.serverReceivedAtMs);
     session.roundEndedEarlyAt = null;
+    session.answerRevealedEarlyAt = null;
     session.serverNow = session.roundStartedAt;
     aggregate.deadline = {
       kind: "round",
@@ -1182,6 +1185,7 @@ export class RoomAuthorityVNext {
       this.revealFully(session);
       session.roundStartedAt = null;
       session.roundEndedEarlyAt = null;
+      session.answerRevealedEarlyAt = null;
       aggregate.deadline = null;
       sessionChanged = true;
     }
@@ -1206,6 +1210,16 @@ export class RoomAuthorityVNext {
     const aggregate = this.requireActive();
     const session = aggregate.gameSession!;
     this.assertPresenter(action.actorId);
+    if (session.gameMode === "TEAM_BATTLE") throw new TerminalMutationError("红蓝对抗模式不能使用个人轮次结算。");
+    const expectedQuestionIndex = getInteger(action.payload.expectedQuestionIndex);
+    const expectedRevealRound = getInteger(action.payload.expectedRevealRound);
+    if (
+      (expectedQuestionIndex != null && expectedQuestionIndex !== session.currentQuestionIndex) ||
+      (expectedRevealRound != null && expectedRevealRound !== session.currentRevealRound)
+    ) {
+      throw new TerminalMutationError("题目或轮次已变化，请刷新后重试。");
+    }
+    if (!session.roundStartedAt && this.isFullyRevealed(session)) return this.publicSessionOutcome(session);
     const questionGuesserIds = this.activeQuestionGuesserIds(aggregate);
     const questionGuesserIdSet = new Set(questionGuesserIds);
     const currentEligiblePlayerIds = this.currentRoundEligiblePlayerIds(aggregate, questionGuesserIds);
@@ -1214,18 +1228,26 @@ export class RoomAuthorityVNext {
     if (deadlineArrived) this.addMissingForfeits(action);
     const hasCorrect = current.some((answer) => answer.status === "correct");
     const allCorrect = questionGuesserIds.length > 0 && currentEligiblePlayerIds.length === 0;
-    if (allCorrect || (session.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrect)) {
+    const allUsedChance = currentEligiblePlayerIds.every((playerId) => current.some((answer) => answer.playerId === playerId) || aggregate.answers.some((answer) => answer.questionIndex === session.currentQuestionIndex && answer.revealRound === session.currentRevealRound && answer.playerId === playerId));
+    const revealAnswer = action.payload.revealAnswer === true;
+    if (revealAnswer && current.some((answer) => answer.status === "pending")) {
+      throw new TerminalMutationError("仍有待判定答案，请先完成判定。");
+    }
+    if (revealAnswer && !deadlineArrived && !allUsedChance && !allCorrect) {
+      throw new TerminalMutationError("当前轮尚未结束，不能提前公布答案。");
+    }
+    if (revealAnswer || allCorrect || (session.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrect)) {
       this.revealFully(session);
     } else if (current.some((answer) => answer.status === "pending")) {
       return this.publicSessionOutcome(session);
     } else {
-      const allUsedChance = currentEligiblePlayerIds.every((playerId) => current.some((answer) => answer.playerId === playerId) || aggregate.answers.some((answer) => answer.questionIndex === session.currentQuestionIndex && answer.revealRound === session.currentRevealRound && answer.playerId === playerId));
       if (!deadlineArrived && !allUsedChance) return this.publicSessionOutcome(session);
       if (session.currentRevealRound < session.maxRevealRounds) session.currentRevealRound += 1;
       else this.revealFully(session);
     }
     session.roundStartedAt = null;
     session.roundEndedEarlyAt = null;
+    session.answerRevealedEarlyAt = revealAnswer ? nowIso(action.serverReceivedAtMs) : null;
     aggregate.deadline = null;
     return this.publicSessionOutcome(session, "phase-boundary", true);
   }
@@ -1298,6 +1320,7 @@ export class RoomAuthorityVNext {
     const allCorrect = eligible.size > 0 && [...eligible].every((id) => aggregate.questionResults.some((result) => result.questionIndex === session.currentQuestionIndex && result.playerId === id));
     session.roundStartedAt = null;
     session.roundEndedEarlyAt = null;
+    session.answerRevealedEarlyAt = null;
     aggregate.deadline = null;
     if (allCorrect) this.revealFully(session);
     const data = { gameSession: clone(session), room: null, newlyScoredPlayerIds: newly };
@@ -1671,6 +1694,7 @@ export class RoomAuthorityVNext {
     session.completedNormallyAt = completedNormally ? endedAt : null;
     session.roundStartedAt = null;
     session.roundEndedEarlyAt = null;
+    session.answerRevealedEarlyAt = null;
     aggregate.deadline = null;
     aggregate.cutoverState = "ended";
     aggregate.finalQuestionResults = clone(aggregate.questionResults);
@@ -2446,6 +2470,9 @@ export class RoomAuthorityVNext {
       parsed.gameSession.roundEndedEarlyAt = typeof parsed.gameSession.roundEndedEarlyAt === "string"
         ? parsed.gameSession.roundEndedEarlyAt
         : null;
+      parsed.gameSession.answerRevealedEarlyAt = typeof parsed.gameSession.answerRevealedEarlyAt === "string"
+        ? parsed.gameSession.answerRevealedEarlyAt
+        : null;
     }
     return parsed;
   }
@@ -2988,6 +3015,7 @@ export class RoomAuthorityVNext {
     session.revealedBlocks = [];
     session.personalRevealState = createPersonalRevealState(mode);
     session.roundEndedEarlyAt = null;
+    session.answerRevealedEarlyAt = null;
   }
 
   private publicSessionOutcome(session: GameSession, forceCheckpoint?: CheckpointTrigger, deadlineChanged = false): VNextMutationOutcome {

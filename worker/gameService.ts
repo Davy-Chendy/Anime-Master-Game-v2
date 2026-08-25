@@ -397,6 +397,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     roundScores,
     roundStartedAt: gameSession.round_started_at,
     roundEndedEarlyAt: null,
+    answerRevealedEarlyAt: null,
     serverNow: new Date().toISOString(),
     teamBattleState,
     createdAt: gameSession.created_at,
@@ -4679,6 +4680,15 @@ async function revealQuestionForReview(currentGameSession: DbGameSession) {
   return toGameSession(reviewedGameSession);
 }
 
+function isPersonalQuestionReviewing(gameSession: GameSession) {
+  const revealState = normalizePersonalRevealState(gameSession.personalRevealState);
+  return !gameSession.roundStartedAt && (
+    revealState.mode === "FREE_RECT"
+      ? revealState.fullyRevealed
+      : gameSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length
+  );
+}
+
 async function forfeitMissingRoundActions(
   currentGameSession: DbGameSession,
   currentSession: GameSession,
@@ -4736,8 +4746,9 @@ async function settleRevealRoundForNextSelection(currentGameSession: DbGameSessi
   return toGameSession(updatedGameSession);
 }
 
-async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession, receivedAtMs = Date.now()) {
+async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession, receivedAtMs = Date.now(), revealAnswer = false) {
   const currentSession = toGameSession(currentGameSession);
+  if (isPersonalQuestionReviewing(currentSession)) return currentSession;
   const currentRound = currentGameSession.current_reveal_round;
   const roundEnded = hasRoundForfeitDeadlineArrived(currentSession, receivedAtMs);
 
@@ -4759,17 +4770,27 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession, receiv
   }
 
   if (roundActionState.hasPendingAnswers) {
+    if (revealAnswer) {
+      throw new Error("仍有待判定答案，请先完成判定。");
+    }
     return currentSession;
   }
 
   const canSettleBecauseAllChancesUsed = roundActionState.allEligiblePlayersUsedChance;
 
   if (roundEnded || canSettleBecauseAllChancesUsed) {
+    if (revealAnswer) {
+      return revealQuestionForReview(currentGameSession);
+    }
     if (currentRound >= currentSession.maxRevealRounds) {
       return revealQuestionForReview(currentGameSession);
     }
 
     return settleRevealRoundForNextSelection(currentGameSession);
+  }
+
+  if (revealAnswer) {
+    throw new Error("当前轮尚未结束，不能提前公布答案。");
   }
 
   return currentSession;
@@ -5711,6 +5732,9 @@ export async function judgeBuzzerAnswer(params: {
 export async function settleBuzzerRound(params: {
   gameSessionId: string;
   presenterPlayerId: string;
+  expectedQuestionIndex?: number;
+  expectedRevealRound?: number;
+  revealAnswer?: boolean;
 } & ServerTimedActionParams) {
   assertD1Env();
 
@@ -5735,11 +5759,23 @@ export async function settleBuzzerRound(params: {
   if (currentSession.gameMode === "TEAM_BATTLE") {
     throw new Error("红蓝对抗模式不能使用普通抢答结算。");
   }
+  if (params.revealAnswer === true && isPersonalQuestionReviewing(currentSession)) {
+    return { gameSession: currentSession };
+  }
+  if (
+    (params.expectedQuestionIndex != null && params.expectedQuestionIndex !== currentSession.currentQuestionIndex) ||
+    (params.expectedRevealRound != null && params.expectedRevealRound !== currentSession.currentRevealRound)
+  ) {
+    throw new Error("题目或轮次已变化，请刷新后重试。");
+  }
 
-  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession, getServerReceivedAtMs(params));
+  const serverReceivedAtMs = getServerReceivedAtMs(params);
+  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession, serverReceivedAtMs, params.revealAnswer === true);
 
   return {
-    gameSession: nextGameSession,
+    gameSession: params.revealAnswer === true
+      ? { ...nextGameSession, answerRevealedEarlyAt: new Date(serverReceivedAtMs).toISOString() }
+      : nextGameSession,
   };
 }
 

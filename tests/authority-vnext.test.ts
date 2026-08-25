@@ -1499,13 +1499,15 @@ test("restore treats an older active-game snapshot without early-end metadata as
   authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), Date.now());
   await authority.forceCheckpoint("phase-boundary");
   const row = state.storage.sql.db.prepare("SELECT state_json FROM authority_vnext_active_game WHERE id=1").get() as { state_json: string };
-  const stored = JSON.parse(row.state_json) as { gameSession: { roundEndedEarlyAt?: string | null } };
+  const stored = JSON.parse(row.state_json) as { gameSession: { roundEndedEarlyAt?: string | null; answerRevealedEarlyAt?: string | null } };
   delete stored.gameSession.roundEndedEarlyAt;
+  delete stored.gameSession.answerRevealedEarlyAt;
   state.storage.sql.db.prepare("UPDATE authority_vnext_active_game SET state_json=? WHERE id=1").run(JSON.stringify(stored));
 
   const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
   await restored.restoreFromStorage();
   assert.equal(restored.getSnapshot().gameSession.roundEndedEarlyAt, null);
+  assert.equal(restored.getSnapshot().gameSession.answerRevealedEarlyAt, null);
   assert.ok(restored.getDeadline());
 });
 
@@ -1651,6 +1653,131 @@ test("ROUND_REVEAL settlement returns to block selection before the next round",
   const reopened = authority.handleMutation(host, envelope("host", 4, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [2] }), now + 3012);
   assert.equal(reopened.error, undefined);
   assert.ok(authority.getAggregate()?.gameSession?.roundStartedAt);
+});
+
+test("presenter can reveal the answer instead of advancing in all personal modes", async () => {
+  for (const mode of ["ROUND_REVEAL", "BUZZER_FIRST_CORRECT", "BUZZER_RANKED"] as const) {
+    const { state, authority } = createAuthority(2);
+    authority.getAggregate()!.gameSession!.gameMode = mode;
+    const host = socketFor(state, "host");
+    const now = Date.now();
+    authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+
+    const mutation = mode === "ROUND_REVEAL" ? "submitAnswer" : "submitBuzzerAnswer";
+    const p0 = authority.handleMutation(socketFor(state, "p0"), envelope("p0", 1, mutation, { playerId: "p0", answerText: "first" }), now + 10);
+    const p1 = authority.handleMutation(socketFor(state, "p1"), envelope("p1", 1, mutation, { playerId: "p1", answerText: "second" }), now + 11);
+    const p0AnswerId = (p0.data as { id: string; buzzerAnswer?: { id: string } }).buzzerAnswer?.id ?? (p0.data as { id: string }).id;
+    const p1AnswerId = (p1.data as { id: string; buzzerAnswer?: { id: string } }).buzzerAnswer?.id ?? (p1.data as { id: string }).id;
+    authority.handleMutation(host, envelope("host", 2, "setAnswerJudgements", {
+      presenterPlayerId: "host",
+      judgements: [
+        { buzzerAnswerId: p0AnswerId, isCorrect: mode !== "BUZZER_FIRST_CORRECT" },
+        { buzzerAnswerId: p1AnswerId, isCorrect: false },
+      ],
+    }), now + 3_012);
+
+    const scoresBeforeReveal = JSON.stringify(authority.getAggregate()?.scores);
+    const revealed = authority.handleMutation(host, envelope("host", 3, "settleBuzzerRound", {
+      presenterPlayerId: "host",
+      expectedQuestionIndex: 0,
+      expectedRevealRound: 1,
+      revealAnswer: true,
+    }), now + 3_013);
+
+    assert.equal(revealed.error, undefined, mode);
+    assert.equal(revealed.forceCheckpoint, "phase-boundary", mode);
+    assert.equal(revealed.deadlineChanged, true, mode);
+    assert.equal(authority.getAggregate()?.gameSession?.currentRevealRound, 1, mode);
+    assert.equal(authority.getAggregate()?.gameSession?.roundStartedAt, null, mode);
+    assert.equal(authority.getAggregate()?.gameSession?.revealedBlocks.length, 45, mode);
+    assert.equal(authority.getAggregate()?.gameSession?.answerRevealedEarlyAt, new Date(now + 3_013).toISOString(), mode);
+    assert.equal(authority.getDeadline(), null, mode);
+    assert.equal(JSON.stringify(authority.getAggregate()?.scores), scoresBeforeReveal, mode);
+
+    if (mode === "BUZZER_RANKED") {
+      await authority.forceCheckpoint("phase-boundary");
+      const restored = new RoomAuthorityVNext(state as unknown as DurableObjectState, fakeD1);
+      await restored.restoreFromStorage();
+      assert.equal(restored.getAggregate()?.gameSession?.currentRevealRound, 1);
+      assert.equal(restored.getAggregate()?.gameSession?.roundStartedAt, null);
+      assert.equal(restored.getAggregate()?.gameSession?.revealedBlocks.length, 45);
+      assert.equal(restored.getAggregate()?.gameSession?.answerRevealedEarlyAt, new Date(now + 3_013).toISOString());
+      assert.equal(restored.getDeadline(), null);
+    }
+  }
+});
+
+test("answer reveal rejects pending and stale rounds while concurrent settlement stays single-step", () => {
+  const prepareSettledRound = () => {
+    const created = createAuthority(1);
+    created.authority.getAggregate()!.gameSession!.gameMode = "BUZZER_RANKED";
+    const host = socketFor(created.state, "host");
+    const now = Date.now();
+    created.authority.handleMutation(host, envelope("host", 1, "confirmRevealBlocks", { presenterPlayerId: "host", selectedBlocks: [1] }), now);
+    created.authority.handleMutation(socketFor(created.state, "p0"), envelope("p0", 1, "submitBuzzerAnswer", { playerId: "p0", answerText: "wrong" }), now + 10);
+    return { ...created, host, now };
+  };
+
+  const pending = prepareSettledRound();
+  const pendingReveal = pending.authority.handleMutation(pending.host, envelope("host", 2, "settleBuzzerRound", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+    expectedRevealRound: 1,
+    revealAnswer: true,
+  }), pending.now + 3_011);
+  assert.equal(pendingReveal.terminal, true);
+  assert.match(pendingReveal.error ?? "", /待判定答案/);
+  assert.equal(pending.authority.getAggregate()?.gameSession?.revealedBlocks.length, 1);
+
+  const advanceFirst = prepareSettledRound();
+  advanceFirst.authority.handleMutation(advanceFirst.host, envelope("host", 2, "judgeBuzzerAnswer", {
+    presenterPlayerId: "host",
+    buzzerAnswerId: "p0:1:submitBuzzerAnswer",
+    isCorrect: false,
+  }), advanceFirst.now + 3_011);
+  advanceFirst.authority.handleMutation(advanceFirst.host, envelope("host", 3, "settleBuzzerRound", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+    expectedRevealRound: 1,
+  }), advanceFirst.now + 3_012);
+  const staleReveal = advanceFirst.authority.handleMutation(advanceFirst.host, envelope("host", 4, "settleBuzzerRound", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+    expectedRevealRound: 1,
+    revealAnswer: true,
+  }), advanceFirst.now + 3_013);
+  assert.equal(staleReveal.terminal, true);
+  assert.equal(advanceFirst.authority.getAggregate()?.gameSession?.currentRevealRound, 2);
+  assert.equal(advanceFirst.authority.getAggregate()?.gameSession?.revealedBlocks.length, 1);
+
+  const revealFirst = prepareSettledRound();
+  revealFirst.authority.handleMutation(revealFirst.host, envelope("host", 2, "judgeBuzzerAnswer", {
+    presenterPlayerId: "host",
+    buzzerAnswerId: "p0:1:submitBuzzerAnswer",
+    isCorrect: false,
+  }), revealFirst.now + 3_011);
+  revealFirst.authority.handleMutation(revealFirst.host, envelope("host", 3, "settleBuzzerRound", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+    expectedRevealRound: 1,
+    revealAnswer: true,
+  }), revealFirst.now + 3_012);
+  const delayedAdvance = revealFirst.authority.handleMutation(revealFirst.host, envelope("host", 4, "settleBuzzerRound", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+    expectedRevealRound: 1,
+  }), revealFirst.now + 3_013);
+  assert.equal(delayedAdvance.error, undefined);
+  assert.equal(revealFirst.authority.getAggregate()?.gameSession?.currentRevealRound, 1);
+  assert.equal(revealFirst.authority.getAggregate()?.gameSession?.revealedBlocks.length, 45);
+  assert.equal(revealFirst.authority.getAggregate()?.gameSession?.answerRevealedEarlyAt, new Date(revealFirst.now + 3_012).toISOString());
+
+  revealFirst.authority.handleMutation(revealFirst.host, envelope("host", 5, "advanceReviewedQuestion", {
+    presenterPlayerId: "host",
+    expectedQuestionIndex: 0,
+  }), revealFirst.now + 3_014);
+  assert.equal(revealFirst.authority.getAggregate()?.gameSession?.status, "GAME_RESULT");
+  assert.equal(revealFirst.authority.getAggregate()?.gameSession?.answerRevealedEarlyAt, null);
 });
 
 test("advance requires review while explicit skip still ends the current question", () => {
