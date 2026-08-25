@@ -6,6 +6,10 @@
 
 本项目定位为朋友间使用的轻量游戏，设计和代码审查默认不考虑玩家主动冒充身份、篡改客户端或抓取原始 WebSocket 消息等恶意行为，优先关注正常操作下的游戏正确性、并发一致性和性能。
 
+### Cloudflare API 查询
+
+- `.env.cloudflare-api.local` 保存了具备大部分读取权限的 Cloudflare API Token。需要查询 Cloudflare 数据或记录时，可加载该文件中的凭据直接调用 API；不要输出或提交 Token。
+
 ### 架构原则
 
 - 房间内实时状态以 Room Durable Object 为协调中心。房间、游戏阶段、倒计时截止、自动结算、快照广播等关键状态流转，应尽量由 Room DO 单点协调。

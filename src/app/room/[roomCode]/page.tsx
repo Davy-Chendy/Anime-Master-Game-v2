@@ -1025,26 +1025,50 @@ function GameSettingsPanel({
         </div>
       </div>
 
-      <details className="border-t border-[var(--line)] px-4 py-3">
+      <div className="border-t border-[var(--line)] px-4 py-3">
+        <p className="mb-3 text-sm font-semibold text-slate-900">设置</p>
+        {!isTeamBattleMode ? (
+          <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+            <span>
+              <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-900">
+                手动框选出题
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold leading-4 tracking-wide text-amber-800 ring-1 ring-inset ring-amber-200">
+                  NEW
+                </span>
+              </span>
+              <span className="mt-1 block text-xs text-[var(--muted)]">不受格子限制，可自由框选要展示的区域</span>
+            </span>
+            <input
+              checked={settings.personalRevealMode === "FREE_RECT"}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+              disabled={!canEdit}
+              type="checkbox"
+              onChange={(event) => onChange({ ...settings, personalRevealMode: event.target.checked ? "FREE_RECT" : "GRID" })}
+            />
+          </label>
+        ) : (
+          <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
+            <span>
+              <span className="block text-sm font-medium text-slate-900">出题人禁用格子</span>
+              <span className="mt-1 block text-xs leading-5 text-[var(--muted)]">每题开始前增加禁选阶段；默认关闭。</span>
+            </span>
+            <input
+              checked={settings.teamPresenterBlockEnabled}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
+              disabled={!canEdit}
+              type="checkbox"
+              onChange={(event) => onChange({ ...settings, teamPresenterBlockEnabled: event.target.checked })}
+            />
+          </label>
+        )}
+      </div>
+
+      <details className="px-4 py-3">
         <summary className="cursor-pointer text-sm font-semibold text-slate-900">高级设置</summary>
         {copy.settingsNote ? <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{copy.settingsNote}</p> : null}
 
         {!isTeamBattleMode ? (
-          <div className="mt-4 space-y-3">
-            <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
-              <span>
-                <span className="block text-sm font-medium text-slate-900">手动框选出题</span>
-                <span className="mt-1 block text-xs text-[var(--muted)]">不受格子限制，可自由框选要展示的区域</span>
-              </span>
-              <input
-                checked={settings.personalRevealMode === "FREE_RECT"}
-                className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
-                disabled={!canEdit}
-                type="checkbox"
-                onChange={(event) => onChange({ ...settings, personalRevealMode: event.target.checked ? "FREE_RECT" : "GRID" })}
-              />
-            </label>
-            <div className="grid gap-3 sm:grid-cols-2">
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="mb-2 block text-sm font-medium text-slate-900">最多轮数</span>
               <input
@@ -1071,7 +1095,6 @@ function GameSettingsPanel({
                 }
               />
             </label>
-            </div>
           </div>
         ) : null}
 
@@ -1160,19 +1183,6 @@ function GameSettingsPanel({
                 />
               </label>
             </div>
-            <label className="flex items-start justify-between gap-4 rounded-md border border-[var(--line)] bg-white px-4 py-3">
-              <span>
-                <span className="block text-sm font-medium text-slate-900">出题人禁用格子</span>
-                <span className="mt-1 block text-xs leading-5 text-[var(--muted)]">每题开始前增加禁选阶段；默认关闭。</span>
-              </span>
-              <input
-                checked={settings.teamPresenterBlockEnabled}
-                className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]"
-                disabled={!canEdit}
-                type="checkbox"
-                onChange={(event) => onChange({ ...settings, teamPresenterBlockEnabled: event.target.checked })}
-              />
-            </label>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
               猜对队伍得 1 分；投票截止前可反复修改。
             </div>
