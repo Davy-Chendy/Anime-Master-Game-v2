@@ -4575,7 +4575,10 @@ export function ImageRevealGame({
   const imagePanel = (
     <div className="bg-white">
       <div
-        className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
+        className={[
+          "relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden bg-black",
+          shouldShowQuestionLabel ? "rounded-t-md" : "rounded-md",
+        ].join(" ")}
         ref={setImageDisplayRef}
         style={{
           aspectRatio: imageAspectRatio,
@@ -4760,13 +4763,13 @@ export function ImageRevealGame({
   );
 
   const questionLabelPanel = shouldShowQuestionLabel ? (
-    <div className="mx-auto flex h-[46px] max-w-[1280px] items-center rounded-md border border-[var(--line)] bg-slate-50 px-4 text-base">
+    <div className="mx-auto flex h-[46px] max-w-[1280px] items-center rounded-b-md border border-[var(--line)] bg-slate-50 px-4 text-base">
       {canUseLocalQuestionLabelDraft && !isQuestionReviewing && !currentQuestionLabel ? (
         <label className="flex w-full min-w-0 items-center gap-2">
           <span className="shrink-0 font-semibold text-slate-950">正确答案：</span>
           <input
             autoComplete="off"
-            className="h-10 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-white px-3 text-base text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+            className="h-9 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-white px-3 text-base text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
             maxLength={MAX_QUESTION_LABEL_DRAFT_LENGTH}
             placeholder="可提前填写"
             value={labelInput}
@@ -5578,11 +5581,11 @@ export function ImageRevealGame({
         </p>
       ) : null}
 
-      <div className={playingGridClass}>
+      <div className={`${playingGridClass} lg:gap-y-0`}>
         {scorePanel}
         <div className="order-2 min-w-0 lg:col-span-4 lg:col-start-2 lg:row-start-1">{imagePanel}</div>
         {questionLabelPanel ? (
-          <div className="order-3 min-w-0 lg:col-span-4 lg:col-start-2 lg:row-start-2">{questionLabelPanel}</div>
+          <div className="order-3 -mt-4 min-w-0 lg:col-span-4 lg:col-start-2 lg:row-start-2 lg:mt-0">{questionLabelPanel}</div>
         ) : null}
         {actionPanel}
       </div>
