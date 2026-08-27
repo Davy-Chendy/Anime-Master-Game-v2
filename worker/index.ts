@@ -26,6 +26,7 @@ import {
   R2_IMAGE_UPLOAD_MAX_BYTES,
   R2_IMAGE_UPLOAD_TOO_LARGE_MESSAGE,
 } from "../src/lib/r2UploadPolicy";
+import { normalizePersonalRevealState } from "../src/lib/freeRevealGeometry";
 
 import type {
   Answer,
@@ -118,9 +119,12 @@ type DeadlineKind = "auto-forfeit" | "team-battle-vote";
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 
 function isQuestionReviewingSession(session: GameSession) {
-  return session.gameMode === "TEAM_BATTLE"
-    ? session.teamBattleState?.phase === "REVIEW"
-    : !session.roundStartedAt && session.revealedBlocks.length >= 45;
+  if (session.gameMode === "TEAM_BATTLE") return session.teamBattleState?.phase === "REVIEW";
+  if (session.roundStartedAt) return false;
+  const revealState = normalizePersonalRevealState(session.personalRevealState);
+  return revealState.mode === "FREE_RECT"
+    ? revealState.fullyRevealed
+    : session.revealedBlocks.length >= 45;
 }
 
 export function projectSpectatorRoundSnapshot(snapshot: RoundSnapshot, playerAnswersEnabled: boolean) {

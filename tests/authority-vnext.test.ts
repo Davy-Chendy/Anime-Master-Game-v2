@@ -262,6 +262,40 @@ test("restricted spectator snapshots redact labels and answer text until review"
   assert.equal(projectSpectatorBootstrapSnapshot({ ...bootstrapSnapshot, gameSession: reviewSnapshot.gameSession, roundSnapshot: reviewSnapshot }, false, false).questions[0]?.labelText, "正确答案");
 });
 
+test("restricted spectator snapshots reveal labels and answer text during FREE_RECT review", () => {
+  const { authority } = createAuthority(2);
+  const aggregate = authority.getAggregate()!;
+  aggregate.players[2]!.role = "SPECTATOR";
+  aggregate.room!.spectatorQuestionPreviewEnabled = false;
+  aggregate.room!.spectatorPlayerAnswersEnabled = false;
+  aggregate.questions[0]!.labelText = "自由框选正确答案";
+  aggregate.gameSession!.revealedBlocks = [];
+  aggregate.gameSession!.roundStartedAt = new Date(1_000).toISOString();
+  aggregate.gameSession!.personalRevealState = {
+    mode: "FREE_RECT",
+    regions: [],
+    fullyRevealed: false,
+  };
+  aggregate.answers.push({
+    id: "answer-free-rect", gameSessionId: "g1", questionIndex: 0, revealRound: 1,
+    playerId: "p0", answerText: "自由框选玩家回答", submittedAt: new Date(2_000).toISOString(),
+  });
+
+  const activeSnapshot = authority.query("getGameBootstrapSnapshot", ["g1"]) as GameBootstrapSnapshot;
+  const activeProjection = projectSpectatorBootstrapSnapshot(activeSnapshot, false, false);
+  assert.equal(activeProjection.questions[0]?.labelText, null);
+  assert.equal(activeProjection.roundSnapshot.answers[0]?.answerText, "");
+
+  aggregate.gameSession!.roundStartedAt = null;
+  aggregate.gameSession!.personalRevealState.fullyRevealed = true;
+  const reviewSnapshot = authority.query("getGameBootstrapSnapshot", ["g1"]) as GameBootstrapSnapshot;
+  const reviewProjection = projectSpectatorBootstrapSnapshot(reviewSnapshot, false, false);
+
+  assert.equal(reviewProjection.questions[0]?.labelText, "自由框选正确答案");
+  assert.equal(reviewProjection.roundSnapshot.answers[0]?.answerText, "自由框选玩家回答");
+  assert.equal(projectSpectatorRoundSnapshot(authority.getSnapshot(), false).answers[0]?.answerText, "自由框选玩家回答");
+});
+
 test("answer viewer recipients honor the spectator setting without affecting qualified players", () => {
   const { authority } = createAuthority(2);
   const aggregate = authority.getAggregate()!;

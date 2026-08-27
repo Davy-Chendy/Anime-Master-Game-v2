@@ -36,6 +36,15 @@ import {
 } from "@/lib/cloudflareRooms";
 import { getTeamBattleViewerAccess } from "@/lib/teamBattleView";
 import { GAME_MODE_LABELS } from "@/lib/gameModeLabels";
+import {
+  clearQuestionLabelDraft,
+  getPlayerAnswerLabelDraft,
+  getQuestionLabelDraftStorage,
+  getQuestionLabelDraftStorageKey,
+  MAX_QUESTION_LABEL_DRAFT_LENGTH,
+  readQuestionLabelDraft,
+  writeQuestionLabelDraft,
+} from "@/lib/questionLabelDraft";
 import { MAX_FREE_REVEAL_REGIONS_PER_ROUND } from "@/types/game";
 import type {
   Answer,
@@ -2292,6 +2301,10 @@ export function ImageRevealGame({
   const previousQuestion = previousQuestionIndex == null ? null : questions[previousQuestionIndex] ?? null;
   const reviewedQuestion = reviewedQuestionIndex == null ? null : questions[reviewedQuestionIndex] ?? null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
+  const canUseLocalQuestionLabelDraft = isPresenter && room.preparedQuestionSource === "MANUAL";
+  const questionLabelDraftStorageKey = gameSession && currentQuestion
+    ? getQuestionLabelDraftStorageKey(gameSession.id, currentQuestion.id)
+    : null;
   const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
   const personalRevealState = normalizePersonalRevealState(gameSession?.personalRevealState);
   const isFreeRevealMode = gameSession?.gameMode !== "TEAM_BATTLE" && personalRevealState.mode === "FREE_RECT";
@@ -3418,10 +3431,19 @@ export function ImageRevealGame({
   }, [canHoldRevealPreview]);
 
   useEffect(() => {
-    setLabelInput("");
     setSelectedLabelAnswerId(null);
     setIsLabelModalOpen(false);
-  }, [currentQuestion?.id, currentQuestionLabel]);
+
+    if (!canUseLocalQuestionLabelDraft || !questionLabelDraftStorageKey || currentQuestionLabel) {
+      if (questionLabelDraftStorageKey && currentQuestionLabel) {
+        clearQuestionLabelDraft(getQuestionLabelDraftStorage(), questionLabelDraftStorageKey);
+      }
+      setLabelInput("");
+      return;
+    }
+
+    setLabelInput(readQuestionLabelDraft(getQuestionLabelDraftStorage(), questionLabelDraftStorageKey));
+  }, [canUseLocalQuestionLabelDraft, currentQuestionLabel, questionLabelDraftStorageKey]);
 
   useEffect(() => {
     setIsLabelPromptDisabledForGame(false);
@@ -3543,6 +3565,9 @@ export function ImageRevealGame({
       setQuestions((currentQuestions) =>
         currentQuestions.map((question) => (question.id === updatedQuestion.id ? updatedQuestion : question)),
       );
+      if (questionLabelDraftStorageKey) {
+        clearQuestionLabelDraft(getQuestionLabelDraftStorage(), questionLabelDraftStorageKey);
+      }
       setLabelInput("");
       setSelectedLabelAnswerId(null);
       setIsLabelModalOpen(false);
@@ -3577,13 +3602,24 @@ export function ImageRevealGame({
   }
 
   function handleSelectLabelAnswer(answerId: string) {
+    const selectedAnswerText = getPlayerAnswerLabelDraft(labelAnswers, answerId);
+    if (selectedAnswerText === null) {
+      return;
+    }
+
     setSelectedLabelAnswerId(answerId);
-    setLabelInput("");
+    setLabelInput(selectedAnswerText);
+    if (questionLabelDraftStorageKey) {
+      writeQuestionLabelDraft(getQuestionLabelDraftStorage(), questionLabelDraftStorageKey, selectedAnswerText);
+    }
   }
 
   function handleLabelInputChange(value: string) {
     setLabelInput(value);
     setSelectedLabelAnswerId(null);
+    if (questionLabelDraftStorageKey) {
+      writeQuestionLabelDraft(getQuestionLabelDraftStorage(), questionLabelDraftStorageKey, value);
+    }
   }
 
   function handleDisableLabelPromptForGame() {
@@ -4722,10 +4758,26 @@ export function ImageRevealGame({
       </div>
       {shouldShowQuestionLabel ? (
         <div className="mx-auto mt-3 max-w-[1280px] rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm">
-          <span className="font-semibold text-slate-950">正确答案：</span>
-          <span className={currentQuestionLabel ? "text-slate-900" : "text-[var(--muted)]"}>
-            {currentQuestionLabel || "未填写"}
-          </span>
+          {canUseLocalQuestionLabelDraft && !isQuestionReviewing && !currentQuestionLabel ? (
+            <label className="flex items-center gap-2">
+              <span className="shrink-0 font-semibold text-slate-950">正确答案：</span>
+              <input
+                autoComplete="off"
+                className="h-10 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-white px-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                maxLength={MAX_QUESTION_LABEL_DRAFT_LENGTH}
+                placeholder="可提前填写"
+                value={labelInput}
+                onChange={(event) => handleLabelInputChange(event.target.value)}
+              />
+            </label>
+          ) : (
+            <>
+              <span className="font-semibold text-slate-950">正确答案：</span>
+              <span className={currentQuestionLabel ? "text-slate-900" : "text-[var(--muted)]"}>
+                {currentQuestionLabel || "未填写"}
+              </span>
+            </>
+          )}
         </div>
       ) : null}
     </div>
@@ -5771,7 +5823,7 @@ export function ImageRevealGame({
                 <span className="mb-2 block text-sm font-semibold text-slate-950">手动输入答案</span>
                 <input
                   className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  maxLength={80}
+                  maxLength={MAX_QUESTION_LABEL_DRAFT_LENGTH}
                   placeholder="例如：动画名称"
                   value={labelInput}
                   onChange={(event) => handleLabelInputChange(event.target.value)}
