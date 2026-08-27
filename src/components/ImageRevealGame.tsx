@@ -4582,7 +4582,7 @@ export function ImageRevealGame({
         ref={setImageDisplayRef}
         style={{
           aspectRatio: imageAspectRatio,
-          maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
+          maxWidth: `min(1280px, calc(78vh * ${imageAspectRatio}))`,
         }}
       >
         {isPresenter ? (
