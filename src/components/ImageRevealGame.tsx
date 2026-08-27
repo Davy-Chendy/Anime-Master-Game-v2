@@ -4409,7 +4409,7 @@ export function ImageRevealGame({
 
   const scorePanel = (
     <div
-      className="flex flex-col rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)]"
+      className="order-1 flex flex-col rounded-md border border-[var(--line)] bg-white p-3 lg:col-start-1 lg:row-start-1 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)]"
       style={sidePanelHeightStyle}
     >
       <div className="mb-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
@@ -4756,32 +4756,36 @@ export function ImageRevealGame({
           />
         ) : null}
       </div>
-      {shouldShowQuestionLabel ? (
-        <div className="mx-auto mt-3 max-w-[1280px] rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm">
-          {canUseLocalQuestionLabelDraft && !isQuestionReviewing && !currentQuestionLabel ? (
-            <label className="flex items-center gap-2">
-              <span className="shrink-0 font-semibold text-slate-950">正确答案：</span>
-              <input
-                autoComplete="off"
-                className="h-10 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-white px-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                maxLength={MAX_QUESTION_LABEL_DRAFT_LENGTH}
-                placeholder="可提前填写"
-                value={labelInput}
-                onChange={(event) => handleLabelInputChange(event.target.value)}
-              />
-            </label>
-          ) : (
-            <>
-              <span className="font-semibold text-slate-950">正确答案：</span>
-              <span className={currentQuestionLabel ? "text-slate-900" : "text-[var(--muted)]"}>
-                {currentQuestionLabel || "未填写"}
-              </span>
-            </>
-          )}
-        </div>
-      ) : null}
     </div>
   );
+
+  const questionLabelPanel = shouldShowQuestionLabel ? (
+    <div className="mx-auto flex h-[46px] max-w-[1280px] items-center rounded-md border border-[var(--line)] bg-slate-50 px-4 text-base">
+      {canUseLocalQuestionLabelDraft && !isQuestionReviewing && !currentQuestionLabel ? (
+        <label className="flex w-full min-w-0 items-center gap-2">
+          <span className="shrink-0 font-semibold text-slate-950">正确答案：</span>
+          <input
+            autoComplete="off"
+            className="h-10 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-white px-3 text-base text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+            maxLength={MAX_QUESTION_LABEL_DRAFT_LENGTH}
+            placeholder="可提前填写"
+            value={labelInput}
+            onChange={(event) => handleLabelInputChange(event.target.value)}
+          />
+        </label>
+      ) : (
+        <div className="flex min-w-0 items-center">
+          <span className="shrink-0 font-semibold text-slate-950">正确答案：</span>
+          <span
+            className={currentQuestionLabel ? "min-w-0 truncate text-slate-900" : "min-w-0 truncate text-[var(--muted)]"}
+            title={currentQuestionLabel || undefined}
+          >
+            {currentQuestionLabel || "未填写"}
+          </span>
+        </div>
+      )}
+    </div>
+  ) : null;
 
   const mobileSpectatorOriginalButton =
     isSpectator && canPreviewSpectatorOriginal && !isQuestionReviewing ? (
@@ -4797,7 +4801,7 @@ export function ImageRevealGame({
 
   const actionPanel = (
     <div
-      className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
+      className="order-4 rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:col-start-6 lg:row-start-1 lg:sticky lg:top-4 lg:h-[var(--image-display-height)] lg:max-h-[var(--image-display-height)] lg:overflow-y-auto"
       style={sidePanelHeightStyle}
     >
       {isSpectator && !isTeamBattleMode ? (
@@ -5576,7 +5580,10 @@ export function ImageRevealGame({
 
       <div className={playingGridClass}>
         {scorePanel}
-        <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
+        <div className="order-2 min-w-0 lg:col-span-4 lg:col-start-2 lg:row-start-1">{imagePanel}</div>
+        {questionLabelPanel ? (
+          <div className="order-3 min-w-0 lg:col-span-4 lg:col-start-2 lg:row-start-2">{questionLabelPanel}</div>
+        ) : null}
         {actionPanel}
       </div>
 
