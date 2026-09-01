@@ -148,19 +148,25 @@ export function projectSpectatorBootstrapSnapshot(
   questionPreviewEnabled: boolean,
   playerAnswersEnabled: boolean,
 ) {
-  if (isQuestionReviewingSession(snapshot.gameSession)) return snapshot;
+  const currentQuestionIndex = snapshot.gameSession.currentQuestionIndex;
+  const currentQuestionReviewing = isQuestionReviewingSession(snapshot.gameSession);
   return {
     ...snapshot,
     questions: questionPreviewEnabled
       ? snapshot.questions
-      : snapshot.questions.map((question) => ({
-          ...question,
-          labelText: null,
-          labelSource: null,
-          labelSourceAnswerId: null,
-          labelUpdatedByPlayerId: null,
-          labelUpdatedAt: null,
-        })),
+      : snapshot.questions.map((question) =>
+          question.orderIndex < currentQuestionIndex
+          || (question.orderIndex === currentQuestionIndex && currentQuestionReviewing)
+            ? question
+            : {
+                ...question,
+                labelText: null,
+                labelSource: null,
+                labelSourceAnswerId: null,
+                labelUpdatedByPlayerId: null,
+                labelUpdatedAt: null,
+              },
+        ),
     roundSnapshot: projectSpectatorRoundSnapshot(snapshot.roundSnapshot, playerAnswersEnabled),
   };
 }

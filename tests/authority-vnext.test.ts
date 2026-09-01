@@ -262,13 +262,14 @@ test("restricted spectator snapshots redact labels and answer text until review"
   assert.equal(projectSpectatorBootstrapSnapshot({ ...bootstrapSnapshot, gameSession: reviewSnapshot.gameSession, roundSnapshot: reviewSnapshot }, false, false).questions[0]?.labelText, "正确答案");
 });
 
-test("restricted spectator snapshots reveal labels and answer text during FREE_RECT review", () => {
-  const { authority } = createAuthority(2);
+test("restricted spectator bootstrap preserves reviewed labels across FREE_RECT catch-up", () => {
+  const { authority } = createAuthority(2, fakeD1, 2);
   const aggregate = authority.getAggregate()!;
   aggregate.players[2]!.role = "SPECTATOR";
   aggregate.room!.spectatorQuestionPreviewEnabled = false;
   aggregate.room!.spectatorPlayerAnswersEnabled = false;
   aggregate.questions[0]!.labelText = "自由框选正确答案";
+  aggregate.questions[1]!.labelText = "第二题正确答案";
   aggregate.gameSession!.revealedBlocks = [];
   aggregate.gameSession!.roundStartedAt = new Date(1_000).toISOString();
   aggregate.gameSession!.personalRevealState = {
@@ -284,6 +285,7 @@ test("restricted spectator snapshots reveal labels and answer text during FREE_R
   const activeSnapshot = authority.query("getGameBootstrapSnapshot", ["g1"]) as GameBootstrapSnapshot;
   const activeProjection = projectSpectatorBootstrapSnapshot(activeSnapshot, false, false);
   assert.equal(activeProjection.questions[0]?.labelText, null);
+  assert.equal(activeProjection.questions[1]?.labelText, null);
   assert.equal(activeProjection.roundSnapshot.answers[0]?.answerText, "");
 
   aggregate.gameSession!.roundStartedAt = null;
@@ -292,8 +294,24 @@ test("restricted spectator snapshots reveal labels and answer text during FREE_R
   const reviewProjection = projectSpectatorBootstrapSnapshot(reviewSnapshot, false, false);
 
   assert.equal(reviewProjection.questions[0]?.labelText, "自由框选正确答案");
+  assert.equal(reviewProjection.questions[1]?.labelText, null);
   assert.equal(reviewProjection.roundSnapshot.answers[0]?.answerText, "自由框选玩家回答");
   assert.equal(projectSpectatorRoundSnapshot(authority.getSnapshot(), false).answers[0]?.answerText, "自由框选玩家回答");
+
+  aggregate.gameSession!.currentQuestionIndex = 1;
+  aggregate.gameSession!.roundStartedAt = new Date(3_000).toISOString();
+  aggregate.gameSession!.personalRevealState.fullyRevealed = false;
+  const catchUpSnapshot = authority.query("getGameBootstrapSnapshot", ["g1"]) as GameBootstrapSnapshot;
+  const catchUpProjection = projectSpectatorBootstrapSnapshot(catchUpSnapshot, false, false);
+  assert.equal(catchUpProjection.questions[0]?.labelText, "自由框选正确答案");
+  assert.equal(catchUpProjection.questions[1]?.labelText, null);
+
+  aggregate.gameSession!.roundStartedAt = null;
+  aggregate.gameSession!.personalRevealState.fullyRevealed = true;
+  const secondReviewSnapshot = authority.query("getGameBootstrapSnapshot", ["g1"]) as GameBootstrapSnapshot;
+  const secondReviewProjection = projectSpectatorBootstrapSnapshot(secondReviewSnapshot, false, false);
+  assert.equal(secondReviewProjection.questions[0]?.labelText, "自由框选正确答案");
+  assert.equal(secondReviewProjection.questions[1]?.labelText, "第二题正确答案");
 });
 
 test("answer viewer recipients honor the spectator setting without affecting qualified players", () => {
