@@ -5710,7 +5710,8 @@ export function ImageRevealGame({
                 style={{
                   aspectRatio: imageAspectRatio,
                   maxHeight: "86vh",
-                  maxWidth: isPortraitImage ? `min(80vw, calc(86vh * ${imageAspectRatio}))` : "min(92vw, 1280px)",
+                  // Keep the image and reveal mask in the same coordinate space when height is capped.
+                  maxWidth: `min(${isPortraitImage ? "80vw" : "92vw, 1280px"}, calc(86vh * ${imageAspectRatio}))`,
                 }}
                 onClick={(event) => event.stopPropagation()}
               >
