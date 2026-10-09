@@ -20,6 +20,8 @@ const OTHER_GAME_URL = "https://decrypto.monight.dpdns.org/";
 const FRIEND_LINKS = [
   { label: "二次元笑传之猜猜呗", href: "https://ccb.baka.website/" },
   { label: "BakaGame", href: "https://game.baka.website/" },
+  { label: "目标是Bangumi大师", href: "https://bangumi-master.logicry.cc/" },
+  { label: "动画代号", href: "https://anicode.logicry.cc/" },
 ] as const;
 const PLAYER_CAPACITY_FULL_ERROR_CODE = "PLAYER_CAPACITY_FULL";
 const TEAM_SELECTION_REQUIRED_ERROR_CODE = "TEAM_SELECTION_REQUIRED";
